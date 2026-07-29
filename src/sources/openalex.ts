@@ -2,6 +2,14 @@ import { z } from "zod";
 
 import { SourceHttpClient } from "./http-client";
 import {
+  normalizeArxivIdentifier,
+  normalizeDoi,
+} from "./identifiers";
+import {
+  assertSafeOutboundUrl,
+  type OutboundUrlPolicy,
+} from "./outbound-url";
+import {
   RawResearchCandidateSchema,
   ResearchSourceRecordSchema,
   type RawResearchCandidate,
@@ -47,6 +55,11 @@ const OpenAlexWorkSchema = z.object({
 const OpenAlexResponseSchema = z.object({
   results: z.array(OpenAlexWorkSchema),
 });
+const OPENALEX_POLICY: OutboundUrlPolicy = {
+  allowedHosts: ["api.openalex.org"],
+  allowedPorts: [""],
+  allowedPathPrefixes: ["/works"],
+};
 
 function chunks<T>(values: readonly T[], size: number): T[][] {
   const result: T[][] = [];
@@ -62,7 +75,16 @@ function unique(values: readonly string[]): string[] {
 
 function doiFromExternalIds(externalIds: readonly string[]): string | null {
   const doi = externalIds.find((id) => id.startsWith("DOI:"));
-  return doi?.slice("DOI:".length).toLowerCase() ?? null;
+  return doi === undefined ? null : normalizeDoi(doi);
+}
+
+function arxivFromExternalIds(
+  externalIds: readonly string[],
+): string | null {
+  const arxiv = externalIds.find((id) =>
+    id.toLowerCase().startsWith("arxiv:"),
+  );
+  return arxiv === undefined ? null : normalizeArxivIdentifier(arxiv);
 }
 
 function openAlexIdentifier(value: string): string {
@@ -79,7 +101,10 @@ export class OpenAlexAdapter implements ResearchEnricher {
     endpoint = "https://api.openalex.org/works",
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
-    this.endpoint = z.string().url().parse(endpoint);
+    this.endpoint = assertSafeOutboundUrl(
+      endpoint,
+      OPENALEX_POLICY,
+    ).toString();
   }
 
   async enrich(
@@ -114,28 +139,38 @@ export class OpenAlexAdapter implements ResearchEnricher {
         "id,doi,title,cited_by_count,ids,authorships,topics",
       );
       url.searchParams.set("per-page", "50");
-      const response = await this.http.get(this.source, url.toString());
+      const response = await this.http.get(this.source, url.toString(), {
+        urlPolicy: OPENALEX_POLICY,
+      });
       if (response.body === null) {
         continue;
       }
       const parsed = OpenAlexResponseSchema.parse(JSON.parse(response.body));
       parsed.results.forEach((work) => {
-        if (work.doi !== null) {
-          enrichments.set(
-            decodeURIComponent(work.doi.replace(/^https?:\/\/doi\.org\//i, ""))
-              .toLowerCase(),
-            {
-              work,
-              retrievedAt: response.retrievedAt,
-            },
-          );
+        const enrichment = {
+          work,
+          retrievedAt: response.retrievedAt,
+        };
+        const doi = work.doi === null ? null : normalizeDoi(work.doi);
+        if (doi !== null) {
+          enrichments.set(`DOI:${doi}`, enrichment);
+        }
+        const arxiv =
+          work.ids.arxiv === undefined
+            ? null
+            : normalizeArxivIdentifier(work.ids.arxiv);
+        if (arxiv !== null) {
+          enrichments.set(arxiv, enrichment);
         }
       });
     }
 
     return candidates.map((candidate) => {
       const doi = doiFromExternalIds(candidate.externalIds);
-      const enrichment = doi === null ? undefined : enrichments.get(doi);
+      const arxiv = arxivFromExternalIds(candidate.externalIds);
+      const enrichment =
+        (doi === null ? undefined : enrichments.get(`DOI:${doi}`)) ??
+        (arxiv === null ? undefined : enrichments.get(arxiv));
       if (enrichment === undefined) {
         return candidate;
       }

@@ -11,6 +11,10 @@ import {
   SourceFetchError,
   SourceHttpClient,
 } from "../../../src/sources/http-client";
+import {
+  normalizeArxivIdentifier,
+  normalizeDoi,
+} from "../../../src/sources/identifiers";
 import { OpenAlexAdapter } from "../../../src/sources/openalex";
 import { PaperContentRetriever } from "../../../src/sources/paper-content";
 import { ResearchCollector } from "../../../src/sources/research-collector";
@@ -200,6 +204,73 @@ describe("ResearchCollector", () => {
 });
 
 describe("SourceHttpClient", () => {
+  it.each([
+    "http://public.example.org/feed",
+    "https://reader:secret@public.example.org/feed",
+    "https://127.0.0.1/feed",
+    "https://[::1]/feed",
+    "https://metadata.google.internal/feed",
+  ])("rejects unsafe outbound URL %s before fetch", async (url) => {
+    const fetch = vi.fn(async () => new Response("must not be reached"));
+    const http = new SourceHttpClient({ fetch });
+
+    await expect(http.get(arxivSource, url)).rejects.toMatchObject({
+      name: "SourceFetchError",
+      sourceId: "arxiv",
+      status: null,
+      retryable: false,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("validates each manual redirect before following it", async () => {
+    const fetch = vi.fn(
+      async (_input: string | URL | Request, _init?: RequestInit) =>
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://169.254.169.254/latest/meta-data" },
+        }),
+    );
+    const http = new SourceHttpClient({ fetch });
+
+    await expect(
+      http.get(arxivSource, "https://example.org/start"),
+    ).rejects.toMatchObject({
+      name: "SourceFetchError",
+      sourceId: "arxiv",
+      retryable: false,
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch.mock.calls[0]?.[1]?.redirect).toBe("manual");
+  });
+
+  it("does not forward caller-supplied credentials across origins", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://cdn.example.net/feed" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response("feed"));
+    const http = new SourceHttpClient({ fetch });
+
+    await http.get(arxivSource, "https://publisher.example.org/feed", {
+      headers: {
+        accept: "application/rss+xml",
+        "x-source-api-key": "must-not-cross-origin",
+      },
+    });
+
+    expect(
+      headerValue(fetch.mock.calls[1]?.[1], "x-source-api-key"),
+    ).toBeNull();
+    expect(headerValue(fetch.mock.calls[1]?.[1], "accept")).toBe(
+      "application/rss+xml",
+    );
+  });
+
   it("sends an identifying user agent and reuses response validators", async () => {
     const fetch = vi
       .fn()
@@ -364,6 +435,234 @@ describe("PaperContentRetriever", () => {
       accessLevel: "abstract",
       text: "Fixture abstract",
     });
+  });
+
+  it("follows only verified arXiv HTML redirects and extracts readable text", async () => {
+    const permittedSource = source({
+      ...arxivSource,
+      restrictions: { bodyRetrieval: "permitted" },
+    });
+    const articleText = "Evidence from the training trajectory. ".repeat(12);
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: {
+            location: "https://arxiv.org/html/2607.00001v2",
+          },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          `<html><head><title>Paper</title></head><body><article><h1>Paper</h1><p>${articleText}</p></article></body></html>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+      );
+    const retriever = new PaperContentRetriever(
+      new SourceHttpClient({ fetch }),
+    );
+
+    const result = await retriever.retrieve({
+      source: permittedSource,
+      htmlUrl: "https://arxiv.org/html/2607.00001",
+      abstract: "Fixture abstract",
+    });
+
+    expect(result.accessLevel).toBe("full_text");
+    expect(result.text).toContain("training trajectory");
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not send validators that could turn full text into an abstract on 304", async () => {
+    const permittedSource = source({
+      ...arxivSource,
+      restrictions: { bodyRetrieval: "permitted" },
+    });
+    const articleText = "Evidence from a complete accessible paper. ".repeat(12);
+    const fetch = vi.fn(
+      async (_input: string | URL | Request, init?: RequestInit) => {
+        if (headerValue(init, "if-none-match") !== null) {
+          return new Response(null, { status: 304 });
+        }
+        return new Response(
+          `<html><head><title>Paper</title></head><body><article><h1>Paper</h1><p>${articleText}</p></article></body></html>`,
+          {
+            headers: {
+              "content-type": "text/html",
+              etag: '"paper-v1"',
+            },
+          },
+        );
+      },
+    );
+    const retriever = new PaperContentRetriever(
+      new SourceHttpClient({ fetch }),
+    );
+    const request = {
+      source: permittedSource,
+      htmlUrl: "https://arxiv.org/html/2607.00001",
+      abstract: "Fixture abstract",
+    };
+
+    expect((await retriever.retrieve(request)).accessLevel).toBe("full_text");
+    expect((await retriever.retrieve(request)).accessLevel).toBe("full_text");
+    expect(headerValue(fetch.mock.calls[1]?.[1], "if-none-match")).toBeNull();
+  });
+
+  it("refuses an off-origin redirect before it can become full text", async () => {
+    const permittedSource = source({
+      ...arxivSource,
+      restrictions: { bodyRetrieval: "permitted" },
+    });
+    const fetch = vi.fn(async () =>
+      new Response(null, {
+        status: 302,
+        headers: {
+          location: "https://attacker.example/html/2607.00001",
+        },
+      }),
+    );
+    const retriever = new PaperContentRetriever(
+      new SourceHttpClient({ fetch }),
+    );
+
+    const result = await retriever.retrieve({
+      source: permittedSource,
+      htmlUrl: "https://arxiv.org/html/2607.00001",
+      abstract: "Fixture abstract",
+    });
+
+    expect(result).toEqual({
+      accessLevel: "abstract",
+      text: "Fixture abstract",
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("provider endpoint and identifier policy", () => {
+  it("rejects fixed-provider endpoints outside their intended hosts", () => {
+    const http = new SourceHttpClient({
+      fetch: vi.fn(async () => new Response("unused")),
+    });
+
+    expect(
+      () =>
+        new ArxivAdapter(http, arxivSource, {
+          apiUrl: "https://attacker.example/api",
+        }),
+    ).toThrow();
+    expect(
+      () =>
+        new SemanticScholarAdapter(
+          http,
+          semanticScholarSource,
+          "https://attacker.example/batch",
+        ),
+    ).toThrow();
+    expect(
+      () =>
+        new OpenAlexAdapter(
+          http,
+          openAlexSource,
+          "https://attacker.example/works",
+        ),
+    ).toThrow();
+  });
+
+  it("rejects private and local configured feed URLs", () => {
+    const http = new SourceHttpClient({
+      fetch: vi.fn(async () => new Response("unused")),
+    });
+
+    expect(
+      () =>
+        new RssAdapter(http, [
+          { source: blogSource, feedUrl: "https://localhost/feed.xml" },
+        ]),
+    ).toThrow();
+    expect(
+      () =>
+        new RssAdapter(http, [
+          { source: blogSource, feedUrl: "https://10.0.0.1/feed.xml" },
+        ]),
+    ).toThrow();
+  });
+
+  it("canonicalizes DOI and versioned arXiv identifiers before joins", () => {
+    expect(normalizeDoi(" DOI:https://doi.org/10.1000/Example%2E2607%2E1 "))
+      .toBe("10.1000/example.2607.1");
+    expect(normalizeDoi("http://dx.doi.org/10.1000/EXAMPLE.2607.1"))
+      .toBe("10.1000/example.2607.1");
+    expect(normalizeDoi("10.1000/%ZZ")).toBeNull();
+    expect(normalizeArxivIdentifier("ARXIV:2607.00001v12"))
+      .toBe("arXiv:2607.00001");
+    expect(
+      normalizeArxivIdentifier("https://arxiv.org/abs/2607.00001v3"),
+    ).toBe("arXiv:2607.00001");
+  });
+});
+
+describe("ArxivAdapter revision window", () => {
+  it("includes revised older papers and bounds the last-updated pagination scan", async () => {
+    const atom = (published: string, updated: string, id: string) => `<?xml version="1.0"?>
+      <feed xmlns="http://www.w3.org/2005/Atom">
+        <entry>
+          <id>https://arxiv.org/abs/${id}</id>
+          <updated>${updated}</updated>
+          <published>${published}</published>
+          <title>Revised safety paper</title>
+          <summary>An older paper received a material revision.</summary>
+          <author><name>Ada Example</name></author>
+          <link href="https://arxiv.org/abs/${id}" rel="alternate" type="text/html"/>
+        </entry>
+      </feed>`;
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(
+          atom(
+            "2026-01-01T00:00:00Z",
+            "2026-07-29T04:00:00Z",
+            "2601.00001v4",
+          ),
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          atom(
+            "2026-01-01T00:00:00Z",
+            "2026-07-20T04:00:00Z",
+            "2601.00002v1",
+          ),
+        ),
+      );
+    const adapter = new ArxivAdapter(
+      new SourceHttpClient({
+        fetch,
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      arxivSource,
+      { maxResults: 1, maxPages: 2 },
+    );
+
+    const items = await adapter.collect(fixedWindow());
+
+    expect(items.map((item) => item.externalId)).toEqual([
+      "arXiv:2601.00001",
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(
+      new URL(String(fetch.mock.calls[0]?.[0])).searchParams.get(
+        "search_query",
+      ),
+    ).not.toContain("submittedDate");
+    expect(
+      fetch.mock.calls.map(([input]) =>
+        new URL(String(input)).searchParams.get("start"),
+      ),
+    ).toEqual(["0", "1"]);
   });
 });
 

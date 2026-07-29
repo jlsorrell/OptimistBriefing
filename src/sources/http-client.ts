@@ -1,4 +1,9 @@
 import type { ResearchSourceInput } from "./types";
+import {
+  assertSafeOutboundUrl,
+  UnsafeOutboundUrlError,
+  type OutboundUrlPolicy,
+} from "./outbound-url";
 
 export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 export const DEFAULT_MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
@@ -6,6 +11,8 @@ export const DEFAULT_USER_AGENT =
   "OptimistBriefing/1.0 (+https://optimistindustries.com)";
 
 const RETRYABLE_STATUSES = new Set([429, 502, 503, 504]);
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_REDIRECTS = 3;
 
 type FetchLike = (
   input: string | URL | Request,
@@ -29,6 +36,7 @@ type RequestOptions = {
   headers?: HeadersInit;
   body?: string;
   useValidators?: boolean;
+  urlPolicy?: OutboundUrlPolicy;
 };
 
 type Validators = {
@@ -44,6 +52,7 @@ export type SourceHttpResponse = {
   contentType: string | null;
   etag: string | null;
   lastModified: string | null;
+  finalUrl: string;
 };
 
 export class SourceFetchError extends Error {
@@ -196,12 +205,19 @@ export class SourceHttpClient {
   get(
     source: ResearchSourceInput,
     url: string,
-    options: { headers?: HeadersInit } = {},
+    options: {
+      headers?: HeadersInit;
+      useValidators?: boolean;
+      urlPolicy?: OutboundUrlPolicy;
+    } = {},
   ): Promise<SourceHttpResponse> {
     return this.request(source, url, {
       method: "GET",
       ...(options.headers === undefined ? {} : { headers: options.headers }),
-      useValidators: true,
+      useValidators: options.useValidators ?? true,
+      ...(options.urlPolicy === undefined
+        ? {}
+        : { urlPolicy: options.urlPolicy }),
     });
   }
 
@@ -209,7 +225,10 @@ export class SourceHttpClient {
     source: ResearchSourceInput,
     url: string,
     payload: unknown,
-    options: { headers?: HeadersInit } = {},
+    options: {
+      headers?: HeadersInit;
+      urlPolicy?: OutboundUrlPolicy;
+    } = {},
   ): Promise<SourceHttpResponse> {
     const headers = new Headers(options.headers);
     headers.set("content-type", "application/json");
@@ -218,6 +237,9 @@ export class SourceHttpClient {
       headers,
       body: JSON.stringify(payload),
       useValidators: false,
+      ...(options.urlPolicy === undefined
+        ? {}
+        : { urlPolicy: options.urlPolicy }),
     });
   }
 
@@ -226,7 +248,21 @@ export class SourceHttpClient {
     url: string,
     options: RequestOptions,
   ): Promise<SourceHttpResponse> {
-    const validatorKey = `${source.id}:${url}`;
+    let initialUrl: URL;
+    try {
+      initialUrl = assertSafeOutboundUrl(url, options.urlPolicy);
+    } catch (error) {
+      if (error instanceof UnsafeOutboundUrlError) {
+        throw new SourceFetchError({
+          sourceId: source.id,
+          status: null,
+          retryable: false,
+          reason: "unsafe outbound URL",
+        });
+      }
+      throw error;
+    }
+    const validatorKey = `${source.id}:${initialUrl.toString()}`;
     const method = options.method ?? "GET";
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
@@ -247,15 +283,87 @@ export class SourceHttpClient {
         abortController.abort(new Error("source request timed out"));
       }, this.timeoutMs);
       let response: Response;
+      let finalUrl = initialUrl;
       try {
-        response = await this.fetch(url, {
-          method,
-          headers,
-          signal: abortController.signal,
-          ...(options.body === undefined ? {} : { body: options.body }),
-        });
-      } catch {
+        let redirectCount = 0;
+        let requestHeaders = headers;
+        while (true) {
+          response = await this.fetch(finalUrl.toString(), {
+            method,
+            headers: requestHeaders,
+            signal: abortController.signal,
+            redirect: "manual",
+            ...(options.body === undefined ? {} : { body: options.body }),
+          });
+          if (response.redirected) {
+            await response.body?.cancel();
+            throw new SourceFetchError({
+              sourceId: source.id,
+              status: response.status,
+              retryable: false,
+              reason: "automatic redirect rejected",
+            });
+          }
+          if (response.url !== "") {
+            finalUrl = assertSafeOutboundUrl(
+              response.url,
+              options.urlPolicy,
+            );
+          }
+          if (!REDIRECT_STATUSES.has(response.status)) {
+            break;
+          }
+          const location = response.headers.get("location");
+          if (
+            method !== "GET" ||
+            location === null ||
+            redirectCount >= MAX_REDIRECTS
+          ) {
+            await response.body?.cancel();
+            throw new SourceFetchError({
+              sourceId: source.id,
+              status: response.status,
+              retryable: false,
+              reason: "redirect rejected",
+            });
+          }
+          const previousOrigin = finalUrl.origin;
+          let resolvedLocation: URL;
+          try {
+            resolvedLocation = new URL(location, finalUrl);
+          } catch {
+            throw new UnsafeOutboundUrlError("invalid redirect location");
+          }
+          const nextUrl = assertSafeOutboundUrl(
+            resolvedLocation,
+            options.urlPolicy,
+          );
+          await response.body?.cancel();
+          redirectCount += 1;
+          if (nextUrl.origin !== previousOrigin) {
+            requestHeaders = new Headers();
+            for (const name of ["accept", "accept-language", "user-agent"]) {
+              const value = headers.get(name);
+              if (value !== null) {
+                requestHeaders.set(name, value);
+              }
+            }
+          }
+          finalUrl = nextUrl;
+        }
+      } catch (error) {
         clearTimeout(timeout);
+        if (error instanceof SourceFetchError) {
+          throw error;
+        }
+        if (error instanceof UnsafeOutboundUrlError) {
+          throw new SourceFetchError({
+            sourceId: source.id,
+            status: null,
+            retryable: false,
+            reason: "unsafe redirect URL",
+          });
+        }
         throw new SourceFetchError({
           sourceId: source.id,
           status: null,
@@ -276,6 +384,7 @@ export class SourceHttpClient {
           contentType: response.headers.get("content-type"),
           etag: response.headers.get("etag"),
           lastModified: response.headers.get("last-modified"),
+          finalUrl: finalUrl.toString(),
         };
       }
 
@@ -342,6 +451,7 @@ export class SourceHttpClient {
         contentType: response.headers.get("content-type"),
         etag,
         lastModified,
+        finalUrl: finalUrl.toString(),
       };
     }
 

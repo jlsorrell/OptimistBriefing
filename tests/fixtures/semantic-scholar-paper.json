@@ -2,8 +2,8 @@
   {
     "paperId": "S2-2607-00001",
     "externalIds": {
-      "ArXiv": "2607.00001",
-      "DOI": "10.1000/example.2607.1"
+      "ArXiv": "2607.00001v3",
+      "DOI": "doi:10.1000/EXAMPLE.2607.1"
     },
     "title": "Concept Geometry Evolves During Language Model Training",
     "citationCount": 7,

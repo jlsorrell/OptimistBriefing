@@ -3,6 +3,14 @@ import { z } from "zod";
 
 import { SourceHttpClient } from "./http-client";
 import {
+  normalizeArxivIdentifier,
+  normalizeDoi,
+} from "./identifiers";
+import {
+  assertSafeOutboundUrl,
+  type OutboundUrlPolicy,
+} from "./outbound-url";
+import {
   CollectionWindowSchema,
   RawItemSchema,
   ResearchSourceRecordSchema,
@@ -32,8 +40,8 @@ const ArxivEntrySchema = z.object({
   id: z.string().url(),
   title: z.string().min(1),
   summary: z.string().min(1),
-  published: z.string(),
-  updated: z.string(),
+  published: z.string().refine((value) => Number.isFinite(Date.parse(value))),
+  updated: z.string().refine((value) => Number.isFinite(Date.parse(value))),
   author: z.union([ArxivAuthorSchema, z.array(ArxivAuthorSchema)]),
   link: z.union([ArxivLinkSchema, z.array(ArxivLinkSchema)]),
   category: z
@@ -54,6 +62,13 @@ type ArxivAdapterOptions = {
   apiUrl?: string;
   query?: string;
   maxResults?: number;
+  maxPages?: number;
+};
+
+const ARXIV_API_POLICY: OutboundUrlPolicy = {
+  allowedHosts: ["export.arxiv.org"],
+  allowedPorts: [""],
+  allowedPathPrefixes: ["/api/"],
 };
 
 function asArray<T>(value: T | readonly T[] | undefined): T[] {
@@ -67,22 +82,12 @@ function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-export function normalizeArxivId(value: string): string | null {
-  const match = value.match(
-    /(?:arxiv:|arxiv\.org\/(?:abs|html|pdf)\/)?(\d{4}\.\d{4,5})(?:v\d+)?/i,
-  );
-  return match?.[1] === undefined ? null : `arXiv:${match[1]}`;
-}
-
-function arxivDateTerm(value: string): string {
-  return value.replace(/[-:TZ.]/g, "").slice(0, 12);
-}
-
 export class ArxivAdapter implements SourceAdapter {
   private readonly source: ResearchSourceRecord;
   private readonly apiUrl: string;
   private readonly query: string;
   private readonly maxResults: number;
+  private readonly maxPages: number;
 
   constructor(
     private readonly http: SourceHttpClient,
@@ -90,7 +95,10 @@ export class ArxivAdapter implements SourceAdapter {
     options: ArxivAdapterOptions = {},
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
-    this.apiUrl = options.apiUrl ?? "https://export.arxiv.org/api/query";
+    this.apiUrl = assertSafeOutboundUrl(
+      options.apiUrl ?? "https://export.arxiv.org/api/query",
+      ARXIV_API_POLICY,
+    ).toString();
     this.query = z
       .string()
       .min(1)
@@ -104,6 +112,12 @@ export class ArxivAdapter implements SourceAdapter {
       .min(1)
       .max(100)
       .parse(options.maxResults ?? 100);
+    this.maxPages = z
+      .number()
+      .int()
+      .min(1)
+      .max(10)
+      .parse(options.maxPages ?? 3);
   }
 
   async collect(window: CollectionWindow): Promise<RawItem[]> {
@@ -111,74 +125,106 @@ export class ArxivAdapter implements SourceAdapter {
       return [];
     }
     const validWindow = CollectionWindowSchema.parse(window);
-    const url = new URL(this.apiUrl);
-    url.searchParams.set(
-      "search_query",
-      `${this.query} AND submittedDate:[${arxivDateTerm(validWindow.from)} TO ${arxivDateTerm(validWindow.to)}]`,
-    );
-    url.searchParams.set("start", "0");
-    url.searchParams.set("max_results", String(this.maxResults));
-    url.searchParams.set("sortBy", "lastUpdatedDate");
-    url.searchParams.set("sortOrder", "descending");
+    const collected: RawItem[] = [];
+    for (let page = 0; page < this.maxPages; page += 1) {
+      const url = new URL(this.apiUrl);
+      url.searchParams.set("search_query", this.query);
+      url.searchParams.set("start", String(page * this.maxResults));
+      url.searchParams.set("max_results", String(this.maxResults));
+      url.searchParams.set("sortBy", "lastUpdatedDate");
+      url.searchParams.set("sortOrder", "descending");
 
-    const response = await this.http.get(this.source, url.toString());
-    if (response.notModified || response.body === null) {
-      return [];
-    }
-    const parsedXml: unknown = new XMLParser({
-      ignoreAttributes: false,
-      removeNSPrefix: true,
-      trimValues: true,
-      parseTagValue: false,
-    }).parse(response.body);
-    const feed = ArxivFeedSchema.parse(parsedXml);
-
-    return asArray(feed.feed.entry).map((entry) => {
-      const externalId = normalizeArxivId(entry.id);
-      if (externalId === null) {
-        throw new Error(`Invalid arXiv entry identifier from ${this.source.id}`);
-      }
-      const links = asArray(entry.link);
-      const originalUrl =
-        links.find(
-          (link) =>
-            link["@_rel"] === "alternate" &&
-            link["@_type"] === "text/html",
-        )?.["@_href"] ?? entry.id;
-      const bareId = externalId.slice("arXiv:".length);
-      const externalIds = [
-        externalId,
-        ...(entry.doi === undefined ? [] : [`DOI:${entry.doi.toLowerCase()}`]),
-      ];
-      return RawItemSchema.parse({
-        kind: "paper",
-        sourceId: this.source.id,
-        sourceName: this.source.canonicalName,
-        sourceRole: this.source.role,
-        title: normalizeWhitespace(entry.title),
-        originalUrl,
-        externalId,
-        externalIds,
-        publishedAt: new Date(entry.published).toISOString(),
-        retrievedAt: response.retrievedAt,
-        accessLevel: "abstract",
-        authors: asArray(entry.author).map((author) => author.name.trim()),
-        institutions: [],
-        abstract: normalizeWhitespace(entry.summary),
-        content: null,
-        relatedPaperIds: [],
-        metadata: {
-          updatedAt: new Date(entry.updated).toISOString(),
-          categories: asArray(entry.category).map(
-            (category) => category["@_term"],
-          ),
-          htmlUrl: `https://arxiv.org/html/${bareId}`,
-          pdfUrl:
-            links.find((link) => link["@_type"] === "application/pdf")?.[
-              "@_href"
-            ] ?? null,
-        },
+      const response = await this.http.get(this.source, url.toString(), {
+        urlPolicy: ARXIV_API_POLICY,
       });
+      if (response.notModified || response.body === null) {
+        break;
+      }
+      const parsedXml: unknown = new XMLParser({
+        ignoreAttributes: false,
+        removeNSPrefix: true,
+        trimValues: true,
+        parseTagValue: false,
+      }).parse(response.body);
+      const feed = ArxivFeedSchema.parse(parsedXml);
+      const entries = asArray(feed.feed.entry);
+      for (const entry of entries) {
+        const publishedAt = new Date(entry.published).toISOString();
+        const updatedAt = new Date(entry.updated).toISOString();
+        if (
+          !(
+            (publishedAt >= validWindow.from && publishedAt <= validWindow.to) ||
+            (updatedAt >= validWindow.from && updatedAt <= validWindow.to)
+          )
+        ) {
+          continue;
+        }
+        collected.push(
+          this.toRawItem(entry, response.retrievedAt, publishedAt, updatedAt),
+        );
+      }
+      const reachedOlderUpdates = entries.some(
+        (entry) => new Date(entry.updated).toISOString() < validWindow.from,
+      );
+      if (reachedOlderUpdates || entries.length < this.maxResults) {
+        break;
+      }
+    }
+    return collected;
+  }
+
+  private toRawItem(
+    entry: z.infer<typeof ArxivEntrySchema>,
+    retrievedAt: string,
+    publishedAt: string,
+    updatedAt: string,
+  ): RawItem {
+    const externalId = normalizeArxivIdentifier(entry.id);
+    if (externalId === null) {
+      throw new Error(`Invalid arXiv entry identifier from ${this.source.id}`);
+    }
+    const links = asArray(entry.link);
+    const originalUrl =
+      links.find(
+        (link) =>
+          link["@_rel"] === "alternate" &&
+          link["@_type"] === "text/html",
+      )?.["@_href"] ?? entry.id;
+    const bareId = externalId.slice("arXiv:".length);
+    const doi =
+      entry.doi === undefined ? null : normalizeDoi(entry.doi);
+    const externalIds = [
+      externalId,
+      ...(doi === null ? [] : [`DOI:${doi}`]),
+    ];
+    return RawItemSchema.parse({
+      kind: "paper",
+      sourceId: this.source.id,
+      sourceName: this.source.canonicalName,
+      sourceRole: this.source.role,
+      title: normalizeWhitespace(entry.title),
+      originalUrl,
+      externalId,
+      externalIds,
+      publishedAt,
+      retrievedAt,
+      accessLevel: "abstract",
+      authors: asArray(entry.author).map((author) => author.name.trim()),
+      institutions: [],
+      abstract: normalizeWhitespace(entry.summary),
+      content: null,
+      relatedPaperIds: [],
+      metadata: {
+        updatedAt,
+        categories: asArray(entry.category).map(
+          (category) => category["@_term"],
+        ),
+        htmlUrl: `https://arxiv.org/html/${bareId}`,
+        pdfUrl:
+          links.find((link) => link["@_type"] === "application/pdf")?.[
+            "@_href"
+          ] ?? null,
+      },
     });
   }
 }

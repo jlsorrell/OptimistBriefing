@@ -4,6 +4,10 @@ import { parseHTML } from "linkedom";
 import type { AccessLevel } from "../contracts/editorial";
 import { SourceHttpClient } from "./http-client";
 import {
+  assertSafeOutboundUrl,
+  type OutboundUrlPolicy,
+} from "./outbound-url";
+import {
   bodyRetrievalPermitted,
   ResearchSourceRecordSchema,
   type ResearchSourceInput,
@@ -21,16 +25,16 @@ export type RetrievedPaperContent = {
   text: string;
 };
 
+const ARXIV_HTML_POLICY: OutboundUrlPolicy = {
+  allowedHosts: ["arxiv.org"],
+  allowedPorts: [""],
+  allowedPathPrefixes: ["/html/"],
+};
+
 function isArxivHtmlUrl(value: string): boolean {
   try {
-    const url = new URL(value);
-    return (
-      url.protocol === "https:" &&
-      url.username === "" &&
-      url.password === "" &&
-      (url.hostname === "arxiv.org" || url.hostname.endsWith(".arxiv.org")) &&
-      url.pathname.startsWith("/html/")
-    );
+    assertSafeOutboundUrl(value, ARXIV_HTML_POLICY);
+    return true;
   } catch {
     return false;
   }
@@ -48,7 +52,18 @@ export class PaperContentRetriever {
     };
     const source: ResearchSourceRecord =
       ResearchSourceRecordSchema.parse(request.source);
+    let sourceIsArxiv = false;
+    try {
+      assertSafeOutboundUrl(source.canonicalUrl, {
+        allowedHosts: ["arxiv.org", "export.arxiv.org"],
+        allowedPorts: [""],
+      });
+      sourceIsArxiv = true;
+    } catch {
+      sourceIsArxiv = false;
+    }
     if (
+      !sourceIsArxiv ||
       !bodyRetrievalPermitted(source) ||
       request.htmlUrl === null ||
       !isArxivHtmlUrl(request.htmlUrl)
@@ -59,9 +74,12 @@ export class PaperContentRetriever {
     try {
       const response = await this.http.get(source, request.htmlUrl, {
         headers: { accept: "text/html,application/xhtml+xml" },
+        useValidators: false,
+        urlPolicy: ARXIV_HTML_POLICY,
       });
       if (
         response.body === null ||
+        !isArxivHtmlUrl(response.finalUrl) ||
         response.contentType?.toLowerCase().includes("html") !== true
       ) {
         return fallback;

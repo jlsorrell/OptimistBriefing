@@ -2,6 +2,14 @@ import { z } from "zod";
 
 import { SourceHttpClient } from "./http-client";
 import {
+  normalizeArxivIdentifier,
+  normalizeDoi,
+} from "./identifiers";
+import {
+  assertSafeOutboundUrl,
+  type OutboundUrlPolicy,
+} from "./outbound-url";
+import {
   RawResearchCandidateSchema,
   ResearchSourceRecordSchema,
   type RawResearchCandidate,
@@ -34,6 +42,11 @@ const SemanticScholarPaperSchema = z
   .nullable();
 
 const SemanticScholarResponseSchema = z.array(SemanticScholarPaperSchema);
+const SEMANTIC_SCHOLAR_POLICY: OutboundUrlPolicy = {
+  allowedHosts: ["api.semanticscholar.org"],
+  allowedPorts: [""],
+  allowedPathPrefixes: ["/graph/v1/paper/batch"],
+};
 
 function chunks<T>(values: readonly T[], size: number): T[][] {
   const result: T[][] = [];
@@ -57,7 +70,10 @@ export class SemanticScholarAdapter implements ResearchEnricher {
     endpoint = "https://api.semanticscholar.org/graph/v1/paper/batch",
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
-    this.endpoint = z.string().url().parse(endpoint);
+    this.endpoint = assertSafeOutboundUrl(
+      endpoint,
+      SEMANTIC_SCHOLAR_POLICY,
+    ).toString();
   }
 
   async enrich(
@@ -105,9 +121,12 @@ export class SemanticScholarAdapter implements ResearchEnricher {
           "fieldsOfStudy",
         ].join(","),
       );
-      const response = await this.http.postJson(this.source, url.toString(), {
-        ids,
-      });
+      const response = await this.http.postJson(
+        this.source,
+        url.toString(),
+        { ids },
+        { urlPolicy: SEMANTIC_SCHOLAR_POLICY },
+      );
       if (response.body === null) {
         continue;
       }
@@ -116,10 +135,15 @@ export class SemanticScholarAdapter implements ResearchEnricher {
       );
       parsed.forEach((paper) => {
         if (paper?.externalIds.ArXiv !== undefined) {
-          enrichments.set(`arXiv:${paper.externalIds.ArXiv}`, {
-            paper,
-            retrievedAt: response.retrievedAt,
-          });
+          const arxivId = normalizeArxivIdentifier(
+            paper.externalIds.ArXiv,
+          );
+          if (arxivId !== null) {
+            enrichments.set(arxivId, {
+              paper,
+              retrievedAt: response.retrievedAt,
+            });
+          }
         }
       });
     }
@@ -130,6 +154,10 @@ export class SemanticScholarAdapter implements ResearchEnricher {
         return candidate;
       }
       const { paper } = enrichment;
+      const doi =
+        paper.externalIds.DOI === undefined
+          ? null
+          : normalizeDoi(paper.externalIds.DOI);
       const affiliations = paper.authors.flatMap(
         (author) => author.affiliations,
       );
@@ -143,9 +171,7 @@ export class SemanticScholarAdapter implements ResearchEnricher {
         externalIds: unique([
           ...candidate.externalIds,
           `SemanticScholar:${paper.paperId}`,
-          ...(paper.externalIds.DOI === undefined
-            ? []
-            : [`DOI:${paper.externalIds.DOI.toLowerCase()}`]),
+          ...(doi === null ? [] : [`DOI:${doi}`]),
         ]),
         citationCount: paper.citationCount ?? candidate.citationCount,
         influentialCitationCount:

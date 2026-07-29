@@ -1,8 +1,9 @@
 import { XMLParser } from "fast-xml-parser";
 import { z } from "zod";
 
-import { normalizeArxivId } from "./arxiv";
 import { SourceHttpClient } from "./http-client";
+import { normalizeArxivIdentifier } from "./identifiers";
+import { assertSafeOutboundUrl } from "./outbound-url";
 import {
   CollectionWindowSchema,
   RawItemSchema,
@@ -60,7 +61,7 @@ function relatedArxivIds(value: string): string[] {
   return [
     ...new Set(
       [...matches]
-        .map((match) => normalizeArxivId(match[0]))
+        .map((match) => normalizeArxivIdentifier(match[0]))
         .filter((identifier): identifier is string => identifier !== null),
     ),
   ];
@@ -75,7 +76,7 @@ export class RssAdapter implements SourceAdapter {
   ) {
     this.feeds = feeds.map((feed) => ({
       source: ResearchSourceRecordSchema.parse(feed.source),
-      feedUrl: z.string().url().parse(feed.feedUrl),
+      feedUrl: assertSafeOutboundUrl(feed.feedUrl).toString(),
     }));
   }
 
