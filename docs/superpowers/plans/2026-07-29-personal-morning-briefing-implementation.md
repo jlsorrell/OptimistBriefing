@@ -125,7 +125,6 @@ Expected: FAIL because `src/contracts/editorial.ts` does not exist.
     "build": "vite build",
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "test:worker": "vitest run --config vitest.worker.config.ts",
     "test:e2e": "playwright test",
     "dev": "vite",
     "deploy": "npm run build && wrangler deploy"
@@ -140,7 +139,7 @@ Expected: FAIL because `src/contracts/editorial.ts` does not exist.
     "openai": "^5.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "zod": "^4.0.0"
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.0.0",
@@ -228,6 +227,7 @@ git commit -m "chore: establish briefing TypeScript contracts"
 - Create: `tests/integration/db/repository.test.ts`
 - Create: `vitest.worker.config.ts`
 - Create: `wrangler.jsonc`
+- Modify: `package.json`
 
 **Interfaces:**
 - Consumes: contracts from Task 1.
@@ -340,6 +340,9 @@ orders them by edition date. Repository methods return parsed contract types,
 never raw D1 rows.
 
 - [ ] **Step 5: Apply the migration in the test pool and run integration tests**
+
+Add `"test:worker": "vitest run --config vitest.worker.config.ts"` to
+`package.json` alongside the Worker test configuration.
 
 Run: `npm run test:worker -- tests/integration/db/repository.test.ts`
 
