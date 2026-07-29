@@ -3,7 +3,10 @@ import { z } from "zod";
 
 import { SourceHttpClient } from "./http-client";
 import { normalizeArxivIdentifier } from "./identifiers";
-import { assertSafeOutboundUrl } from "./outbound-url";
+import {
+  assertSafeOutboundUrl,
+  type OutboundUrlPolicy,
+} from "./outbound-url";
 import {
   CollectionWindowSchema,
   RawItemSchema,
@@ -41,6 +44,8 @@ const RssDocumentSchema = z.object({
 export type ConfiguredFeed = {
   source: ResearchSourceInput;
   feedUrl: string;
+  feedUrlPolicy?: OutboundUrlPolicy;
+  articleUrlPolicy?: OutboundUrlPolicy;
 };
 
 function asArray<T>(value: T | readonly T[] | undefined): T[] {
@@ -76,7 +81,16 @@ export class RssAdapter implements SourceAdapter {
   ) {
     this.feeds = feeds.map((feed) => ({
       source: ResearchSourceRecordSchema.parse(feed.source),
-      feedUrl: assertSafeOutboundUrl(feed.feedUrl).toString(),
+      feedUrl: assertSafeOutboundUrl(
+        feed.feedUrl,
+        feed.feedUrlPolicy,
+      ).toString(),
+      ...(feed.feedUrlPolicy === undefined
+        ? {}
+        : { feedUrlPolicy: feed.feedUrlPolicy }),
+      ...(feed.articleUrlPolicy === undefined
+        ? {}
+        : { articleUrlPolicy: feed.articleUrlPolicy }),
     }));
   }
 
@@ -86,7 +100,13 @@ export class RssAdapter implements SourceAdapter {
       this.feeds
         .filter((feed) => feed.source.enabled)
         .map(async (feed): Promise<RawItem[]> => {
-          const response = await this.http.get(feed.source, feed.feedUrl);
+          const response = await this.http.get(
+            feed.source,
+            feed.feedUrl,
+            feed.feedUrlPolicy === undefined
+              ? {}
+              : { urlPolicy: feed.feedUrlPolicy },
+          );
           if (response.notModified || response.body === null) {
             return [];
           }
@@ -98,6 +118,15 @@ export class RssAdapter implements SourceAdapter {
           }).parse(response.body);
           const document = RssDocumentSchema.parse(parsedXml);
           return asArray(document.rss.channel.item).flatMap((item) => {
+            let originalUrl: string;
+            try {
+              originalUrl = assertSafeOutboundUrl(
+                item.link,
+                feed.articleUrlPolicy,
+              ).toString();
+            } catch {
+              return [];
+            }
             const publishedAt =
               item.pubDate === undefined
                 ? null
@@ -121,9 +150,9 @@ export class RssAdapter implements SourceAdapter {
                 sourceName: feed.source.canonicalName,
                 sourceRole: feed.source.role,
                 title: normalizeWhitespace(item.title),
-                originalUrl: item.link,
-                externalId: guid ?? item.link,
-                externalIds: [guid ?? item.link],
+                originalUrl,
+                externalId: guid ?? originalUrl,
+                externalIds: [guid ?? originalUrl],
                 publishedAt,
                 retrievedAt: response.retrievedAt,
                 accessLevel: "secondary",
@@ -133,7 +162,7 @@ export class RssAdapter implements SourceAdapter {
                 abstract: description.length === 0 ? null : description,
                 content: null,
                 relatedPaperIds: relatedArxivIds(
-                  `${item.link} ${rawDescription}`,
+                  `${originalUrl} ${rawDescription}`,
                 ),
                 metadata: {
                   feedUrl: feed.feedUrl,

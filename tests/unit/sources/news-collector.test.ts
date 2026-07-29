@@ -3,12 +3,16 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it, vi } from "vitest";
 
+import type { SourceRecord } from "../../../src/db/repository";
 import {
   extractReadableArticle,
 } from "../../../src/sources/article-extractor";
 import { GdeltAdapter } from "../../../src/sources/gdelt";
 import { SourceHttpClient } from "../../../src/sources/http-client";
-import { NewsCollector } from "../../../src/sources/news-collector";
+import {
+  createNewsCollectorFromCatalog,
+  NewsCollector,
+} from "../../../src/sources/news-collector";
 import { PolymarketAdapter } from "../../../src/sources/polymarket";
 import type {
   CollectionWindow,
@@ -24,6 +28,25 @@ const fixedWindow = (): CollectionWindow => ({
   from: "2026-07-28T00:00:00.000Z",
   to: "2026-07-29T12:00:00.000Z",
 });
+
+const wyprFeedPolicy = {
+  allowedHosts: ["www.wypr.org"],
+  allowedPorts: [""],
+  allowedPathPrefixes: ["/rss/"],
+} as const;
+
+const wyprArticlePolicy = {
+  allowedHosts: ["www.wypr.org"],
+  allowedPorts: [""],
+  allowedPathPrefixes: ["/wypr-news/"],
+} as const;
+
+async function localNewsForUrl(url: string): Promise<string> {
+  return (await loadFixture("local-news.xml")).replace(
+    "https://www.wypr.org/wypr-news/2026-07-29/baltimore-expands-secure-ai-pilot",
+    url,
+  );
+}
 
 const source = (
   value: Partial<ResearchSourceRecord> &
@@ -74,6 +97,13 @@ async function newsCollectorWithFixtures() {
   const fetch = vi.fn(async (input: string | URL | Request) => {
     const url = String(input);
     if (url.startsWith("https://api.gdeltproject.org/api/v2/doc/doc")) {
+      const endpoint = new URL(url);
+      expect(endpoint.searchParams.get("startdatetime")).toBe(
+        "20260728000000",
+      );
+      expect(endpoint.searchParams.get("enddatetime")).toBe(
+        "20260729120000",
+      );
       return new Response(fixtures.gdelt, {
         headers: { "content-type": "application/json" },
       });
@@ -111,6 +141,8 @@ async function newsCollectorWithFixtures() {
         {
           source: wyprSource,
           feedUrl: "https://www.wypr.org/rss/local-news",
+          feedUrlPolicy: wyprFeedPolicy,
+          articleUrlPolicy: wyprArticlePolicy,
         },
       ],
       discoveryAdapters: [
@@ -137,6 +169,7 @@ describe("NewsCollector", () => {
     const market = items.find((item) => item.kind === "forecast");
 
     expect(market?.sourceRole).toBe("forecast");
+    expect(market?.externalId).toBe("Polymarket:market-material");
     expect(market?.canCorroborateFacts).toBe(false);
     expect(market?.metadata).toMatchObject({
       currentProbability: 0.64,
@@ -206,12 +239,21 @@ describe("NewsCollector", () => {
       });
       const http = new SourceHttpClient({
         fetch: vi.fn(async (input) => {
-          if (String(input) === `https://${role}.example.com/feed.xml`) {
-            return new Response(await loadFixture("local-news.xml"), {
+          const requestedUrl = String(input);
+          if (requestedUrl === `https://${role}.example.com/feed.xml`) {
+            return new Response(
+              await localNewsForUrl(`https://${role}.example.com/story`),
+              {
               headers: { "content-type": "application/rss+xml" },
+              },
+            );
+          }
+          if (requestedUrl === `https://${role}.example.com/story`) {
+            return new Response(await loadFixture("article.html"), {
+              headers: { "content-type": "text/html" },
             });
           }
-          throw new Error("Article body must not be fetched");
+          throw new Error(`Unexpected URL: ${requestedUrl}`);
         }),
         now: () => new Date("2026-07-29T08:30:00.000Z"),
       });
@@ -221,6 +263,16 @@ describe("NewsCollector", () => {
           {
             source: contextualSource,
             feedUrl: `https://${role}.example.com/feed.xml`,
+            feedUrlPolicy: {
+              allowedHosts: [`${role}.example.com`],
+              allowedPorts: [""],
+              allowedPathPrefixes: ["/feed.xml"],
+            },
+            articleUrlPolicy: {
+              allowedHosts: [`${role}.example.com`],
+              allowedPorts: [""],
+              allowedPathPrefixes: ["/story"],
+            },
           },
         ],
         discoveryAdapters: [],
@@ -260,6 +312,8 @@ describe("NewsCollector", () => {
         {
           source: metadataOnlySource,
           feedUrl: "https://www.wypr.org/rss/local-news",
+          feedUrlPolicy: wyprFeedPolicy,
+          articleUrlPolicy: wyprArticlePolicy,
         },
       ],
       discoveryAdapters: [],
@@ -276,6 +330,268 @@ describe("NewsCollector", () => {
       },
     });
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects a feed item outside the configured article allowlist", async () => {
+    const fetch = vi.fn(async (input) => {
+      if (String(input) === "https://www.wypr.org/rss/local-news") {
+        return new Response(
+          await localNewsForUrl("https://attacker.example/story"),
+          { headers: { "content-type": "application/rss+xml" } },
+        );
+      }
+      throw new Error("Cross-origin article must not be fetched");
+    });
+    const collector = new NewsCollector({
+      http: new SourceHttpClient({ fetch }),
+      directFeeds: [
+        {
+          source: metadataOnlySource(),
+          feedUrl: "https://www.wypr.org/rss/local-news",
+          feedUrlPolicy: wyprFeedPolicy,
+          articleUrlPolicy: wyprArticlePolicy,
+        },
+      ],
+      discoveryAdapters: [],
+      forecastAdapters: [],
+    });
+
+    expect(await collector.collect(fixedWindow())).toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects outlet attribution when an article redirect escapes its allowlist", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(await loadFixture("local-news.xml"), {
+          headers: { "content-type": "application/rss+xml" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://attacker.example/stolen" },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(await loadFixture("article.html"), {
+          headers: { "content-type": "text/html" },
+        }),
+      );
+    const collector = new NewsCollector({
+      http: new SourceHttpClient({ fetch, maxRetries: 0 }),
+      directFeeds: [
+        {
+          source: wyprSource,
+          feedUrl: "https://www.wypr.org/rss/local-news",
+          feedUrlPolicy: wyprFeedPolicy,
+          articleUrlPolicy: wyprArticlePolicy,
+        },
+      ],
+      discoveryAdapters: [],
+      forecastAdapters: [],
+    });
+
+    expect(await collector.collect(fixedWindow())).toEqual([]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch.mock.calls[1]?.[1]?.redirect).toBe("manual");
+  });
+
+  it("pins GDELT and Gamma requests and rejects provider redirect escapes", async () => {
+    const providerCases = [
+      {
+        adapter: (http: SourceHttpClient) =>
+          new GdeltAdapter(http, gdeltSource, {
+            query: "AI policy",
+            maxRecords: 10,
+          }),
+        host: "api.gdeltproject.org",
+        path: "/api/v2/doc/doc",
+      },
+      {
+        adapter: (http: SourceHttpClient) =>
+          new PolymarketAdapter(http, polymarketSource, {
+            minimumLiquidity: 100_000,
+            minimumAbsoluteChange: 0.1,
+          }),
+        host: "gamma-api.polymarket.com",
+        path: "/markets",
+      },
+    ] as const;
+
+    for (const providerCase of providerCases) {
+      const fetch = vi
+        .fn()
+        .mockResolvedValueOnce(
+          new Response(null, {
+            status: 302,
+            headers: {
+              location: "https://attacker.example/provider-payload",
+            },
+          }),
+        )
+        .mockResolvedValueOnce(new Response("[]"));
+      const adapter = providerCase.adapter(
+        new SourceHttpClient({ fetch, maxRetries: 0 }),
+      );
+
+      await expect(adapter.collect(fixedWindow())).rejects.toMatchObject({
+        name: "SourceFetchError",
+        retryable: false,
+      });
+      const requested = new URL(String(fetch.mock.calls[0]?.[0]));
+      expect(requested.hostname).toBe(providerCase.host);
+      expect(requested.pathname).toBe(providerCase.path);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    }
+  });
+});
+
+function metadataOnlySource(): ResearchSourceRecord {
+  return source({
+    ...wyprSource,
+    restrictions: {
+      bodyRetrieval: "forbidden",
+      paywall: "hard",
+      contentUse: "metadata-only",
+    },
+  });
+}
+
+function catalogSource(
+  value: Pick<
+    SourceRecord,
+    | "id"
+    | "canonicalName"
+    | "canonicalUrl"
+    | "role"
+    | "restrictions"
+    | "discoveryMechanism"
+  > &
+    Partial<SourceRecord>,
+): SourceRecord {
+  return {
+    trustPrior: 0.9,
+    enabled: true,
+    sectionEligibility: ["world"],
+    lastSuccessAt: null,
+    healthStatus: "unknown",
+    ...value,
+  };
+}
+
+describe("catalog-driven news collection", () => {
+  it("constructs usable direct-page and API adapters with typed policies", async () => {
+    const articleFixture = await loadFixture("article.html");
+    const fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url === "https://dc.gov/newsroom") {
+        return new Response(articleFixture, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (
+        url.startsWith(
+          "https://www.federalregister.gov/api/v1/documents.json",
+        )
+      ) {
+        return Response.json({
+          count: 1,
+          results: [
+            {
+              document_number: "2026-12345",
+              title: "Secure evaluation requirements",
+              html_url:
+                "https://www.federalregister.gov/documents/2026/07/29/2026-12345/secure-evaluation-requirements",
+              publication_date: "2026-07-29",
+              type: "Notice",
+              abstract:
+                "The agency published secure evaluation requirements.",
+            },
+          ],
+        });
+      }
+      throw new Error(`Unexpected catalog URL: ${url}`);
+    });
+    const policy = (
+      host: string,
+      allowedPathPrefixes: readonly string[],
+    ) => ({
+      allowedHosts: [host],
+      allowedPorts: [""],
+      allowedPathPrefixes,
+    });
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      sources: [
+        catalogSource({
+          id: "dc-gov",
+          canonicalName: "DC.gov",
+          canonicalUrl: "https://dc.gov/",
+          role: "primary",
+          discoveryMechanism:
+            "page" as SourceRecord["discoveryMechanism"],
+          sectionEligibility: ["dmv"],
+          restrictions: {
+            bodyRetrieval: "permitted",
+            paywall: "none",
+            contentUse: "open-government",
+            pageUrl: "https://dc.gov/newsroom",
+            urlPolicy: policy("dc.gov", ["/newsroom"]),
+          },
+        }),
+        catalogSource({
+          id: "federal-register",
+          canonicalName: "Federal Register",
+          canonicalUrl: "https://www.federalregister.gov/",
+          role: "primary",
+          discoveryMechanism: "api",
+          sectionEligibility: ["ai_policy"],
+          restrictions: {
+            bodyRetrieval: "permitted",
+            paywall: "none",
+            contentUse: "open-government",
+            apiUrl:
+              "https://www.federalregister.gov/api/v1/documents.json",
+            apiFormat: "federal-register-v1",
+            urlPolicy: policy("www.federalregister.gov", [
+              "/api/v1/documents.json",
+              "/documents/",
+            ]),
+          },
+        }),
+      ],
+    });
+
+    const items = await collector.collect(fixedWindow());
+    expect(items.find((item) => item.sourceId === "dc-gov")).toMatchObject({
+      kind: "document",
+      sourceRole: "primary",
+      canCorroborateFacts: true,
+      accessLevel: "full_text",
+      metadata: {
+        extractionLevel: "full",
+        contentUse: "open-government",
+      },
+    });
+    expect(
+      items.find((item) => item.sourceId === "federal-register"),
+    ).toMatchObject({
+      kind: "document",
+      sourceRole: "primary",
+      canCorroborateFacts: true,
+      title: "Secure evaluation requirements",
+      originalUrl:
+        "https://www.federalregister.gov/documents/2026/07/29/2026-12345/secure-evaluation-requirements",
+      metadata: {
+        documentNumber: "2026-12345",
+        documentType: "Notice",
+      },
+    });
   });
 });
 
@@ -315,6 +631,17 @@ describe("extractReadableArticle", () => {
     );
 
     expect(article.text?.length).toBeLessThanOrEqual(100_000);
+    expect(article.extractionLevel).toBe("partial");
+  });
+
+  it("labels a short teaser as partial rather than complete full text", () => {
+    const article = extractReadableArticle(
+      "<main><h1>Subscriber report</h1><p>A short teaser only.</p></main>",
+      "https://example.com/subscriber-report",
+      "text/html",
+    );
+
+    expect(article.text).toContain("A short teaser only.");
     expect(article.extractionLevel).toBe("partial");
   });
 });

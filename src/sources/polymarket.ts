@@ -14,82 +14,172 @@ import {
 } from "./types";
 
 const POLYMARKET_ENDPOINT = "https://gamma-api.polymarket.com/markets";
+const POLYMARKET_URL_POLICY = {
+  allowedHosts: ["gamma-api.polymarket.com"],
+  allowedPorts: [""],
+  allowedPathPrefixes: ["/markets"],
+} as const;
 
 const ProbabilitySchema = z.number().finite().min(0).max(1);
-const PolymarketMarketBaseSchema = z.object({
-  id: z.string().min(1),
-  question: z.string().trim().min(1),
-  slug: z.string().trim().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
-  updatedAt: z.string().datetime(),
-  endDate: z.string().datetime(),
-  resolutionSource: z.string().url(),
-});
+const PolymarketMarketBaseSchema = z
+  .object({
+    id: z.string().min(1),
+    question: z.string().trim().min(1),
+    slug: z.string().trim().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/),
+    active: z.boolean().nullable(),
+    closed: z.boolean().nullable(),
+    archived: z.boolean().nullable(),
+    acceptingOrders: z.boolean().nullable(),
+    updatedAt: z.string().datetime().nullable(),
+    endDate: z.string().datetime().nullable(),
+    resolutionSource: z.string().url().nullable(),
+  })
+  .passthrough();
 const NormalizedPolymarketMarketSchema =
   PolymarketMarketBaseSchema.extend({
-    currentProbability: ProbabilitySchema,
-    priorProbability: ProbabilitySchema,
+    currentProbability: ProbabilitySchema.nullable(),
+    priorProbability: ProbabilitySchema.nullable(),
     liquidity: z.number().finite().nonnegative().nullable(),
   });
-const GammaPolymarketMarketSchema = PolymarketMarketBaseSchema.extend({
-  outcomes: z.string().min(1),
-  outcomePrices: z.string().min(1),
-  oneDayPriceChange: z.number().finite().min(-1).max(1),
-  liquidity: z.union([
-    z.string().trim().min(1),
-    z.number().finite().nonnegative(),
-  ]),
-});
-const PolymarketResponseSchema = z.array(
-  z.union([
-    NormalizedPolymarketMarketSchema,
-    GammaPolymarketMarketSchema,
-  ]),
-);
+const GammaPolymarketMarketSchema =
+  PolymarketMarketBaseSchema.extend({
+    outcomes: z.string().min(1).nullable(),
+    outcomePrices: z.string().min(1).nullable(),
+    oneDayPriceChange: z
+      .number()
+      .finite()
+      .min(-1)
+      .max(1)
+      .nullable(),
+    liquidity: z
+      .union([
+        z.string().trim().min(1),
+        z.number().finite().nonnegative(),
+      ])
+      .nullable(),
+  });
+const PolymarketResponseSchema = z.array(z.unknown());
 const PolymarketOptionsSchema = z.object({
   minimumLiquidity: z.number().finite().nonnegative(),
   minimumAbsoluteChange: z.number().finite().positive().max(1),
 });
 
 type PolymarketOptions = z.input<typeof PolymarketOptionsSchema>;
+type NormalizedPolymarketMarket = z.output<
+  typeof PolymarketMarketBaseSchema
+> & {
+  currentProbability: number;
+  priorProbability: number;
+  liquidity: number;
+  updatedAt: string;
+  resolutionSource: string;
+};
 
 function roundedProbability(value: number): number {
   return Math.round(value * 1_000_000) / 1_000_000;
 }
 
-type NormalizedPolymarketMarket = z.output<
-  typeof NormalizedPolymarketMarketSchema
->;
-
-function parseStringArray(value: string): string[] {
-  return z.array(z.string()).parse(JSON.parse(value));
+function parseStringArray(value: string): string[] | null {
+  try {
+    const parsed = z.array(z.string()).safeParse(JSON.parse(value));
+    return parsed.success ? parsed.data : null;
+  } catch {
+    return null;
+  }
 }
 
-function normalizeMarket(
-  market: z.output<typeof PolymarketResponseSchema>[number],
-): NormalizedPolymarketMarket | null {
-  if ("currentProbability" in market) {
-    return market;
+function eligibleMarket(
+  market: z.output<typeof PolymarketMarketBaseSchema>,
+): boolean {
+  return (
+    market.active === true &&
+    market.closed === false &&
+    market.archived === false &&
+    market.acceptingOrders === true
+  );
+}
+
+function normalizeMarket(input: unknown): NormalizedPolymarketMarket | null {
+  const normalizedResult =
+    NormalizedPolymarketMarketSchema.safeParse(input);
+  if (normalizedResult.success) {
+    const market = normalizedResult.data;
+    if (
+      !eligibleMarket(market) ||
+      market.currentProbability === null ||
+      market.priorProbability === null ||
+      market.liquidity === null ||
+      market.updatedAt === null ||
+      market.resolutionSource === null
+    ) {
+      return null;
+    }
+    return {
+      ...market,
+      currentProbability: market.currentProbability,
+      priorProbability: market.priorProbability,
+      liquidity: market.liquidity,
+      updatedAt: market.updatedAt,
+      resolutionSource: market.resolutionSource,
+    };
+  }
+
+  const gammaResult = GammaPolymarketMarketSchema.safeParse(input);
+  if (!gammaResult.success || !eligibleMarket(gammaResult.data)) {
+    return null;
+  }
+  const market = gammaResult.data;
+  if (
+    market.outcomes === null ||
+    market.outcomePrices === null ||
+    market.oneDayPriceChange === null ||
+    market.liquidity === null ||
+    market.updatedAt === null ||
+    market.resolutionSource === null
+  ) {
+    return null;
   }
   const outcomes = parseStringArray(market.outcomes);
   const prices = parseStringArray(market.outcomePrices);
-  const yesIndex = outcomes.findIndex(
-    (outcome) => outcome.trim().toLowerCase() === "yes",
+  if (
+    outcomes === null ||
+    prices === null ||
+    outcomes.length === 0 ||
+    outcomes.length !== prices.length
+  ) {
+    return null;
+  }
+  const yesIndexes = outcomes.flatMap((outcome, index) =>
+    outcome.trim().toLowerCase() === "yes" ? [index] : [],
   );
-  if (yesIndex < 0) return null;
-  const currentProbability = ProbabilitySchema.parse(
+  if (yesIndexes.length !== 1) return null;
+  const yesIndex = yesIndexes[0];
+  if (yesIndex === undefined) return null;
+  const currentResult = ProbabilitySchema.safeParse(
     Number(prices[yesIndex]),
   );
+  if (!currentResult.success) return null;
+  const currentProbability = currentResult.data;
   const priorProbability = roundedProbability(
     currentProbability - market.oneDayPriceChange,
   );
-  const normalized = {
+  const priorResult = ProbabilitySchema.safeParse(priorProbability);
+  const liquidity = Number(market.liquidity);
+  if (
+    !priorResult.success ||
+    !Number.isFinite(liquidity) ||
+    liquidity < 0
+  ) {
+    return null;
+  }
+  return {
     ...market,
     currentProbability,
-    priorProbability,
-    liquidity: Number(market.liquidity),
+    priorProbability: priorResult.data,
+    liquidity,
+    updatedAt: market.updatedAt,
+    resolutionSource: market.resolutionSource,
   };
-  const result = NormalizedPolymarketMarketSchema.safeParse(normalized);
-  return result.success ? result.data : null;
 }
 
 export class PolymarketAdapter implements NewsSourceAdapter {
@@ -121,14 +211,15 @@ export class PolymarketAdapter implements NewsSourceAdapter {
       {
         headers: { accept: "application/json" },
         useValidators: false,
+        urlPolicy: POLYMARKET_URL_POLICY,
       },
     );
     if (response.body === null) return [];
-    const markets = PolymarketResponseSchema.parse(
+    const rawMarkets = PolymarketResponseSchema.parse(
       JSON.parse(response.body),
     );
 
-    return markets.flatMap((rawMarket): RawNewsCandidate[] => {
+    return rawMarkets.flatMap((rawMarket): RawNewsCandidate[] => {
       const market = normalizeMarket(rawMarket);
       if (market === null) return [];
       const absoluteChange = roundedProbability(
@@ -139,7 +230,6 @@ export class PolymarketAdapter implements NewsSourceAdapter {
       if (
         market.updatedAt < validWindow.from ||
         market.updatedAt > validWindow.to ||
-        market.liquidity === null ||
         market.liquidity < this.options.minimumLiquidity ||
         absoluteChange < this.options.minimumAbsoluteChange
       ) {

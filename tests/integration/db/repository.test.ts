@@ -8,6 +8,8 @@ import type {
 } from "../../../src/contracts/editorial";
 import { D1BriefingRepository } from "../../../src/db/d1-repository";
 import { RepositoryValidationError } from "../../../src/db/repository";
+import { SourceHttpClient } from "../../../src/sources/http-client";
+import { createNewsCollectorFromCatalog } from "../../../src/sources/news-collector";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv {
@@ -158,6 +160,16 @@ describe("D1BriefingRepository", () => {
         bodyRetrieval: expect.stringMatching(/^(forbidden|permitted)$/),
       });
     }
+    expect(() =>
+      createNewsCollectorFromCatalog({
+        http: new SourceHttpClient({
+          fetch: async () => {
+            throw new Error("Catalog construction must not use network.");
+          },
+        }),
+        sources: catalog,
+      }),
+    ).not.toThrow();
 
     await repo.updateSource("reuters", {
       enabled: false,

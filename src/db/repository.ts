@@ -69,7 +69,12 @@ export type ReaderPreferences = {
 };
 
 export type SourceHealth = "unknown" | "healthy" | "degraded" | "failing";
-export type DiscoveryMechanism = "api" | "rss" | "search" | "manual";
+export type DiscoveryMechanism =
+  | "api"
+  | "rss"
+  | "page"
+  | "search"
+  | "manual";
 
 export type SourceRecord = {
   id: string;
@@ -373,6 +378,7 @@ export const SourceHealthSchema = z.enum([
 export const DiscoveryMechanismSchema = z.enum([
   "api",
   "rss",
+  "page",
   "search",
   "manual",
 ]);

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { assertSafeOutboundUrl } from "./outbound-url";
 
 export const MAX_EXTRACTED_ARTICLE_CHARACTERS = 100_000;
+export const MIN_COMPLETE_ARTICLE_CHARACTERS = 500;
 
 export const ExtractedArticleSchema = z.object({
   title: z.string().min(1).nullable(),
@@ -69,7 +70,8 @@ export function extractReadableArticle(
     document as unknown as Document,
     { charThreshold: 100 },
   ).parse();
-  const fullText = normalized(article?.textContent) ?? fallbackText;
+  const readabilityText = normalized(article?.textContent);
+  const fullText = readabilityText ?? fallbackText;
   if (fullText === null) {
     return metadataOnly();
   }
@@ -83,6 +85,11 @@ export function extractReadableArticle(
     text: wasTruncated
       ? fullText.slice(0, MAX_EXTRACTED_ARTICLE_CHARACTERS)
       : fullText,
-    extractionLevel: wasTruncated ? "partial" : "full",
+    extractionLevel:
+      wasTruncated ||
+      readabilityText === null ||
+      fullText.length < MIN_COMPLETE_ARTICLE_CHARACTERS
+        ? "partial"
+        : "full",
   });
 }

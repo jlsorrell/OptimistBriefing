@@ -14,6 +14,11 @@ import {
 } from "./types";
 
 const GDELT_ENDPOINT = "https://api.gdeltproject.org/api/v2/doc/doc";
+const GDELT_URL_POLICY = {
+  allowedHosts: ["api.gdeltproject.org"],
+  allowedPorts: [""],
+  allowedPathPrefixes: ["/api/v2/doc/doc"],
+} as const;
 
 const GdeltArticleSchema = z.object({
   url: z.string().url(),
@@ -46,7 +51,16 @@ function gdeltTimestamp(value: string): string {
 }
 
 function queryTimestamp(value: string): string {
-  return value.replaceAll("-", "").replaceAll(":", "").replace(".000", "");
+  const date = new Date(value);
+  const component = (part: number) => String(part).padStart(2, "0");
+  return [
+    date.getUTCFullYear(),
+    component(date.getUTCMonth() + 1),
+    component(date.getUTCDate()),
+    component(date.getUTCHours()),
+    component(date.getUTCMinutes()),
+    component(date.getUTCSeconds()),
+  ].join("");
 }
 
 export class GdeltAdapter implements NewsSourceAdapter {
@@ -87,6 +101,7 @@ export class GdeltAdapter implements NewsSourceAdapter {
       {
         headers: { accept: "application/json" },
         useValidators: false,
+        urlPolicy: GDELT_URL_POLICY,
       },
     );
     if (response.body === null) return [];
