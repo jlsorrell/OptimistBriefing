@@ -124,6 +124,201 @@ export class RepositoryValidationError extends Error {
   }
 }
 
+export type JsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | JsonValue[]
+  | { [key: string]: JsonValue };
+
+export const JsonValueSchema: z.ZodType<JsonValue> = z.lazy(() =>
+  z.union([
+    z.string(),
+    z.number().finite(),
+    z.boolean(),
+    z.null(),
+    z.array(JsonValueSchema),
+    z.record(z.string(), JsonValueSchema),
+  ]),
+);
+
+function jsonMutationError(
+  context: string,
+  path: string,
+  message: string,
+  cause?: unknown,
+): RepositoryValidationError {
+  return new RepositoryValidationError(
+    `${context} at ${path}: ${message}`,
+    cause === undefined ? undefined : { cause },
+  );
+}
+
+function arrayIndexKey(key: string, length: number): boolean {
+  if (!/^(0|[1-9]\d*)$/.test(key)) {
+    return false;
+  }
+  const index = Number(key);
+  return Number.isSafeInteger(index) && index >= 0 && index < length;
+}
+
+function toJsonValue(
+  value: unknown,
+  context: string,
+  path: string,
+  ancestors: WeakSet<object>,
+): JsonValue {
+  if (value === null) {
+    return null;
+  }
+  if (typeof value === "string" || typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) {
+      throw jsonMutationError(
+        context,
+        path,
+        "numbers must be finite",
+      );
+    }
+    return value;
+  }
+  if (typeof value !== "object") {
+    throw jsonMutationError(
+      context,
+      path,
+      `${typeof value} is not a JSON value`,
+    );
+  }
+  if (ancestors.has(value)) {
+    throw jsonMutationError(context, path, "cyclic values are not JSON");
+  }
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      for (const key of Reflect.ownKeys(value)) {
+        if (typeof key === "symbol") {
+          throw jsonMutationError(
+            context,
+            path,
+            "symbol keys are not JSON",
+          );
+        }
+        if (key !== "length" && !arrayIndexKey(key, value.length)) {
+          throw jsonMutationError(
+            context,
+            `${path}.${key}`,
+            "non-index array properties are not JSON",
+          );
+        }
+      }
+
+      const result: JsonValue[] = [];
+      for (let index = 0; index < value.length; index += 1) {
+        if (!Object.hasOwn(value, index)) {
+          throw jsonMutationError(
+            context,
+            `${path}[${index}]`,
+            "sparse array entries are not exact JSON values",
+          );
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(value, index);
+        if (
+          descriptor === undefined ||
+          !descriptor.enumerable ||
+          !("value" in descriptor)
+        ) {
+          throw jsonMutationError(
+            context,
+            `${path}[${index}]`,
+            "array accessors and non-enumerable entries are not JSON",
+          );
+        }
+        result.push(
+          toJsonValue(
+            descriptor.value,
+            context,
+            `${path}[${index}]`,
+            ancestors,
+          ),
+        );
+      }
+      return result;
+    }
+
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) {
+      throw jsonMutationError(
+        context,
+        path,
+        "only plain objects are JSON mutation values",
+      );
+    }
+
+    const result = Object.create(null) as {
+      [key: string]: JsonValue;
+    };
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key === "symbol") {
+        throw jsonMutationError(
+          context,
+          path,
+          "symbol keys are not JSON",
+        );
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (
+        descriptor === undefined ||
+        !descriptor.enumerable ||
+        !("value" in descriptor)
+      ) {
+        throw jsonMutationError(
+          context,
+          `${path}.${key}`,
+          "accessors and non-enumerable properties are not JSON",
+        );
+      }
+      result[key] = toJsonValue(
+        descriptor.value,
+        context,
+        `${path}.${key}`,
+        ancestors,
+      );
+    }
+    return result;
+  } catch (error) {
+    if (error instanceof RepositoryValidationError) {
+      throw error;
+    }
+    throw jsonMutationError(
+      context,
+      path,
+      "could not inspect JSON mutation value",
+      error,
+    );
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+export function serializeJsonMutation(
+  value: unknown,
+  context: string,
+): string {
+  const jsonValue = toJsonValue(value, context, "$", new WeakSet());
+  const parsed = JsonValueSchema.safeParse(jsonValue);
+  if (!parsed.success) {
+    throw new RepositoryValidationError(
+      `${context}: ${parsed.error.message}`,
+      { cause: parsed.error },
+    );
+  }
+  return JSON.stringify(jsonValue);
+}
+
 export const FeedbackActionSchema = z.enum([
   "save",
   "unsave",

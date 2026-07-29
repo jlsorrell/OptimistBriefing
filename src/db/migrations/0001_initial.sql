@@ -6,7 +6,7 @@ CREATE TABLE sources (
   canonical_url TEXT NOT NULL UNIQUE,
   role TEXT NOT NULL,
   trust_prior REAL NOT NULL DEFAULT 0.5,
-  enabled INTEGER NOT NULL DEFAULT 1,
+  enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
   restrictions_json TEXT NOT NULL DEFAULT '{}',
   last_success_at TEXT,
   health_status TEXT NOT NULL DEFAULT 'unknown'
@@ -130,7 +130,7 @@ CREATE TABLE workflow_runs (
   edition_date TEXT NOT NULL,
   status TEXT NOT NULL,
   current_step TEXT,
-  retryable INTEGER NOT NULL DEFAULT 0,
+  retryable INTEGER NOT NULL DEFAULT 0 CHECK (retryable IN (0, 1)),
   attempt_count INTEGER NOT NULL DEFAULT 0,
   failure_code TEXT,
   estimated_cost_usd REAL NOT NULL DEFAULT 0,

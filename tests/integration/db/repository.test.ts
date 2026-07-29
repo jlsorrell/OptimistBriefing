@@ -206,6 +206,136 @@ describe("D1BriefingRepository", () => {
     expect(await repo.listSources()).toEqual([updated]);
   });
 
+  it("rejects malformed stored source booleans instead of normalizing them", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    await env.DB.prepare("PRAGMA ignore_check_constraints = ON").run();
+    try {
+      await env.DB.prepare(
+        `INSERT INTO sources (
+          id, canonical_name, canonical_url, role, trust_prior, enabled,
+          restrictions_json, health_status
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          "source-invalid-boolean",
+          "Invalid Boolean Source",
+          "https://example.com/invalid-boolean",
+          "primary",
+          0.5,
+          2,
+          '{"discoveryMechanism":"manual","sectionEligibility":[]}',
+          "unknown",
+        )
+        .run();
+    } finally {
+      await env.DB.prepare("PRAGMA ignore_check_constraints = OFF").run();
+    }
+
+    await expect(repo.listSources()).rejects.toBeInstanceOf(
+      RepositoryValidationError,
+    );
+  });
+
+  it("rejects non-JSON source restrictions with typed validation errors", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    const symbolKeyed: Record<string, unknown> = {};
+    Object.defineProperty(symbolKeyed, Symbol("not JSON"), {
+      value: "not JSON",
+      enumerable: true,
+    });
+    const invalidRestrictions: readonly Record<string, unknown>[] = [
+      { value: 1n },
+      { value: undefined },
+      { value: () => "not JSON" },
+      { value: Symbol("not JSON") },
+      symbolKeyed,
+      { value: cyclic },
+      { value: new Date("2026-07-29T09:00:00.000Z") },
+    ];
+
+    for (const [index, restrictions] of invalidRestrictions.entries()) {
+      await expect(
+        repo.createSource({
+          id: `source-invalid-json-${index}`,
+          canonicalName: `Invalid JSON Source ${index}`,
+          canonicalUrl: `https://example.com/invalid-json/${index}`,
+          role: "primary",
+          trustPrior: 0.5,
+          enabled: true,
+          restrictions,
+          discoveryMechanism: "manual",
+          sectionEligibility: [],
+        }),
+      ).rejects.toBeInstanceOf(RepositoryValidationError);
+    }
+  });
+
+  it("rejects non-JSON item metadata with a typed validation error", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const item = fixtureItem("invalid-metadata", {
+      metadata: {
+        nested: {
+          droppedByJsonStringify: undefined,
+        },
+      },
+    });
+
+    await expect(repo.upsertItems([item])).rejects.toBeInstanceOf(
+      RepositoryValidationError,
+    );
+  });
+
+  it("preserves valid nested source restrictions and item metadata exactly", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const restrictions = {
+      policy: {
+        paths: ["/papers", "/reports"],
+        budget: 3,
+        enabled: true,
+        note: null,
+      },
+    };
+    const metadata = {
+      authors: ["Ada Example"],
+      institutions: ["Example Institute"],
+      metrics: {
+        effectSizes: [0.1, 0.25],
+        peerReviewed: true,
+        note: null,
+      },
+      reservedKeyObject: JSON.parse(
+        '{"__proto__":{"preserved":true},"constructor":"literal"}',
+      ),
+    };
+
+    const source = await repo.createSource({
+      id: "source-nested-json",
+      canonicalName: "Nested JSON Source",
+      canonicalUrl: "https://example.com/nested-json",
+      role: "primary",
+      trustPrior: 0.75,
+      enabled: true,
+      restrictions,
+      discoveryMechanism: "api",
+      sectionEligibility: ["research"],
+    });
+    await repo.upsertItems([
+      fixtureItem("nested-json-item", { metadata }),
+    ]);
+
+    expect(source.restrictions).toEqual(restrictions);
+    const row = await env.DB.prepare(
+      "SELECT normalized_json FROM items WHERE id = ?",
+    )
+      .bind("nested-json-item")
+      .first<{ normalized_json: string }>();
+    expect(JSON.parse(row?.normalized_json ?? "{}").metadata).toEqual(
+      metadata,
+    );
+  });
+
   it("persists feedback history without inferring preference weights", async () => {
     const repo = new D1BriefingRepository(env.DB);
     await repo.upsertItems([fixtureItem("feedback-item")]);
@@ -386,5 +516,35 @@ describe("D1BriefingRepository", () => {
       createdAt: "2026-07-29T09:00:00.000Z",
       updatedAt: "2026-07-29T09:30:00.000Z",
     });
+  });
+
+  it("rejects malformed stored workflow booleans instead of normalizing them", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    await env.DB.prepare("PRAGMA ignore_check_constraints = ON").run();
+    try {
+      await env.DB.prepare(
+        `INSERT INTO workflow_runs (
+          id, edition_date, status, retryable, attempt_count,
+          estimated_cost_usd, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          "run-invalid-boolean",
+          "2026-07-29",
+          "running",
+          -1,
+          1,
+          0,
+          "2026-07-29T09:00:00.000Z",
+          "2026-07-29T09:00:00.000Z",
+        )
+        .run();
+    } finally {
+      await env.DB.prepare("PRAGMA ignore_check_constraints = OFF").run();
+    }
+
+    await expect(
+      repo.getWorkflowRun("run-invalid-boolean"),
+    ).rejects.toBeInstanceOf(RepositoryValidationError);
   });
 });

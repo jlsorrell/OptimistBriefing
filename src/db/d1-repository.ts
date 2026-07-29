@@ -28,6 +28,7 @@ import {
   FeedbackInputSchema,
   ReaderPreferencesSchema,
   RepositoryValidationError,
+  serializeJsonMutation,
   SourceRecordSchema,
   UpdateSourceInputSchema,
   WorkflowRunSchema,
@@ -238,6 +239,16 @@ function entryFromRow(row: EntryRow): EditionEntry {
   );
 }
 
+function storedBoolean(value: unknown, context: string): boolean {
+  if (value === 0) {
+    return false;
+  }
+  if (value === 1) {
+    return true;
+  }
+  throw new RepositoryValidationError(`${context}: expected 0 or 1`);
+}
+
 function sourceFromRow(row: SourceRow): SourceRecord {
   const stored = parsedJson(
     row.restrictions_json,
@@ -267,7 +278,7 @@ function sourceFromRow(row: SourceRow): SourceRecord {
       canonicalUrl: row.canonical_url,
       role: row.role,
       trustPrior: row.trust_prior,
-      enabled: row.enabled === 1,
+      enabled: storedBoolean(row.enabled, "Invalid source enabled value"),
       restrictions,
       discoveryMechanism,
       sectionEligibility,
@@ -286,7 +297,10 @@ function workflowRunFromRow(row: WorkflowRunRow): WorkflowRun {
       editionDate: row.edition_date,
       status: row.status,
       currentStep: row.current_step,
-      retryable: row.retryable === 1,
+      retryable: storedBoolean(
+        row.retryable,
+        "Invalid workflow retryable value",
+      ),
       attemptCount: row.attempt_count,
       failureCode: row.failure_code,
       estimatedCostUsd: row.estimated_cost_usd,
@@ -302,11 +316,14 @@ function restrictionsJson(source: {
   discoveryMechanism: string;
   sectionEligibility: readonly string[];
 }): string {
-  return JSON.stringify({
-    ...source.restrictions,
-    discoveryMechanism: source.discoveryMechanism,
-    sectionEligibility: source.sectionEligibility,
-  });
+  return serializeJsonMutation(
+    {
+      ...source.restrictions,
+      discoveryMechanism: source.discoveryMechanism,
+      sectionEligibility: source.sectionEligibility,
+    },
+    "Invalid source restrictions",
+  );
 }
 
 function summaryStatements(
@@ -374,15 +391,20 @@ export class D1BriefingRepository implements BriefingRepository {
   constructor(private readonly db: D1Database) {}
 
   async upsertItems(items: readonly Item[]): Promise<void> {
-    const validItems = items.map((item) =>
-      validated(ItemSchema, item, "Invalid item"),
-    );
+    const validItems = items.map((item) => {
+      serializeJsonMutation(item, "Invalid item mutation");
+      return validated(ItemSchema, item, "Invalid item");
+    });
     if (validItems.length === 0) {
       return;
     }
 
     const statements: D1PreparedStatement[] = [];
     for (const item of validItems) {
+      const normalizedJson = serializeJsonMutation(
+        item,
+        "Invalid item JSON",
+      );
       for (const source of item.sourceRefs) {
         statements.push(
           this.db
@@ -437,7 +459,7 @@ export class D1BriefingRepository implements BriefingRepository {
             item.title,
             item.publishedAt,
             item.accessLevel,
-            JSON.stringify(item),
+            normalizedJson,
             item.createdAt,
             item.expiresAt,
           ),
@@ -984,6 +1006,7 @@ export class D1BriefingRepository implements BriefingRepository {
   }
 
   async createSource(input: CreateSourceInput): Promise<SourceRecord> {
+    serializeJsonMutation(input, "Invalid source mutation");
     const validInput = validated(
       CreateSourceInputSchema,
       input,
@@ -1021,6 +1044,7 @@ export class D1BriefingRepository implements BriefingRepository {
     sourceId: string,
     input: UpdateSourceInput,
   ): Promise<SourceRecord> {
+    serializeJsonMutation(input, "Invalid source update mutation");
     const validId = validated(
       NonemptyIdSchema,
       sourceId,
