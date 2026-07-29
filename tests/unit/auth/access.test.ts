@@ -97,4 +97,17 @@ describe("verifyAccessJwt", () => {
       }),
     ).toThrow();
   });
+
+  it.each([
+    "attacker@evil.example",
+    "attacker:secret@evil.example",
+  ])("rejects a configured team domain containing userinfo: %s", (teamDomain) => {
+    expect(() =>
+      createAccessVerifier({
+        teamDomain,
+        audience,
+        allowedEmails: new Set(["reader@example.com"]),
+      }),
+    ).toThrow();
+  });
 });

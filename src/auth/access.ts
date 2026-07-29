@@ -29,6 +29,8 @@ function normalizedTeamDomain(teamDomain: string): string {
   if (
     url.protocol !== "https:" ||
     url.hostname.length === 0 ||
+    url.username.length > 0 ||
+    url.password.length > 0 ||
     url.port.length > 0 ||
     url.pathname !== "/" ||
     url.search.length > 0 ||
