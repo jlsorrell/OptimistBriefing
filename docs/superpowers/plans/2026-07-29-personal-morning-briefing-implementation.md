@@ -351,7 +351,7 @@ Expected: PASS, including the draft-visibility assertion.
 - [ ] **Step 6: Commit the persistence layer**
 
 ```bash
-git add wrangler.jsonc vitest.worker.config.ts src/db tests/integration/db
+git add package.json wrangler.jsonc vitest.worker.config.ts src/db tests/integration/db
 git commit -m "feat: add atomic D1 briefing repository"
 ```
 
