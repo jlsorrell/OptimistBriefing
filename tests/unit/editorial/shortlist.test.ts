@@ -181,16 +181,50 @@ describe("shortlist", () => {
   it("rejects an unchanged previous-edition development but keeps material changes", () => {
     const unchanged = item("unchanged", "ai_policy", "article", {
       section: "ai_policy",
-      developmentKey: "agency-framework",
-      materialFactsFingerprint: "version-1",
+      primaryDocumentUrl: "https://agency.gov/framework",
+      eventFamilies: ["guidance-rule"],
+      materialFacts: [
+        { kind: "status", key: "event-status", value: "adopted" },
+      ],
     });
     const changed = item("changed", "ai_policy", "article", {
       section: "ai_policy",
-      developmentKey: "evaluation-rule",
-      materialFactsFingerprint: "version-2",
+      primaryDocumentUrl: "https://agency.gov/evaluation-rule",
+      eventFamilies: ["guidance-rule"],
+      materialFacts: [
+        { kind: "status", key: "event-status", value: "adopted" },
+      ],
     });
+    const changedPreviously = item(
+      "changed-previously",
+      "ai_policy",
+      "article",
+      {
+        section: "ai_policy",
+        primaryDocumentUrl: "https://agency.gov/evaluation-rule",
+        eventFamilies: ["guidance-rule"],
+        materialFacts: [
+          {
+            kind: "status",
+            key: "event-status",
+            value: "proposed",
+          },
+        ],
+      },
+    );
+    const unchangedPreviously = development(unchanged);
+    const changedPreviousDevelopment = development(
+      changedPreviously,
+    );
     const unchangedDevelopment = development(unchanged);
     const changedDevelopment = development(changed);
+
+    expect(changedDevelopment.developmentKey).toBe(
+      changedPreviousDevelopment.developmentKey,
+    );
+    expect(changedDevelopment.materialFactsFingerprint).not.toBe(
+      changedPreviousDevelopment.materialFactsFingerprint,
+    );
 
     const result = shortlist(
       [unchangedDevelopment, changedDevelopment],
@@ -202,12 +236,15 @@ describe("shortlist", () => {
         ...preferences,
         previousEditionDevelopments: [
           {
-            developmentKey: "agency-framework",
-            materialFactsFingerprint: "version-1",
+            developmentKey: unchangedPreviously.developmentKey,
+            materialFactsFingerprint:
+              unchangedPreviously.materialFactsFingerprint,
           },
           {
-            developmentKey: "evaluation-rule",
-            materialFactsFingerprint: "version-1",
+            developmentKey:
+              changedPreviousDevelopment.developmentKey,
+            materialFactsFingerprint:
+              changedPreviousDevelopment.materialFactsFingerprint,
           },
         ],
       },

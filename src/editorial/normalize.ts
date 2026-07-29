@@ -3,7 +3,15 @@ import {
   normalizeArxivIdentifier,
   normalizeDoi,
 } from "../sources/identifiers";
-import { RawItemSchema } from "../sources/types";
+import {
+  NewsMaterialFactSchema,
+  RawItemSchema,
+  type NewsMaterialFact,
+} from "../sources/types";
+import {
+  deriveEventFamilies,
+  deriveMaterialFacts,
+} from "../sources/news-signals";
 import { mapResearchTopicIds } from "./research-topics";
 
 const TRACKING_PARAMETERS = new Set([
@@ -76,6 +84,14 @@ function stringArray(value: unknown): string[] {
         .map(normalizedWhitespace)
         .filter((entry) => entry.length > 0)
     : [];
+}
+
+function materialFacts(value: unknown): NewsMaterialFact[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): NewsMaterialFact[] => {
+    const parsed = NewsMaterialFactSchema.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
 }
 
 function optionalDate(value: unknown): string | null {
@@ -169,6 +185,34 @@ export function normalizeCandidate(raw: unknown): Item {
             candidate.metadata.primaryDocumentUrl) as string,
         )
       : null;
+  const primaryDocumentUrls = uniqueSorted([
+    ...stringArray(
+      input.primaryDocumentUrls ??
+        candidate.metadata.primaryDocumentUrls,
+    ).map(canonicalizeUrl),
+    ...(primaryDocumentUrl === null ? [] : [primaryDocumentUrl]),
+  ]);
+  const explicitEventFamilies = stringArray(
+    input.eventFamilies ?? candidate.metadata.eventFamilies,
+  );
+  const eventFamilies = uniqueSorted(
+    explicitEventFamilies.length > 0
+      ? explicitEventFamilies
+      : deriveEventFamilies(title, candidate.metadata),
+  );
+  const explicitMaterialFacts = materialFacts(
+    input.materialFacts ?? candidate.metadata.materialFacts,
+  );
+  const structuredMaterialFacts = (
+    explicitMaterialFacts.length > 0
+      ? explicitMaterialFacts
+      : deriveMaterialFacts(title, candidate.metadata)
+  ).sort(
+    (left, right) =>
+      left.kind.localeCompare(right.kind) ||
+      left.key.localeCompare(right.key) ||
+      left.value.localeCompare(right.value),
+  );
   const section =
     typeof candidate.metadata.primarySection === "string"
       ? normalizedWhitespace(candidate.metadata.primarySection)
@@ -240,6 +284,9 @@ export function normalizeCandidate(raw: unknown): Item {
       sectionEligibility: uniqueSorted(sectionEligibility),
       namedEntities: uniqueSorted(namedEntities),
       primaryDocumentUrl,
+      primaryDocumentUrls,
+      eventFamilies,
+      materialFacts: structuredMaterialFacts,
       relatedPaperIds: uniqueSorted(
         candidate.relatedPaperIds.map(canonicalIdentifier),
       ),

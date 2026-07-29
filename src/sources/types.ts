@@ -25,6 +25,7 @@ export const CollectionWindowSchema = z
 export const ResearchSourceRestrictionsSchema = z
   .object({
     bodyRetrieval: z.enum(["forbidden", "permitted"]).default("forbidden"),
+    preferredSection: EditionSectionSchema.optional(),
   })
   .passthrough();
 
@@ -66,12 +67,21 @@ export const RawResearchCandidateSchema = RawItemSchema.extend({
   topics: z.array(z.string().min(1)),
 });
 
+export const NewsMaterialFactSchema = z.object({
+  kind: z.enum(["status", "number", "date"]),
+  key: z.string().min(1),
+  value: z.string().min(1),
+});
+
 export const RawNewsCandidateSchema = RawItemSchema.extend({
   kind: z.enum(["article", "document", "forecast"]),
   canCorroborateFacts: z.boolean(),
   sectionEligibility: z.array(EditionSectionSchema).default([]),
   namedEntities: z.array(z.string().min(1)).default([]),
   primaryDocumentUrl: z.string().url().nullable().default(null),
+  primaryDocumentUrls: z.array(z.string().url()).default([]),
+  eventFamilies: z.array(z.string().min(1)).default([]),
+  materialFacts: z.array(NewsMaterialFactSchema).default([]),
 }).superRefine((candidate, context) => {
   if (
     candidate.canCorroborateFacts &&
@@ -113,6 +123,7 @@ export type RawResearchCandidate = z.infer<
   typeof RawResearchCandidateSchema
 >;
 export type RawNewsCandidate = z.infer<typeof RawNewsCandidateSchema>;
+export type NewsMaterialFact = z.infer<typeof NewsMaterialFactSchema>;
 
 export interface SourceAdapter {
   collect(window: CollectionWindow): Promise<RawItem[]>;

@@ -34,6 +34,9 @@ function rawNews(
     sectionEligibility: ["ai_policy"],
     namedEntities: [],
     primaryDocumentUrl: null,
+    primaryDocumentUrls: [],
+    eventFamilies: [],
+    materialFacts: [],
     metadata: {
       section: "ai_policy",
       namedEntities: ["Evaluation Agency"],
@@ -178,6 +181,52 @@ describe("deduplicateItems", () => {
     ]);
   });
 
+  it("unions losing-source section, entity, and primary-document signals", () => {
+    const first = normalized("first", {
+      externalIds: ["DOI:10.1000/signal-union"],
+      sectionEligibility: ["world", "technology"],
+      namedEntities: ["Example Company"],
+      primaryDocumentUrl: "https://company.example/report",
+    });
+    const second = normalized("second", {
+      externalIds: ["DOI:10.1000/signal-union"],
+      sectionEligibility: ["ai_policy"],
+      namedEntities: ["Evaluation Agency"],
+      primaryDocumentUrl: "https://agency.gov/standard",
+    });
+
+    const result = deduplicateItems([first, second]);
+    const merged = result.items[0];
+    expect(merged?.metadata.sectionEligibility).toEqual([
+      "ai_policy",
+      "technology",
+      "world",
+    ]);
+    expect(merged?.metadata.namedEntities).toEqual([
+      "Evaluation Agency",
+      "Example Company",
+    ]);
+    expect(merged?.metadata.primaryDocumentUrls).toEqual([
+      "https://agency.gov/standard",
+      "https://company.example/report",
+    ]);
+
+    const development = clusterNews(result.items, {})[0];
+    expect(development?.sectionEligibility).toEqual([
+      "ai_policy",
+      "technology",
+      "world",
+    ]);
+    expect(development?.namedEntities).toEqual([
+      "Evaluation Agency",
+      "Example Company",
+    ]);
+    expect(development?.primaryDocumentUrls).toEqual([
+      "https://agency.gov/standard",
+      "https://company.example/report",
+    ]);
+  });
+
   it("requires both similar titles and a compatible publication window", () => {
     const baseline = normalized("ap", {
       title: "Baltimore approves a secure evaluation framework",
@@ -235,6 +284,30 @@ describe("deduplicateItems", () => {
 });
 
 describe("clusterNews", () => {
+  it("does not cluster stories whose only shared entity is generic AI", () => {
+    const product = normalized("product", {
+      title: "AI assistant launches for developers",
+      metadata: {
+        namedEntities: ["AI"],
+        section: "technology",
+      },
+    });
+    const research = normalized("research", {
+      title: "AI benchmark measures scientific reasoning",
+      metadata: {
+        namedEntities: ["AI"],
+        section: "technology",
+      },
+    });
+
+    expect(
+      clusterNews([product, research], {
+        [product.id]: [1, 0],
+        [research.id]: [1, 0],
+      }),
+    ).toHaveLength(2);
+  });
+
   it("combines semantic similarity with entities and a publication window", () => {
     const reuters = normalized("reuters", {
       metadata: {

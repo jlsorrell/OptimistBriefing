@@ -67,11 +67,10 @@ function rawNews(
     sectionEligibility: ["ai_policy"],
     namedEntities: ["Evaluation Agency"],
     primaryDocumentUrl: "https://agency.gov/framework",
-    metadata: {
-      primarySection: "ai_policy",
-      developmentKey: "agency-framework",
-      materialFactsFingerprint: "version-2",
-    },
+    primaryDocumentUrls: [],
+    eventFamilies: [],
+    materialFacts: [],
+    metadata: { primarySection: "ai_policy" },
     ...overrides,
   };
 }
@@ -151,18 +150,67 @@ describe("editorial production path", () => {
     expect(result.aiPolicy[0]?.sourceEvidence).toHaveLength(2);
   });
 
-  it("applies previous-edition material-change checks to the development", () => {
-    const developments = clusterNews(
-      [
-        normalizeCandidate(rawNews("agency", { kind: "document" })),
-        normalizeCandidate(rawNews("reuters", {})),
-      ],
-      {},
+  it("keeps ordinary paraphrases and added reporting on one repeat identity", () => {
+    const originalItem = normalizeCandidate(
+      rawNews("reuters", {
+        title:
+          "Evaluation Agency approves AI evaluation standard for 100 models",
+        primaryDocumentUrl: null,
+        namedEntities: ["Evaluation Agency"],
+        abstract:
+          "The standard was approved and covers 100 evaluated models.",
+      }),
     );
-    const development = developments[0];
-    expect(development).toBeDefined();
-    if (development === undefined) return;
-    const score = scoreNewsDevelopment(development, {
+    const paraphrasedItem = normalizeCandidate(
+      rawNews("ap", {
+        title:
+          "100-model safety standard adopted by Evaluation Agency",
+        primaryDocumentUrl: null,
+        namedEntities: ["Evaluation Agency"],
+        abstract:
+          "The Evaluation Agency adopted the standard for 100 models.",
+      }),
+    );
+    const corroboratingItem = normalizeCandidate(
+      rawNews("npr", {
+        title:
+          "Evaluation Agency adopts safety standard covering 100 AI models",
+        primaryDocumentUrl: null,
+        namedEntities: ["Evaluation Agency"],
+        abstract:
+          "A safety standard covering 100 AI models was approved.",
+      }),
+    );
+    const original = clusterNews([originalItem], {})[0];
+    const paraphrased = clusterNews([paraphrasedItem], {})[0];
+    const withAddedSource = clusterNews(
+      [paraphrasedItem, corroboratingItem],
+      {
+        [paraphrasedItem.id]: [1, 0],
+        [corroboratingItem.id]: [0.99, 0.01],
+      },
+    )[0];
+    expect(original).toBeDefined();
+    expect(paraphrased).toBeDefined();
+    expect(withAddedSource).toBeDefined();
+    if (
+      original === undefined ||
+      paraphrased === undefined ||
+      withAddedSource === undefined
+    ) {
+      return;
+    }
+
+    expect(paraphrased.developmentKey).toBe(original.developmentKey);
+    expect(paraphrased.materialFactsFingerprint).toBe(
+      original.materialFactsFingerprint,
+    );
+    expect(withAddedSource.developmentKey).toBe(original.developmentKey);
+    expect(withAddedSource.materialFactsFingerprint).toBe(
+      original.materialFactsFingerprint,
+    );
+
+    const score = scoreNewsDevelopment(withAddedSource, {
       publicImportance: 0.8,
       personalRelevance: 0.8,
       sourceQuality: 0.8,
@@ -172,28 +220,15 @@ describe("editorial production path", () => {
     });
 
     const repeated = shortlist(
-      developments,
+      [withAddedSource],
       [score],
       {
         ...preferences,
         previousEditionDevelopments: [
           {
-            developmentKey: "agency-framework",
-            materialFactsFingerprint: "version-2",
-          },
-        ],
-      },
-      budgets,
-    );
-    const changed = shortlist(
-      developments,
-      [score],
-      {
-        ...preferences,
-        previousEditionDevelopments: [
-          {
-            developmentKey: "agency-framework",
-            materialFactsFingerprint: "version-1",
+            developmentKey: original.developmentKey,
+            materialFactsFingerprint:
+              original.materialFactsFingerprint,
           },
         ],
       },
@@ -202,12 +237,54 @@ describe("editorial production path", () => {
 
     expect(repeated.aiPolicy).toEqual([]);
     expect(repeated.exclusions).toContainEqual({
-      itemId: development.id,
+      itemId: withAddedSource.id,
       reason: "unchanged_from_previous_edition",
     });
-    expect(changed.aiPolicy.map(({ id }) => id)).toEqual([
-      development.id,
-    ]);
+  });
+
+  it("changes material fingerprints for status or numeric fact changes", () => {
+    const development = (title: string) =>
+      clusterNews(
+        [
+          normalizeCandidate(
+            rawNews(title.includes("200") ? "changed-number" : title.includes("proposes") ? "changed-status" : "baseline", {
+              title,
+              primaryDocumentUrl: null,
+              namedEntities: ["Evaluation Agency"],
+              abstract: title,
+            }),
+          ),
+        ],
+        {},
+      )[0];
+    const approved = development(
+      "Evaluation Agency approves AI evaluation standard for 100 models",
+    );
+    const proposed = development(
+      "Evaluation Agency proposes AI evaluation standard for 100 models",
+    );
+    const expanded = development(
+      "Evaluation Agency approves AI evaluation standard for 200 models",
+    );
+    expect(approved).toBeDefined();
+    expect(proposed).toBeDefined();
+    expect(expanded).toBeDefined();
+    if (
+      approved === undefined ||
+      proposed === undefined ||
+      expanded === undefined
+    ) {
+      return;
+    }
+
+    expect(proposed.developmentKey).toBe(approved.developmentKey);
+    expect(expanded.developmentKey).toBe(approved.developmentKey);
+    expect(proposed.materialFactsFingerprint).not.toBe(
+      approved.materialFactsFingerprint,
+    );
+    expect(expanded.materialFactsFingerprint).not.toBe(
+      approved.materialFactsFingerprint,
+    );
   });
 
   it("maps Task 5 provider labels to configured IDs before diversity selection", () => {

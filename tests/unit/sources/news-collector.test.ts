@@ -723,6 +723,151 @@ describe("catalog-driven news collection", () => {
     },
   );
 
+  it.each([
+    {
+      id: "reuters",
+      name: "Reuters",
+      title: "Acme launches AI coding assistant",
+      sections: ["morning_brief", "world", "technology", "ai_policy"] as const,
+      expected: "technology",
+    },
+    {
+      id: "associated-press",
+      name: "Associated Press",
+      title: "Senate passes transportation funding bill",
+      sections: ["morning_brief", "world", "technology", "ai_policy"] as const,
+      expected: "world",
+    },
+    {
+      id: "npr",
+      name: "NPR",
+      title: "Startup releases artificial intelligence music app",
+      sections: ["morning_brief", "world", "technology", "ai_policy"] as const,
+      expected: "technology",
+    },
+  ])(
+    "does not misroute ordinary $name coverage into AI policy",
+    async (sourceCase) => {
+      const host = `${sourceCase.id}.example.com`;
+      const pageUrl = `https://${host}/news`;
+      const fetch = vi.fn(async () =>
+        new Response(
+          `<article><h2><a href="/story">${sourceCase.title}</a></h2><time datetime="2026-07-29T08:00:00.000Z"></time><p>Reported details.</p></article>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+      );
+      const collector = createNewsCollectorFromCatalog({
+        http: new SourceHttpClient({
+          fetch,
+          now: () => new Date("2026-07-29T10:00:00.000Z"),
+        }),
+        sources: [
+          catalogSource({
+            id: sourceCase.id,
+            canonicalName: sourceCase.name,
+            canonicalUrl: `https://${host}/`,
+            role: "reporting",
+            discoveryMechanism: "page",
+            sectionEligibility: [...sourceCase.sections],
+            restrictions: {
+              bodyRetrieval: "forbidden",
+              paywall: "none",
+              contentUse: "metadata-only",
+              pageUrl,
+              urlPolicy: policy(host, ["/"]),
+              listing: {
+                itemSelector: "article",
+                linkSelector: "h2 a",
+                titleSelector: "h2",
+                dateSelector: "time",
+                dateAttribute: "datetime",
+                summarySelector: "p",
+                maxItems: 10,
+                maxBodyFetches: 0,
+              },
+            },
+          }),
+        ],
+      });
+
+      const result = await collector.collect(fixedWindow());
+
+      expect(result[0]?.metadata.primarySection).toBe(
+        sourceCase.expected,
+      );
+      expect(result[0]?.metadata.primarySection).not.toBe("ai_policy");
+    },
+  );
+
+  it.each([
+    {
+      id: "baltimore-brew",
+      name: "Baltimore Brew",
+      title: "Council approves annual budget",
+      sections: ["dmv", "baltimore"] as const,
+      preferredSection: "baltimore",
+    },
+    {
+      id: "wamu",
+      name: "WAMU",
+      title: "Transit board updates weekend service",
+      sections: ["world", "dmv"] as const,
+      preferredSection: "dmv",
+    },
+  ])(
+    "uses the catalog preferred section for location-implicit $name coverage",
+    async (sourceCase) => {
+      const host = `${sourceCase.id}.example.com`;
+      const pageUrl = `https://${host}/news`;
+      const fetch = vi.fn(async () =>
+        new Response(
+          `<article><h2><a href="/story">${sourceCase.title}</a></h2><time datetime="2026-07-29T08:00:00.000Z"></time><p>Reported details.</p></article>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+      );
+      const collector = createNewsCollectorFromCatalog({
+        http: new SourceHttpClient({
+          fetch,
+          now: () => new Date("2026-07-29T10:00:00.000Z"),
+        }),
+        sources: [
+          catalogSource({
+            id: sourceCase.id,
+            canonicalName: sourceCase.name,
+            canonicalUrl: `https://${host}/`,
+            role: "reporting",
+            discoveryMechanism: "page",
+            sectionEligibility: [...sourceCase.sections],
+            restrictions: {
+              bodyRetrieval: "forbidden",
+              paywall: "none",
+              contentUse: "metadata-only",
+              preferredSection: sourceCase.preferredSection,
+              pageUrl,
+              urlPolicy: policy(host, ["/"]),
+              listing: {
+                itemSelector: "article",
+                linkSelector: "h2 a",
+                titleSelector: "h2",
+                dateSelector: "time",
+                dateAttribute: "datetime",
+                summarySelector: "p",
+                maxItems: 10,
+                maxBodyFetches: 0,
+              },
+            },
+          }),
+        ],
+      });
+
+      const result = await collector.collect(fixedWindow());
+
+      expect(result[0]?.metadata.primarySection).toBe(
+        sourceCase.preferredSection,
+      );
+    },
+  );
+
   it("discovers Congress documents and bounds optional item retrieval", async () => {
     const articleFixture = await loadFixture("article.html");
     const fetch = vi.fn(async (input) => {

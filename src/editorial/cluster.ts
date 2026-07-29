@@ -9,7 +9,11 @@ import {
   type Item,
   type SourceRef,
 } from "../contracts/editorial";
-import { canonicalizeUrl, normalizeTitleKey } from "./normalize";
+import {
+  NewsMaterialFactSchema,
+  type NewsMaterialFact,
+} from "../sources/types";
+import { canonicalizeUrl } from "./normalize";
 
 const NEWS_KINDS = new Set<Item["kind"]>([
   "article",
@@ -60,7 +64,10 @@ export const NewsDevelopmentSchema = z.object({
   items: z.array(ItemSchema).min(1),
   representativeItem: ItemSchema,
   canonicalPrimaryDocument: z.string().url().nullable(),
+  primaryDocumentUrls: z.array(z.string().url()),
   namedEntities: z.array(z.string().min(1)),
+  eventFamilies: z.array(z.string().min(1)),
+  materialFacts: z.array(NewsMaterialFactSchema),
   sectionEligibility: z.array(EditionSectionSchema),
   primarySection: NewsSectionSchema,
   developmentKey: z.string().min(1),
@@ -145,29 +152,55 @@ function normalizedEntities(item: Item): Map<string, string> {
   );
 }
 
+const GENERIC_IDENTITY_ENTITIES = new Set([
+  "ai",
+  "artificial intelligence",
+  "united states",
+  "congress",
+  "federal register",
+  "baltimore",
+  "maryland",
+  "virginia",
+  "washington, d.c.",
+]);
+
 function entityOverlap(left: Item, right: Item): boolean {
   const leftEntities = normalizedEntities(left);
   const rightEntities = normalizedEntities(right);
   for (const entity of leftEntities.keys()) {
-    if (entity.length > 0 && rightEntities.has(entity)) return true;
+    if (
+      entity.length > 0 &&
+      !GENERIC_IDENTITY_ENTITIES.has(entity) &&
+      rightEntities.has(entity)
+    ) {
+      return true;
+    }
   }
   return false;
 }
 
-function primaryDocument(item: Item): string | null {
-  for (const key of [
-    "primaryDocumentUrl",
-    "canonicalPrimaryDocument",
-  ]) {
-    const value = item.metadata[key];
-    if (typeof value !== "string") continue;
-    try {
-      return canonicalizeUrl(value);
-    } catch {
-      return null;
-    }
-  }
-  return item.kind === "document" ? item.canonicalUrl : null;
+function primaryDocuments(item: Item): string[] {
+  const candidates = [
+    ...stringArray(item.metadata.primaryDocumentUrls),
+    ...(typeof item.metadata.primaryDocumentUrl === "string"
+      ? [item.metadata.primaryDocumentUrl]
+      : []),
+    ...(typeof item.metadata.canonicalPrimaryDocument === "string"
+      ? [item.metadata.canonicalPrimaryDocument]
+      : []),
+    ...(item.kind === "document" ? [item.canonicalUrl] : []),
+  ];
+  return [
+    ...new Set(
+      candidates.flatMap((value) => {
+        try {
+          return [canonicalizeUrl(value)];
+        } catch {
+          return [];
+        }
+      }),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
 }
 
 function timestamp(item: Item): number | null {
@@ -190,13 +223,9 @@ function related(
   embeddings: EmbeddingLookup,
 ): boolean {
   if (!withinWindow(left, right)) return false;
-  const leftPrimary = primaryDocument(left);
-  const rightPrimary = primaryDocument(right);
-  if (
-    leftPrimary !== null &&
-    rightPrimary !== null &&
-    leftPrimary === rightPrimary
-  ) {
+  const leftPrimary = new Set(primaryDocuments(left));
+  const rightPrimary = primaryDocuments(right);
+  if (rightPrimary.some((document) => leftPrimary.has(document))) {
     return true;
   }
   const similarity = cosine(
@@ -272,10 +301,17 @@ function itemSections(item: Item): EditionSection[] {
 function primarySection(items: readonly Item[]): NewsDevelopment["primarySection"] {
   const counts = new Map<NewsDevelopment["primarySection"], number>();
   for (const item of items) {
-    const value = item.metadata.primarySection;
-    const parsed = NewsSectionSchema.safeParse(value);
-    if (!parsed.success) continue;
-    counts.set(parsed.data, (counts.get(parsed.data) ?? 0) + 1);
+    const values = [
+      ...stringArray(item.metadata.primarySections),
+      ...(typeof item.metadata.primarySection === "string"
+        ? [item.metadata.primarySection]
+        : []),
+    ];
+    for (const value of new Set(values)) {
+      const parsed = NewsSectionSchema.safeParse(value);
+      if (!parsed.success) continue;
+      counts.set(parsed.data, (counts.get(parsed.data) ?? 0) + 1);
+    }
   }
   if (counts.size === 0) {
     return items.every((item) => item.kind === "forecast")
@@ -287,6 +323,31 @@ function primarySection(items: readonly Item[]): NewsDevelopment["primarySection
       (counts.get(right) ?? 0) - (counts.get(left) ?? 0) ||
       SECTION_PRIORITY.indexOf(left) - SECTION_PRIORITY.indexOf(right),
   )[0] ?? "world";
+}
+
+function materialFacts(item: Item): NewsMaterialFact[] {
+  const value = item.metadata.materialFacts;
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): NewsMaterialFact[] => {
+    const parsed = NewsMaterialFactSchema.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+function commonValues(
+  items: readonly Item[],
+  values: (item: Item) => readonly string[],
+): string[] {
+  const [first, ...rest] = items;
+  if (first === undefined) return [];
+  const common = new Set(values(first));
+  for (const item of rest) {
+    const current = new Set(values(item));
+    for (const value of common) {
+      if (!current.has(value)) common.delete(value);
+    }
+  }
+  return [...common].sort((left, right) => left.localeCompare(right));
 }
 
 function sourceRefKey(source: SourceRef): string {
@@ -304,9 +365,9 @@ function cluster(items: readonly Item[]): NewsCluster {
   const sortedItems = [...items].sort((left, right) =>
     left.id.localeCompare(right.id),
   );
-  const primaryDocuments = [
+  const canonicalPrimaryDocuments = [
     ...new Set(
-      sortedItems.flatMap((item) => primaryDocument(item) ?? []),
+      sortedItems.flatMap(primaryDocuments),
     ),
   ].sort((left, right) => left.localeCompare(right));
   const entities = new Map<string, string>();
@@ -352,47 +413,55 @@ function cluster(items: readonly Item[]): NewsCluster {
   const sectionEligibility = [
     ...new Set(sortedItems.flatMap(itemSections)),
   ].sort((left, right) => left.localeCompare(right));
-  const explicitDevelopmentKeys = [
+  const eventFamilies = [
     ...new Set(
       sortedItems.flatMap((item) =>
-        typeof item.metadata.developmentKey === "string"
-          ? [item.metadata.developmentKey]
-          : [],
+        stringArray(item.metadata.eventFamilies),
       ),
     ),
   ].sort((left, right) => left.localeCompare(right));
-  const developmentKey =
-    explicitDevelopmentKeys[0] ??
-    primaryDocuments[0] ??
-    `development-${stableHash(
-      [
-        ...entities.keys(),
-        normalizeTitleKey(representativeItem.title),
-      ].join("|"),
-    )}`;
-  const explicitFingerprints = [
-    ...new Set(
-      sortedItems.flatMap((item) =>
-        typeof item.metadata.materialFactsFingerprint === "string"
-          ? [item.metadata.materialFactsFingerprint]
-          : [],
-      ),
+  const commonEventFamilies = commonValues(sortedItems, (item) =>
+    stringArray(item.metadata.eventFamilies),
+  );
+  const commonSpecificEntities = commonValues(sortedItems, (item) =>
+    [...normalizedEntities(item).keys()].filter(
+      (entity) => !GENERIC_IDENTITY_ENTITIES.has(entity),
     ),
-  ].sort((left, right) => left.localeCompare(right));
-  const materialFactsFingerprint =
-    explicitFingerprints.length === 1
-      ? (explicitFingerprints[0] as string)
-      : `facts-${stableHash(
-          explicitFingerprints.length > 0
-            ? explicitFingerprints.join("|")
-            : sortedItems
-                .map(
-                  (item) =>
-                    `${normalizeTitleKey(item.title)}|${item.normalizedText}`,
-                )
-                .sort()
-                .join("|"),
-        )}`;
+  );
+  const developmentIdentity =
+    canonicalPrimaryDocuments[0] === undefined
+      ? commonEventFamilies.length > 0 &&
+        commonSpecificEntities.length > 0
+        ? [
+            "event",
+            ...commonEventFamilies,
+            ...commonSpecificEntities,
+          ].join("|")
+        : `isolated|${sortedItems.map(({ id }) => id).join("|")}`
+      : `document|${canonicalPrimaryDocuments[0]}`;
+  const developmentKey = `development-${stableHash(
+    developmentIdentity,
+  )}`;
+  const factMap = new Map<string, NewsMaterialFact>();
+  for (const fact of sortedItems.flatMap(materialFacts)) {
+    factMap.set(
+      `${fact.kind}\u0000${fact.key}\u0000${fact.value}`,
+      fact,
+    );
+  }
+  const structuredFacts = [...factMap.values()].sort(
+    (left, right) =>
+      left.kind.localeCompare(right.kind) ||
+      left.key.localeCompare(right.key) ||
+      left.value.localeCompare(right.value),
+  );
+  const materialFactsFingerprint = `facts-${stableHash(
+    structuredFacts.length > 0
+      ? structuredFacts
+          .map((fact) => `${fact.kind}|${fact.key}|${fact.value}`)
+          .join("\n")
+      : commonEventFamilies.join("|") || "no-structured-change",
+  )}`;
 
   return NewsDevelopmentSchema.parse({
     id: `cluster-${stableHash(sortedItems.map(({ id }) => id).join("|"))}`,
@@ -400,10 +469,14 @@ function cluster(items: readonly Item[]): NewsCluster {
     itemIds: sortedItems.map(({ id }) => id),
     items: sortedItems,
     representativeItem,
-    canonicalPrimaryDocument: primaryDocuments[0] ?? null,
+    canonicalPrimaryDocument:
+      canonicalPrimaryDocuments[0] ?? null,
+    primaryDocumentUrls: canonicalPrimaryDocuments,
     namedEntities: [...entities.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([, value]) => value),
+    eventFamilies,
+    materialFacts: structuredFacts,
     sectionEligibility,
     primarySection: primarySection(sortedItems),
     developmentKey,

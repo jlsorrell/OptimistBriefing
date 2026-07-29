@@ -364,6 +364,8 @@ class DirectPageAdapter implements NewsSourceAdapter {
               sectionEligibility:
                 this.source.sectionEligibility ?? [],
               metadata,
+              preferredSection:
+                this.source.restrictions.preferredSection,
             }),
           });
         }),
@@ -467,6 +469,8 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
             sectionEligibility:
               this.source.sectionEligibility ?? [],
             metadata,
+            preferredSection:
+              this.source.restrictions.preferredSection,
           }),
         }),
       ];
@@ -569,6 +573,7 @@ export class NewsCollector {
             originalUrl: item.originalUrl,
             sectionEligibility: source.sectionEligibility ?? [],
             metadata,
+            preferredSection: source.restrictions.preferredSection,
           }),
         });
       }),

@@ -287,6 +287,8 @@ export class PolymarketAdapter implements NewsSourceAdapter {
             sectionEligibility:
               this.source.sectionEligibility ?? ["forecast"],
             metadata,
+            preferredSection:
+              this.source.restrictions.preferredSection,
           }),
         }),
       ];

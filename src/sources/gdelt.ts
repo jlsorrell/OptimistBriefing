@@ -159,6 +159,8 @@ export class GdeltAdapter implements NewsSourceAdapter {
                 "baltimore",
               ],
             metadata,
+            preferredSection:
+              this.source.restrictions.preferredSection,
           }),
         }),
       ];

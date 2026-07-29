@@ -4,6 +4,10 @@ import {
   type Item,
   type SourceRef,
 } from "../contracts/editorial";
+import {
+  NewsMaterialFactSchema,
+  type NewsMaterialFact,
+} from "../sources/types";
 import { normalizeTitleKey } from "./normalize";
 
 export type DeduplicationReason =
@@ -46,6 +50,14 @@ function stringArray(value: unknown): string[] {
 
 function identifiers(item: Item): ReadonlySet<string> {
   return new Set(stringArray(item.metadata.externalIds));
+}
+
+function newsMaterialFacts(value: unknown): NewsMaterialFact[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): NewsMaterialFact[] => {
+    const parsed = NewsMaterialFactSchema.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
 }
 
 function intersects(
@@ -172,6 +184,51 @@ function mergeGroup(group: readonly Item[]): Item {
       ? item.metadata.provenance
       : [],
   );
+  const mergedStringMetadata = (key: string): string[] => [
+    ...new Set(
+      group.flatMap((item) => stringArray(item.metadata[key])),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
+  const sectionEligibility = mergedStringMetadata(
+    "sectionEligibility",
+  );
+  const namedEntities = mergedStringMetadata("namedEntities");
+  const primaryDocumentUrls = [
+    ...new Set(
+      group.flatMap((item) => [
+        ...stringArray(item.metadata.primaryDocumentUrls),
+        ...(typeof item.metadata.primaryDocumentUrl === "string"
+          ? [item.metadata.primaryDocumentUrl]
+          : []),
+      ]),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
+  const eventFamilies = mergedStringMetadata("eventFamilies");
+  const primarySections = [
+    ...new Set(
+      group.flatMap((item) => [
+        ...stringArray(item.metadata.primarySections),
+        ...(typeof item.metadata.primarySection === "string"
+          ? [item.metadata.primarySection]
+          : []),
+      ]),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
+  const materialFactMap = new Map<string, NewsMaterialFact>();
+  for (const fact of group.flatMap((item) =>
+    newsMaterialFacts(item.metadata.materialFacts),
+  )) {
+    materialFactMap.set(
+      `${fact.kind}\u0000${fact.key}\u0000${fact.value}`,
+      fact,
+    );
+  }
+  const materialFacts = [...materialFactMap.values()].sort(
+    (left, right) =>
+      left.kind.localeCompare(right.kind) ||
+      left.key.localeCompare(right.key) ||
+      left.value.localeCompare(right.value),
+  );
   const longestText = [...group].sort(
     (left, right) =>
       right.normalizedText.length - left.normalizedText.length ||
@@ -188,6 +245,13 @@ function mergeGroup(group: readonly Item[]): Item {
       ...winner.metadata,
       externalIds: mergedExternalIds,
       provenance,
+      sectionEligibility,
+      namedEntities,
+      primaryDocumentUrl: primaryDocumentUrls[0] ?? null,
+      primaryDocumentUrls,
+      eventFamilies,
+      materialFacts,
+      primarySections,
       mergedItemIds: group
         .map((item) => item.id)
         .sort((left, right) => left.localeCompare(right)),
