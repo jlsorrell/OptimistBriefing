@@ -1,0 +1,24 @@
+{
+  "name": "optimist-briefing-local-integration",
+  "main": "src/local-worker.ts",
+  "compatibility_date": "2026-07-29",
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "optimist-briefing",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "src/db/migrations"
+    }
+  ],
+  "vars": {
+    "LOCAL_ACCESS_ISSUER": "https://local-access.optimist.invalid",
+    "LOCAL_ACCESS_AUDIENCE": "optimist-briefing-local",
+    "LOCAL_ALLOWED_EMAILS": "reader@example.com"
+  }
+}

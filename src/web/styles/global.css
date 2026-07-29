@@ -31,6 +31,11 @@ a {
   outline-offset: 3px;
 }
 
+.site-header :focus-visible {
+  outline-color: var(--cream);
+  box-shadow: 0 0 0 1px var(--burgundy-dark);
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

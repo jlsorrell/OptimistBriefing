@@ -9,6 +9,7 @@
     "test:worker": "vitest run --config vitest.worker.config.ts",
     "test:e2e": "playwright test",
     "seed:dev": "tsx scripts/seed-dev.ts",
+    "dev:integration": "tsx scripts/start-local-integration.ts",
     "dev": "vite",
     "deploy": "npm run build && wrangler deploy"
   },

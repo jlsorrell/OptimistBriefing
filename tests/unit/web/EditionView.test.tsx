@@ -3,8 +3,13 @@
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { EditionWithEntries } from "../../../src/contracts/editorial";
+import type {
+  EditionEntry,
+  EditionWithEntries,
+  SourceRef,
+} from "../../../src/contracts/editorial";
 import { EditionView } from "../../../src/web/components/EditionView";
+import { NewsClusterCard } from "../../../src/web/components/NewsClusterCard";
 
 function fixtureEdition(): EditionWithEntries {
   return {
@@ -70,6 +75,28 @@ function fixtureEdition(): EditionWithEntries {
   };
 }
 
+function newsEntryWithSources(sourceRefs: readonly SourceRef[]): EditionEntry {
+  const fixture = fixtureEdition().entries[0];
+  if (fixture === undefined) throw new Error("Missing fixture entry.");
+  const claim = fixture.summary.claims[0];
+  if (claim === undefined) throw new Error("Missing fixture claim.");
+  const supportingSource = sourceRefs.find(
+    (source) => source.role === "primary" || source.role === "reporting",
+  );
+  if (supportingSource === undefined) {
+    throw new Error("News fixture requires a reporting or primary source.");
+  }
+  return {
+    ...fixture,
+    section: "world",
+    sourceRefs: [...sourceRefs],
+    summary: {
+      ...fixture.summary,
+      claims: [{ ...claim, sourceIds: [supportingSource.id] }],
+    },
+  };
+}
+
 afterEach(() => {
   cleanup();
   localStorage.clear();
@@ -97,9 +124,90 @@ describe("EditionView", () => {
     render(<EditionView edition={fixtureEdition()} />);
 
     expect(screen.getByRole("banner")).toBeTruthy();
-    expect(screen.getByRole("navigation", { name: "Briefing sections" })).toBeTruthy();
+    expect(
+      screen.getByRole("navigation", { name: "Briefing sections" }),
+    ).toBeTruthy();
     expect(screen.getByRole("main")).toBeTruthy();
     expect(screen.getByRole("contentinfo")).toBeTruthy();
     expect(screen.getByText("24 minute read")).toBeTruthy();
+  });
+
+  it.each(["forecast", "analysis", "opinion", "blog"] as const)(
+    "does not treat a reporting plus %s pair as corroboration",
+    (role) => {
+      render(
+        <NewsClusterCard
+          entry={newsEntryWithSources([
+            {
+              id: "report",
+              name: "Reuters",
+              url: "https://example.com/report",
+              role: "reporting",
+              retrievedAt: "2026-07-29T08:00:00.000Z",
+            },
+            {
+              id: "context",
+              name: "Context source",
+              url: "https://example.com/context",
+              role,
+              retrievedAt: "2026-07-29T08:00:00.000Z",
+            },
+          ])}
+        />,
+      );
+
+      expect(screen.getByText("Single report")).toBeTruthy();
+      expect(screen.queryByText("Corroborated")).toBeNull();
+    },
+  );
+
+  it("requires qualifying reports to come from independent sources", () => {
+    render(
+      <NewsClusterCard
+        entry={newsEntryWithSources([
+          {
+            id: "report-1",
+            name: "Reuters",
+            url: "https://example.com/report-1",
+            role: "reporting",
+            retrievedAt: "2026-07-29T08:00:00.000Z",
+          },
+          {
+            id: "report-2",
+            name: "Reuters",
+            url: "https://example.com/report-2",
+            role: "reporting",
+            retrievedAt: "2026-07-29T08:00:00.000Z",
+          },
+        ])}
+      />,
+    );
+
+    expect(screen.getByText("Single report")).toBeTruthy();
+  });
+
+  it("labels two independent reporting sources as corroborated", () => {
+    render(
+      <NewsClusterCard
+        entry={newsEntryWithSources([
+          {
+            id: "report-1",
+            name: "Reuters",
+            url: "https://example.com/report-1",
+            role: "reporting",
+            retrievedAt: "2026-07-29T08:00:00.000Z",
+          },
+          {
+            id: "report-2",
+            name: "Associated Press",
+            url: "https://example.com/report-2",
+            role: "reporting",
+            retrievedAt: "2026-07-29T08:00:00.000Z",
+          },
+        ])}
+      />,
+    );
+
+    expect(screen.getByText("Corroborated")).toBeTruthy();
   });
 });

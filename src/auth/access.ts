@@ -1,6 +1,9 @@
 import {
+  createLocalJWKSet,
   createRemoteJWKSet,
   jwtVerify,
+  type JSONWebKeySet,
+  type JWTVerifyGetKey,
 } from "jose";
 import { z } from "zod";
 
@@ -14,6 +17,13 @@ export type AccessVerifierOptions = {
   teamDomain: string;
   audience: string;
   allowedEmails: ReadonlySet<string>;
+};
+
+export type AccessJwksVerifierOptions = {
+  issuer: string;
+  audience: string;
+  allowedEmails: ReadonlySet<string>;
+  jwks: JWTVerifyGetKey;
 };
 
 const EmailSchema = z.string().email();
@@ -54,6 +64,35 @@ export function createAccessVerifier(
   options: AccessVerifierOptions,
 ): AuthVerifier {
   const teamDomain = normalizedTeamDomain(options.teamDomain);
+  return createAccessJwksVerifier({
+    issuer: `https://${teamDomain}`,
+    audience: options.audience,
+    allowedEmails: options.allowedEmails,
+    jwks: createRemoteJWKSet(
+      new URL(`https://${teamDomain}/cdn-cgi/access/certs`),
+    ),
+  });
+}
+
+export async function verifyAccessJwt(
+  token: string,
+  options: AccessVerifierOptions,
+): Promise<AuthenticatedUser> {
+  const teamDomain = normalizedTeamDomain(options.teamDomain);
+  return verifyAccessJwtWithJwks(token, {
+    issuer: `https://${teamDomain}`,
+    audience: options.audience,
+    allowedEmails: options.allowedEmails,
+    jwks: createRemoteJWKSet(
+      new URL(`https://${teamDomain}/cdn-cgi/access/certs`),
+    ),
+  });
+}
+
+export function createAccessJwksVerifier(
+  options: AccessJwksVerifierOptions,
+): AuthVerifier {
+  const issuer = z.string().url().parse(options.issuer);
   const audience = NonemptyStringSchema.parse(options.audience);
   const allowedEmails = new Set(
     Array.from(options.allowedEmails, normalizedEmail),
@@ -61,21 +100,22 @@ export function createAccessVerifier(
   if (allowedEmails.size === 0) {
     throw new Error("ALLOWED_EMAILS must include at least one email");
   }
-
   return (token) =>
-    verifyAccessJwt(token, { teamDomain, audience, allowedEmails });
+    verifyAccessJwtWithJwks(token, {
+      issuer,
+      audience,
+      allowedEmails,
+      jwks: options.jwks,
+    });
 }
 
-export async function verifyAccessJwt(
+export async function verifyAccessJwtWithJwks(
   token: string,
-  options: AccessVerifierOptions,
+  options: AccessJwksVerifierOptions,
 ): Promise<AuthenticatedUser> {
-  const jwks = createRemoteJWKSet(
-    new URL(`https://${options.teamDomain}/cdn-cgi/access/certs`),
-  );
-  const { payload } = await jwtVerify(token, jwks, {
-    audience: options.audience,
-    issuer: `https://${options.teamDomain}`,
+  const { payload } = await jwtVerify(token, options.jwks, {
+    audience: NonemptyStringSchema.parse(options.audience),
+    issuer: z.string().url().parse(options.issuer),
   });
   const email = normalizedEmail(EmailSchema.parse(payload.email));
   const allowedEmails = new Set(
@@ -85,4 +125,14 @@ export async function verifyAccessJwt(
     throw new ForbiddenError();
   }
   return { email };
+}
+
+export function localJwksVerifier(
+  jwks: JSONWebKeySet,
+  options: Omit<AccessJwksVerifierOptions, "jwks">,
+): AuthVerifier {
+  return createAccessJwksVerifier({
+    ...options,
+    jwks: createLocalJWKSet(jwks),
+  });
 }

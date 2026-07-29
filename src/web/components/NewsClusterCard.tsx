@@ -16,13 +16,27 @@ type NewsClusterCardProps = {
 
 export function NewsClusterCard({ entry }: NewsClusterCardProps) {
   const forecast = entry.section === "forecast";
+  const qualifyingSources = new Map(
+    entry.sourceRefs
+      .filter(
+        (source) =>
+          source.role === "primary" || source.role === "reporting",
+      )
+      .map((source) => [source.name.trim().toLowerCase(), source] as const),
+  );
+  const qualifyingSourceCount = qualifyingSources.size;
+  const onlyQualifyingSource = qualifyingSources.values().next().value as
+    | SourceRef
+    | undefined;
   const evidenceLabel = forecast
     ? "Market signal"
-    : entry.sourceRefs.length > 1
+    : qualifyingSourceCount > 1
       ? "Corroborated"
-      : entry.sourceRefs[0]?.role === "primary"
+      : onlyQualifyingSource?.role === "primary"
         ? "Primary document"
-        : "Single report";
+        : qualifyingSourceCount === 1
+          ? "Single report"
+          : "Context only";
 
   return (
     <article
@@ -36,7 +50,7 @@ export function NewsClusterCard({ entry }: NewsClusterCardProps) {
           {forecast ? "Forecast — not a fact" : "Reported development"}
         </span>
         <span className="confidence-label">
-          <span aria-hidden="true">{entry.sourceRefs.length > 1 ? "✓" : "◎"}</span>
+          <span aria-hidden="true">{qualifyingSourceCount > 1 ? "✓" : "◎"}</span>
           {evidenceLabel}
         </span>
       </div>
