@@ -149,7 +149,6 @@ Expected: FAIL because `src/contracts/editorial.ts` does not exist.
     "@cloudflare/workers-types": "^4.0.0",
     "@playwright/test": "^1.0.0",
     "@testing-library/react": "^16.0.0",
-    "@types/mozilla__readability": "^0.6.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
