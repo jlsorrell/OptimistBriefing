@@ -204,6 +204,97 @@ describe("D1BriefingRepository", () => {
     });
   });
 
+  it("collects the canonical Monitoring the Situation listing", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const mtsSource = (await repo.listSources()).find(
+      (source) => source.id === "monitoring-the-situation",
+    );
+    if (mtsSource === undefined) {
+      throw new TypeError("MTS source is missing from the catalog.");
+    }
+    const fetch = async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://mts.now/") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://www.mts.now/" },
+        });
+      }
+      if (url === "https://www.mts.now/") {
+        return new Response(
+          `<!doctype html><html><body>
+            <article>
+              <h2><a href="/p/secure-model-evaluation">Secure model evaluation roundup</a></h2>
+              <time datetime="2026-07-29T07:00:00.000Z">July 29, 2026</time>
+              <p>Reporting and primary documents on secure evaluation.</p>
+            </article>
+          </body></html>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      }
+      throw new Error(`Unexpected MTS URL: ${url}`);
+    };
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-07-29T08:00:00.000Z"),
+      }),
+      sources: [mtsSource],
+    });
+
+    expect(
+      await collector.collect({
+        from: "2026-07-28T00:00:00.000Z",
+        to: "2026-07-29T12:00:00.000Z",
+      }),
+    ).toEqual([
+      expect.objectContaining({
+        sourceId: "monitoring-the-situation",
+        sourceRole: "analysis",
+        title: "Secure model evaluation roundup",
+        originalUrl:
+          "https://www.mts.now/p/secure-model-evaluation",
+        accessLevel: "metadata",
+        canCorroborateFacts: false,
+      }),
+    ]);
+  });
+
+  it("rejects an unrelated redirect from the configured MTS listing", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const mtsSource = (await repo.listSources()).find(
+      (source) => source.id === "monitoring-the-situation",
+    );
+    if (mtsSource === undefined) {
+      throw new TypeError("MTS source is missing from the catalog.");
+    }
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: async () =>
+          new Response(null, {
+            status: 302,
+            headers: {
+              location: "https://attacker.example/copied-listing",
+            },
+          }),
+        maxRetries: 0,
+      }),
+      sources: [mtsSource],
+    });
+
+    await expect(
+      collector.collect({
+        from: "2026-07-28T00:00:00.000Z",
+        to: "2026-07-29T12:00:00.000Z",
+      }),
+    ).rejects.toMatchObject({
+      name: "SourceFetchError",
+      failureKind: "policy",
+      retryable: false,
+    });
+  });
+
   it("does not expose draft editions and atomically exposes published editions", async () => {
     const repo = new D1BriefingRepository(env.DB);
     const draft = await repo.createDraftEdition("2026-07-29", "run-1");

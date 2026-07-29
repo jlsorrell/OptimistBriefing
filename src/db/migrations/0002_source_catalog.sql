@@ -103,8 +103,8 @@ INSERT OR IGNORE INTO sources (
     NULL, 'unknown'
   ),
   (
-    'monitoring-the-situation', 'Monitoring the Situation', 'https://mts.now/', 'analysis', 0.55, 1,
-    '{"bodyRetrieval":"forbidden","paywall":"unknown","contentUse":"discovery-metadata-only","discoveryMechanism":"page","sectionEligibility":["world","technology"],"pageUrl":"https://mts.now/","canCorroborateFacts":false,"urlPolicy":{"allowedHosts":["mts.now"],"allowedPorts":[""],"allowedPathPrefixes":["/"]},"listing":{"itemSelector":"article","linkSelector":"h2 a, h3 a, a","titleSelector":"h2, h3","dateSelector":"time","dateAttribute":"datetime","summarySelector":"p","maxItems":50,"maxBodyFetches":0}}',
+    'monitoring-the-situation', 'Monitoring the Situation', 'https://www.mts.now/', 'analysis', 0.55, 1,
+    '{"bodyRetrieval":"forbidden","paywall":"unknown","contentUse":"discovery-metadata-only","discoveryMechanism":"page","sectionEligibility":["world","technology"],"pageUrl":"https://www.mts.now/","canCorroborateFacts":false,"urlPolicy":{"allowedHosts":["www.mts.now"],"allowedPorts":[""],"allowedPathPrefixes":["/"]},"listing":{"itemSelector":"article","linkSelector":"h2 a, h3 a, a","titleSelector":"h2, h3","dateSelector":"time","dateAttribute":"datetime","summarySelector":"p","maxItems":50,"maxBodyFetches":0}}',
     NULL, 'unknown'
   ),
   (
