@@ -1,0 +1,12 @@
+{
+  "name": "optimist-briefing",
+  "compatibility_date": "2026-07-29",
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "optimist-briefing",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "src/db/migrations"
+    }
+  ]
+}

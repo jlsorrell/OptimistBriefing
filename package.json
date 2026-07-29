@@ -6,6 +6,7 @@
     "build": "vite build",
     "check": "tsc --noEmit",
     "test": "vitest run",
+    "test:worker": "vitest run --config vitest.worker.config.ts",
     "test:e2e": "playwright test",
     "dev": "vite",
     "deploy": "npm run build && wrangler deploy"
