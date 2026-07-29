@@ -19,7 +19,7 @@ export default defineWorkersConfig(async () => {
           singleWorker: true,
           miniflare: {
             compatibilityDate: "2025-09-01",
-            d1Databases: ["DB"],
+            d1Databases: ["DB", "UPGRADE_DB"],
             bindings: { TEST_MIGRATIONS: migrations },
           },
         },
