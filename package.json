@@ -6,7 +6,6 @@
     "build": "vite build",
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "test:worker": "vitest run --config vitest.worker.config.ts",
     "test:e2e": "playwright test",
     "dev": "vite",
     "deploy": "npm run build && wrangler deploy"
@@ -21,13 +20,13 @@
     "openai": "^5.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "zod": "^4.0.0"
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.0.0",
     "@cloudflare/vite-plugin": "^1.0.0",
     "@cloudflare/vitest-pool-workers": "^0.8.0",
-    "@cloudflare/workers-types": "^4.0.0",
+    "@cloudflare/workers-types": "^5.20260722.1",
     "@playwright/test": "^1.0.0",
     "@testing-library/react": "^16.0.0",
     "@types/node": "^22.0.0",

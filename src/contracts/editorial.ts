@@ -103,16 +103,32 @@ export const EditionSchema = z.object({
   createdAt: z.string().datetime(),
 });
 
-export const EditionEntrySchema = z.object({
-  id: z.string().min(1),
-  editionId: z.string().min(1),
-  itemId: z.string().min(1).nullable(),
-  section: EditionSectionSchema,
-  position: z.number().int().nonnegative(),
-  summary: StructuredSummarySchema,
-  selectionReasons: z.array(z.string().min(1)),
-  sourceRefs: z.array(SourceRefSchema).min(1),
-});
+export const EditionEntrySchema = z
+  .object({
+    id: z.string().min(1),
+    editionId: z.string().min(1),
+    itemId: z.string().min(1).nullable(),
+    section: EditionSectionSchema,
+    position: z.number().int().nonnegative(),
+    summary: StructuredSummarySchema,
+    selectionReasons: z.array(z.string().min(1)),
+    sourceRefs: z.array(SourceRefSchema).min(1),
+  })
+  .superRefine((entry, context) => {
+    const sourceIds = new Set(entry.sourceRefs.map((sourceRef) => sourceRef.id));
+
+    entry.summary.claims.forEach((claim, claimIndex) => {
+      claim.sourceIds.forEach((sourceId, sourceIndex) => {
+        if (!sourceIds.has(sourceId)) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Claim source must be included in the edition entry sources.",
+            path: ["summary", "claims", claimIndex, "sourceIds", sourceIndex],
+          });
+        }
+      });
+    });
+  });
 
 export const EditionWithEntriesSchema = EditionSchema.extend({
   entries: z.array(EditionEntrySchema),
