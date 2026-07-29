@@ -55,16 +55,20 @@ export type SourceHttpResponse = {
   finalUrl: string;
 };
 
+export type SourceFetchFailureKind = "policy" | "transport";
+
 export class SourceFetchError extends Error {
   readonly sourceId: string;
   readonly status: number | null;
   readonly retryable: boolean;
+  readonly failureKind: SourceFetchFailureKind;
   readonly code: "SOURCE_FETCH_FAILED";
 
   constructor(input: {
     sourceId: string;
     status: number | null;
     retryable: boolean;
+    failureKind: SourceFetchFailureKind;
     reason: string;
   }) {
     super(
@@ -76,6 +80,7 @@ export class SourceFetchError extends Error {
     this.sourceId = input.sourceId;
     this.status = input.status;
     this.retryable = input.retryable;
+    this.failureKind = input.failureKind;
   }
 
   toJSON(): Record<string, unknown> {
@@ -85,6 +90,7 @@ export class SourceFetchError extends Error {
       sourceId: this.sourceId,
       status: this.status,
       retryable: this.retryable,
+      failureKind: this.failureKind,
       message: this.message,
     };
   }
@@ -130,6 +136,7 @@ async function readBoundedBody(
       sourceId,
       status: response.status,
       retryable: false,
+      failureKind: "transport",
       reason: `response exceeds ${maxBytes} bytes`,
     });
   }
@@ -154,6 +161,7 @@ async function readBoundedBody(
           sourceId,
           status: response.status,
           retryable: false,
+          failureKind: "transport",
           reason: `response exceeds ${maxBytes} bytes`,
         });
       }
@@ -257,6 +265,7 @@ export class SourceHttpClient {
           sourceId: source.id,
           status: null,
           retryable: false,
+          failureKind: "policy",
           reason: "unsafe outbound URL",
         });
       }
@@ -301,6 +310,7 @@ export class SourceHttpClient {
               sourceId: source.id,
               status: response.status,
               retryable: false,
+              failureKind: "policy",
               reason: "automatic redirect rejected",
             });
           }
@@ -324,6 +334,7 @@ export class SourceHttpClient {
               sourceId: source.id,
               status: response.status,
               retryable: false,
+              failureKind: "transport",
               reason: "redirect rejected",
             });
           }
@@ -361,6 +372,7 @@ export class SourceHttpClient {
             sourceId: source.id,
             status: null,
             retryable: false,
+            failureKind: "policy",
             reason: "unsafe redirect URL",
           });
         }
@@ -368,6 +380,7 @@ export class SourceHttpClient {
           sourceId: source.id,
           status: null,
           retryable: true,
+          failureKind: "transport",
           reason: "network error or timeout",
         });
       }
@@ -407,6 +420,7 @@ export class SourceHttpClient {
           sourceId: source.id,
           status: response.status,
           retryable,
+          failureKind: "transport",
           reason: retryable ? "retry limit exhausted" : "upstream rejected request",
         });
       }
@@ -426,6 +440,7 @@ export class SourceHttpClient {
           sourceId: source.id,
           status: response.status,
           retryable: true,
+          failureKind: "transport",
           reason: "network error or timeout while reading response",
         });
       } finally {
@@ -459,6 +474,7 @@ export class SourceHttpClient {
       sourceId: source.id,
       status: null,
       retryable: false,
+      failureKind: "transport",
       reason: "unreachable retry state",
     });
   }

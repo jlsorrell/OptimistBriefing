@@ -332,6 +332,45 @@ describe("NewsCollector", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("preserves validated RSS metadata when optional article retrieval fails", async () => {
+    const fetch = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(await loadFixture("local-news.xml"), {
+          headers: { "content-type": "application/rss+xml" },
+        }),
+      )
+      .mockResolvedValueOnce(new Response("temporarily unavailable", {
+        status: 503,
+      }));
+    const collector = new NewsCollector({
+      http: new SourceHttpClient({ fetch, maxRetries: 0 }),
+      directFeeds: [
+        {
+          source: wyprSource,
+          feedUrl: "https://www.wypr.org/rss/local-news",
+          feedUrlPolicy: wyprFeedPolicy,
+          articleUrlPolicy: wyprArticlePolicy,
+        },
+      ],
+      discoveryAdapters: [],
+      forecastAdapters: [],
+    });
+
+    expect(await collector.collect(fixedWindow())).toEqual([
+      expect.objectContaining({
+        sourceId: "wypr",
+        title: "Baltimore expands secure AI pilot",
+        accessLevel: "metadata",
+        content: null,
+        metadata: expect.objectContaining({
+          extractionLevel: "metadata-only",
+        }),
+      }),
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
   it("rejects a feed item outside the configured article allowlist", async () => {
     const fetch = vi.fn(async (input) => {
       if (String(input) === "https://www.wypr.org/rss/local-news") {
@@ -438,6 +477,7 @@ describe("NewsCollector", () => {
 
       await expect(adapter.collect(fixedWindow())).rejects.toMatchObject({
         name: "SourceFetchError",
+        failureKind: "policy",
         retryable: false,
       });
       const requested = new URL(String(fetch.mock.calls[0]?.[0]));
@@ -482,15 +522,18 @@ function catalogSource(
 }
 
 describe("catalog-driven news collection", () => {
-  it("constructs usable direct-page and API adapters with typed policies", async () => {
-    const articleFixture = await loadFixture("article.html");
+  const policy = (
+    host: string,
+    allowedPathPrefixes: readonly string[],
+  ) => ({
+    allowedHosts: [host],
+    allowedPorts: [""],
+    allowedPathPrefixes,
+  });
+
+  it("constructs a usable Federal Register API adapter with typed policy", async () => {
     const fetch = vi.fn(async (input) => {
       const url = String(input);
-      if (url === "https://dc.gov/newsroom") {
-        return new Response(articleFixture, {
-          headers: { "content-type": "text/html" },
-        });
-      }
       if (
         url.startsWith(
           "https://www.federalregister.gov/api/v1/documents.json",
@@ -514,36 +557,12 @@ describe("catalog-driven news collection", () => {
       }
       throw new Error(`Unexpected catalog URL: ${url}`);
     });
-    const policy = (
-      host: string,
-      allowedPathPrefixes: readonly string[],
-    ) => ({
-      allowedHosts: [host],
-      allowedPorts: [""],
-      allowedPathPrefixes,
-    });
     const collector = createNewsCollectorFromCatalog({
       http: new SourceHttpClient({
         fetch,
         now: () => new Date("2026-07-29T08:30:00.000Z"),
       }),
       sources: [
-        catalogSource({
-          id: "dc-gov",
-          canonicalName: "DC.gov",
-          canonicalUrl: "https://dc.gov/",
-          role: "primary",
-          discoveryMechanism:
-            "page" as SourceRecord["discoveryMechanism"],
-          sectionEligibility: ["dmv"],
-          restrictions: {
-            bodyRetrieval: "permitted",
-            paywall: "none",
-            contentUse: "open-government",
-            pageUrl: "https://dc.gov/newsroom",
-            urlPolicy: policy("dc.gov", ["/newsroom"]),
-          },
-        }),
         catalogSource({
           id: "federal-register",
           canonicalName: "Federal Register",
@@ -568,16 +587,6 @@ describe("catalog-driven news collection", () => {
     });
 
     const items = await collector.collect(fixedWindow());
-    expect(items.find((item) => item.sourceId === "dc-gov")).toMatchObject({
-      kind: "document",
-      sourceRole: "primary",
-      canCorroborateFacts: true,
-      accessLevel: "full_text",
-      metadata: {
-        extractionLevel: "full",
-        contentUse: "open-government",
-      },
-    });
     expect(
       items.find((item) => item.sourceId === "federal-register"),
     ).toMatchObject({
@@ -592,6 +601,232 @@ describe("catalog-driven news collection", () => {
         documentType: "Notice",
       },
     });
+  });
+
+  it.each([
+    {
+      id: "associated-press",
+      name: "Associated Press",
+      canonicalUrl: "https://apnews.com/",
+      pageUrl: "https://apnews.com/hub/ap-top-news",
+      fixture: "ap-top-news.html",
+      itemSelector: ".PagePromo",
+      linkSelector: "a.Link",
+      titleSelector: ".PagePromo-title",
+      dateSelector: ".Timestamp",
+      dateAttribute: "data-date",
+      summarySelector: ".PagePromo-description",
+      paths: ["/hub/ap-top-news", "/article/"],
+      expectedTitle: "Agencies publish new AI safety evaluation standards",
+      expectedUrl:
+        "https://apnews.com/article/ai-safety-evaluation-standards",
+    },
+    {
+      id: "baltimore-banner",
+      name: "The Baltimore Banner",
+      canonicalUrl: "https://www.thebaltimorebanner.com/",
+      pageUrl:
+        "https://www.thebaltimorebanner.com/community/local-news/",
+      fixture: "baltimore-banner-local.html",
+      itemSelector: ".tease-card",
+      linkSelector: "a.tease-card__link",
+      titleSelector: ".tease-card__headline",
+      dateSelector: "time",
+      dateAttribute: "datetime",
+      summarySelector: ".tease-card__dek",
+      paths: ["/community/local-news/"],
+      expectedTitle: "Baltimore expands secure-compute pilot",
+      expectedUrl:
+        "https://www.thebaltimorebanner.com/community/local-news/city-council-secure-compute-pilot/",
+    },
+  ])(
+    "discovers metadata-only individual candidates from $name listing",
+    async (listingCase) => {
+      const fetch = vi.fn(async () =>
+        new Response(await loadFixture(listingCase.fixture), {
+          headers: { "content-type": "text/html" },
+        }),
+      );
+      const collector = createNewsCollectorFromCatalog({
+        http: new SourceHttpClient({
+          fetch,
+          now: () => new Date("2026-07-29T10:00:00.000Z"),
+        }),
+        sources: [
+          catalogSource({
+            id: listingCase.id,
+            canonicalName: listingCase.name,
+            canonicalUrl: listingCase.canonicalUrl,
+            role: "reporting",
+            discoveryMechanism: "page",
+            restrictions: {
+              bodyRetrieval: "forbidden",
+              paywall: "none",
+              contentUse: "metadata-only",
+              pageUrl: listingCase.pageUrl,
+              urlPolicy: policy(
+                new URL(listingCase.pageUrl).hostname,
+                listingCase.paths,
+              ),
+              listing: {
+                itemSelector: listingCase.itemSelector,
+                linkSelector: listingCase.linkSelector,
+                titleSelector: listingCase.titleSelector,
+                dateSelector: listingCase.dateSelector,
+                dateAttribute: listingCase.dateAttribute,
+                summarySelector: listingCase.summarySelector,
+                maxItems: 10,
+                maxBodyFetches: 0,
+              },
+            },
+          }),
+        ],
+      });
+
+      const items = await collector.collect(fixedWindow());
+
+      expect(items).toEqual([
+        expect.objectContaining({
+          sourceId: listingCase.id,
+          sourceRole: "reporting",
+          title: listingCase.expectedTitle,
+          originalUrl: listingCase.expectedUrl,
+          accessLevel: "metadata",
+          content: null,
+          canCorroborateFacts: true,
+          metadata: expect.objectContaining({
+            discoveryMechanism: "page",
+            listingUrl: listingCase.pageUrl,
+            extractionLevel: "metadata-only",
+          }),
+        }),
+      ]);
+      expect(items.some((item) => item.originalUrl === listingCase.pageUrl))
+        .toBe(false);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("discovers Congress documents and bounds optional item retrieval", async () => {
+    const articleFixture = await loadFixture("article.html");
+    const fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url === "https://www.congress.gov/") {
+        return new Response(await loadFixture("congress-latest.html"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (
+        url ===
+        "https://www.congress.gov/bill/119th-congress/house-bill/4321"
+      ) {
+        return new Response(articleFixture, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected Congress URL: ${url}`);
+    });
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        now: () => new Date("2026-07-29T10:00:00.000Z"),
+      }),
+      sources: [
+        catalogSource({
+          id: "congress-gov",
+          canonicalName: "Congress.gov",
+          canonicalUrl: "https://www.congress.gov/",
+          role: "primary",
+          discoveryMechanism: "page",
+          restrictions: {
+            bodyRetrieval: "permitted",
+            paywall: "none",
+            contentUse: "open-government",
+            pageUrl: "https://www.congress.gov/",
+            urlPolicy: policy("www.congress.gov", ["/"]),
+            listing: {
+              itemSelector: ".basic-search-results-lists > li",
+              linkSelector: ".result-heading a",
+              dateSelector: ".result-date",
+              summarySelector: ".result-summary",
+              maxItems: 10,
+              maxBodyFetches: 1,
+            },
+          },
+        }),
+      ],
+    });
+
+    expect(await collector.collect(fixedWindow())).toEqual([
+      expect.objectContaining({
+        kind: "document",
+        sourceId: "congress-gov",
+        title: "H.R. 4321 — Secure Model Evaluation Act",
+        originalUrl:
+          "https://www.congress.gov/bill/119th-congress/house-bill/4321",
+        publishedAt: "2026-07-29T00:00:00.000Z",
+        accessLevel: "full_text",
+        canCorroborateFacts: true,
+      }),
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("preserves DC listing metadata when bounded item retrieval gets a 503", async () => {
+    const fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url === "https://dc.gov/newsroom") {
+        return new Response(await loadFixture("dc-newsroom.html"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (url === "https://dc.gov/release/dc-launches-ai-procurement-review") {
+        return new Response("temporarily unavailable", { status: 503 });
+      }
+      throw new Error(`Item fetch budget escaped: ${url}`);
+    });
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-07-29T10:00:00.000Z"),
+      }),
+      sources: [
+        catalogSource({
+          id: "dc-gov",
+          canonicalName: "DC.gov",
+          canonicalUrl: "https://dc.gov/",
+          role: "primary",
+          discoveryMechanism: "page",
+          restrictions: {
+            bodyRetrieval: "permitted",
+            paywall: "none",
+            contentUse: "open-government",
+            pageUrl: "https://dc.gov/newsroom",
+            urlPolicy: policy("dc.gov", ["/newsroom", "/release/"]),
+            listing: {
+              itemSelector: ".usa-card",
+              linkSelector: ".usa-card__heading a",
+              dateSelector: "time",
+              dateAttribute: "datetime",
+              summarySelector: ".usa-card__description",
+              maxItems: 10,
+              maxBodyFetches: 1,
+            },
+          },
+        }),
+      ],
+    });
+
+    const items = await collector.collect(fixedWindow());
+    expect(items).toHaveLength(2);
+    expect(items.map((item) => item.originalUrl)).toEqual([
+      "https://dc.gov/release/dc-launches-ai-procurement-review",
+      "https://dc.gov/release/dc-publishes-dataset-guidance",
+    ]);
+    expect(items.every((item) => item.accessLevel === "metadata")).toBe(true);
+    expect(items.every((item) => item.content === null)).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(2);
   });
 });
 

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { parseHTML } from "linkedom";
 
 import type { AccessLevel, SourceRef } from "../contracts/editorial";
 import {
@@ -10,7 +11,10 @@ import {
   type ExtractedArticle,
 } from "./article-extractor";
 import { GdeltAdapter } from "./gdelt";
-import { SourceHttpClient } from "./http-client";
+import {
+  SourceFetchError,
+  SourceHttpClient,
+} from "./http-client";
 import { RssAdapter, type ConfiguredFeed } from "./rss";
 import {
   assertSafeOutboundUrl,
@@ -45,6 +49,17 @@ const CatalogUrlPolicySchema = z.object({
   allowedPorts: z.array(z.string()),
   allowedPathPrefixes: z.array(z.string().startsWith("/")).min(1),
 });
+const ListingPageConfigSchema = z.object({
+  itemSelector: z.string().trim().min(1),
+  linkSelector: z.string().trim().min(1),
+  titleSelector: z.string().trim().min(1).optional(),
+  dateSelector: z.string().trim().min(1),
+  dateAttribute: z.string().trim().min(1).optional(),
+  summarySelector: z.string().trim().min(1).optional(),
+  maxItems: z.number().int().positive().max(100),
+  maxBodyFetches: z.number().int().nonnegative().max(20),
+});
+type ListingPageConfig = z.infer<typeof ListingPageConfigSchema>;
 const FederalRegisterResponseSchema = z.object({
   results: z.array(z.unknown()),
 }).passthrough();
@@ -131,6 +146,10 @@ function catalogPolicy(source: SourceRecord): OutboundUrlPolicy {
   );
 }
 
+function catalogListing(source: SourceRecord): ListingPageConfig {
+  return ListingPageConfigSchema.parse(source.restrictions.listing);
+}
+
 function isNewsCatalogSource(source: SourceRecord): boolean {
   return (
     source.role !== "blog" &&
@@ -138,6 +157,35 @@ function isNewsCatalogSource(source: SourceRecord): boolean {
       NEWS_SECTIONS.has(section),
     )
   );
+}
+
+function normalizedText(value: string | null | undefined): string | null {
+  const normalized = value?.replace(/\s+/g, " ").trim() ?? "";
+  return normalized.length === 0 ? null : normalized;
+}
+
+function listingDate(value: string): string | null {
+  const trimmed = value.trim();
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+  const timestamp =
+    dateOnly === null
+      ? Date.parse(
+          /^[A-Za-z]+ \d{1,2}, \d{4}$/.test(trimmed)
+            ? `${trimmed} UTC`
+            : trimmed,
+        )
+      : Date.UTC(
+          Number(dateOnly[1]),
+          Number(dateOnly[2]) - 1,
+          Number(dateOnly[3]),
+        );
+  return Number.isFinite(timestamp)
+    ? new Date(timestamp).toISOString()
+    : null;
+}
+
+function nestedElement(item: Element, selector: string): Element | null {
+  return item.matches(selector) ? item : item.querySelector(selector);
 }
 
 class DirectPageAdapter implements NewsSourceAdapter {
@@ -148,59 +196,171 @@ class DirectPageAdapter implements NewsSourceAdapter {
     private readonly source: ResearchSourceRecord,
     pageUrl: string,
     private readonly urlPolicy: OutboundUrlPolicy,
+    private readonly listing: ListingPageConfig,
   ) {
     this.pageUrl = assertSafeOutboundUrl(pageUrl, urlPolicy).toString();
   }
 
   async collect(window: CollectionWindow): Promise<RawNewsCandidate[]> {
-    CollectionWindowSchema.parse(window);
-    if (!this.source.enabled || !transientExtractionPermitted(this.source)) {
-      return [];
-    }
+    const validWindow = CollectionWindowSchema.parse(window);
+    if (!this.source.enabled) return [];
     const response = await this.http.get(this.source, this.pageUrl, {
       headers: { accept: "text/html,application/xhtml+xml" },
       useValidators: false,
       urlPolicy: this.urlPolicy,
     });
     if (response.body === null) return [];
-    const extraction = extractReadableArticle(
-      response.body,
-      response.finalUrl,
-      response.contentType,
+    const mediaType = response.contentType
+      ?.split(";", 1)[0]
+      ?.trim()
+      .toLowerCase();
+    if (
+      mediaType !== "text/html" &&
+      mediaType !== "application/xhtml+xml"
+    ) {
+      return [];
+    }
+    const { document } = parseHTML(response.body);
+    const discovered = [...document.querySelectorAll(
+      this.listing.itemSelector,
+    )]
+      .slice(0, this.listing.maxItems)
+      .flatMap((item) => {
+        const link = nestedElement(item, this.listing.linkSelector);
+        const href = link?.getAttribute("href");
+        const titleElement =
+          this.listing.titleSelector === undefined
+            ? link
+            : nestedElement(item, this.listing.titleSelector);
+        const title = normalizedText(titleElement?.textContent);
+        const dateElement = nestedElement(
+          item,
+          this.listing.dateSelector,
+        );
+        const rawDate =
+          this.listing.dateAttribute === undefined
+            ? dateElement?.textContent
+            : dateElement?.getAttribute(this.listing.dateAttribute);
+        const publishedAt =
+          rawDate === null || rawDate === undefined
+            ? null
+            : listingDate(rawDate);
+        if (href == null || title === null || publishedAt === null) {
+          return [];
+        }
+        if (
+          publishedAt < validWindow.from ||
+          publishedAt > validWindow.to
+        ) {
+          return [];
+        }
+        let originalUrl: string;
+        try {
+          originalUrl = assertSafeOutboundUrl(
+            new URL(href, response.finalUrl),
+            this.urlPolicy,
+          ).toString();
+        } catch {
+          return [];
+        }
+        if (originalUrl === response.finalUrl) return [];
+        const summary =
+          this.listing.summarySelector === undefined
+            ? null
+            : normalizedText(
+                nestedElement(
+                  item,
+                  this.listing.summarySelector,
+                )?.textContent,
+              );
+        return [{ title, originalUrl, publishedAt, summary }];
+      });
+
+    return (
+      await Promise.all(
+        discovered.map(async (item, index) => {
+          let extraction = noExtraction();
+          let originalUrl = item.originalUrl;
+          let retrievedAt = response.retrievedAt;
+          if (
+            index < this.listing.maxBodyFetches &&
+            transientExtractionPermitted(this.source)
+          ) {
+            try {
+              const articleResponse = await this.http.get(
+                this.source,
+                originalUrl,
+                {
+                  headers: {
+                    accept: "text/html,application/xhtml+xml",
+                  },
+                  useValidators: false,
+                  urlPolicy: this.urlPolicy,
+                },
+              );
+              originalUrl = articleResponse.finalUrl;
+              retrievedAt = articleResponse.retrievedAt;
+              if (articleResponse.body !== null) {
+                extraction = extractReadableArticle(
+                  articleResponse.body,
+                  articleResponse.finalUrl,
+                  articleResponse.contentType,
+                );
+              }
+            } catch (error) {
+              if (
+                error instanceof SourceFetchError &&
+                error.failureKind === "policy"
+              ) {
+                return null;
+              }
+            }
+          }
+          return RawNewsCandidateSchema.parse({
+            kind:
+              this.source.role === "primary" ? "document" : "article",
+            sourceId: this.source.id,
+            sourceName: this.source.canonicalName,
+            sourceRole: this.source.role,
+            title: item.title,
+            originalUrl,
+            externalId: originalUrl,
+            externalIds: [originalUrl],
+            publishedAt: item.publishedAt,
+            retrievedAt,
+            accessLevel: extractionAccessLevel(extraction),
+            authors:
+              extraction.byline === null ? [] : [extraction.byline],
+            institutions: [],
+            abstract: extraction.excerpt ?? item.summary,
+            content: extraction.text,
+            relatedPaperIds: [],
+            canCorroborateFacts: canCorroborateFacts(this.source.role),
+            metadata: {
+              extractionLevel: extraction.extractionLevel,
+              contentUse: restriction(
+                this.source,
+                "contentUse",
+                "metadata-only",
+              ),
+              paywall: restriction(
+                this.source,
+                "paywall",
+                "unknown",
+              ),
+              retention:
+                extraction.text === null
+                  ? "metadata-only"
+                  : "ephemeral-only",
+              discoveryMechanism: "page",
+              listingUrl: response.finalUrl,
+            },
+          });
+        }),
+      )
+    ).filter(
+      (item): item is RawNewsCandidate => item !== null,
     );
-    if (extraction.text === null) return [];
-    return [
-      RawNewsCandidateSchema.parse({
-        kind: this.source.role === "primary" ? "document" : "article",
-        sourceId: this.source.id,
-        sourceName: this.source.canonicalName,
-        sourceRole: this.source.role,
-        title: extraction.title ?? this.source.canonicalName,
-        originalUrl: response.finalUrl,
-        externalId: response.finalUrl,
-        externalIds: [response.finalUrl],
-        publishedAt: null,
-        retrievedAt: response.retrievedAt,
-        accessLevel: extractionAccessLevel(extraction),
-        authors: extraction.byline === null ? [] : [extraction.byline],
-        institutions: [],
-        abstract: extraction.excerpt,
-        content: extraction.text,
-        relatedPaperIds: [],
-        canCorroborateFacts: canCorroborateFacts(this.source.role),
-        metadata: {
-          extractionLevel: extraction.extractionLevel,
-          contentUse: restriction(
-            this.source,
-            "contentUse",
-            "metadata-only",
-          ),
-          paywall: restriction(this.source, "paywall", "unknown"),
-          retention: "ephemeral-only",
-          discoveryMechanism: "page",
-        },
-      }),
-    ];
   }
 }
 
@@ -360,8 +520,13 @@ export class NewsCollector {
                 response.contentType,
               );
             }
-          } catch {
-            return null;
+          } catch (error) {
+            if (
+              error instanceof SourceFetchError &&
+              error.failureKind === "policy"
+            ) {
+              return null;
+            }
           }
         }
 
@@ -452,6 +617,7 @@ export function createNewsCollectorFromCatalog(
           collectionSource,
           catalogString(source, "pageUrl"),
           catalogPolicy(source),
+          catalogListing(source),
         ),
       );
       continue;

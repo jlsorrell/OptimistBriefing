@@ -9,7 +9,7 @@ INSERT OR IGNORE INTO sources (
   ),
   (
     'associated-press', 'Associated Press', 'https://apnews.com/', 'reporting', 0.95, 1,
-    '{"bodyRetrieval":"forbidden","paywall":"none","contentUse":"metadata-and-linked-excerpts","discoveryMechanism":"page","sectionEligibility":["morning_brief","world","technology","ai_policy"],"pageUrl":"https://apnews.com/hub/ap-top-news","urlPolicy":{"allowedHosts":["apnews.com"],"allowedPorts":[""],"allowedPathPrefixes":["/hub/ap-top-news"]}}',
+    '{"bodyRetrieval":"forbidden","paywall":"none","contentUse":"metadata-and-linked-excerpts","discoveryMechanism":"page","sectionEligibility":["morning_brief","world","technology","ai_policy"],"pageUrl":"https://apnews.com/hub/ap-top-news","urlPolicy":{"allowedHosts":["apnews.com"],"allowedPorts":[""],"allowedPathPrefixes":["/hub/ap-top-news","/article/"]},"listing":{"itemSelector":".PagePromo","linkSelector":"a.Link","titleSelector":".PagePromo-title","dateSelector":".Timestamp","dateAttribute":"data-date","summarySelector":".PagePromo-description","maxItems":50,"maxBodyFetches":0}}',
     NULL, 'unknown'
   ),
   (
@@ -34,37 +34,37 @@ INSERT OR IGNORE INTO sources (
   ),
   (
     'congress-gov', 'Congress.gov', 'https://www.congress.gov/', 'primary', 0.98, 1,
-    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["morning_brief","ai_policy"],"pageUrl":"https://www.congress.gov/","urlPolicy":{"allowedHosts":["www.congress.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/"]}}',
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["morning_brief","ai_policy"],"pageUrl":"https://www.congress.gov/","urlPolicy":{"allowedHosts":["www.congress.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/"]},"listing":{"itemSelector":".basic-search-results-lists > li","linkSelector":".result-heading a","dateSelector":".result-date","summarySelector":".result-summary","maxItems":50,"maxBodyFetches":10}}',
     NULL, 'unknown'
   ),
   (
     'maryland-gov', 'Maryland.gov', 'https://www.maryland.gov/', 'primary', 0.98, 1,
-    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["dmv","baltimore"],"pageUrl":"https://news.maryland.gov/","urlPolicy":{"allowedHosts":["news.maryland.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/"]}}',
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["dmv","baltimore"],"pageUrl":"https://news.maryland.gov/","urlPolicy":{"allowedHosts":["news.maryland.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/"]},"listing":{"itemSelector":"article","linkSelector":"h2 a, h3 a","titleSelector":"h2, h3","dateSelector":"time","dateAttribute":"datetime","summarySelector":".entry-summary, .excerpt","maxItems":50,"maxBodyFetches":10}}',
     NULL, 'unknown'
   ),
   (
     'maryland-general-assembly', 'Maryland General Assembly', 'https://mgaleg.maryland.gov/', 'primary', 0.98, 1,
-    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["ai_policy","dmv","baltimore"],"pageUrl":"https://mgaleg.maryland.gov/mgawebsite/Legislation/Tracking","urlPolicy":{"allowedHosts":["mgaleg.maryland.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/mgawebsite/"]}}',
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["ai_policy","dmv","baltimore"],"pageUrl":"https://mgaleg.maryland.gov/mgawebsite/Legislation/Tracking","urlPolicy":{"allowedHosts":["mgaleg.maryland.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/mgawebsite/"]},"listing":{"itemSelector":"table tbody tr","linkSelector":"a","dateSelector":"time, .date","dateAttribute":"datetime","summarySelector":"td:nth-child(3)","maxItems":50,"maxBodyFetches":10}}',
     NULL, 'unknown'
   ),
   (
     'dc-gov', 'DC.gov', 'https://dc.gov/', 'primary', 0.98, 1,
-    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["dmv"],"pageUrl":"https://dc.gov/newsroom","urlPolicy":{"allowedHosts":["dc.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/newsroom"]}}',
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["dmv"],"pageUrl":"https://dc.gov/newsroom","urlPolicy":{"allowedHosts":["dc.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/newsroom","/release/"]},"listing":{"itemSelector":".usa-card, article","linkSelector":".usa-card__heading a, h2 a, h3 a","dateSelector":"time","dateAttribute":"datetime","summarySelector":".usa-card__description, .field--name-body","maxItems":50,"maxBodyFetches":10}}',
     NULL, 'unknown'
   ),
   (
     'dc-register', 'District of Columbia Register', 'https://dcregs.dc.gov/', 'primary', 0.98, 1,
-    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["ai_policy","dmv"],"pageUrl":"https://dcregs.dc.gov/Common/DCR/Issues/IssueCategoryList.aspx?CategoryID=1","urlPolicy":{"allowedHosts":["dcregs.dc.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/Common/DCR/Issues/"]}}',
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["ai_policy","dmv"],"pageUrl":"https://dcregs.dc.gov/Common/DCR/Issues/IssueCategoryList.aspx?CategoryID=1","urlPolicy":{"allowedHosts":["dcregs.dc.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/Common/DCR/Issues/"]},"listing":{"itemSelector":"table tbody tr","linkSelector":"a","dateSelector":"time, .date, td:nth-child(2)","summarySelector":"td:nth-child(3)","maxItems":50,"maxBodyFetches":10}}',
     NULL, 'unknown'
   ),
   (
     'virginia-gov', 'Virginia.gov', 'https://www.virginia.gov/', 'primary', 0.98, 1,
-    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["dmv"],"pageUrl":"https://www.virginia.gov/news/","urlPolicy":{"allowedHosts":["www.virginia.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/news/"]}}',
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["dmv"],"pageUrl":"https://www.virginia.gov/news/","urlPolicy":{"allowedHosts":["www.virginia.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/news/"]},"listing":{"itemSelector":"article, .news-item","linkSelector":"h2 a, h3 a","titleSelector":"h2, h3","dateSelector":"time, .date","dateAttribute":"datetime","summarySelector":".summary, .description","maxItems":50,"maxBodyFetches":10}}',
     NULL, 'unknown'
   ),
   (
     'virginia-lis', 'Virginia Legislative Information System', 'https://lis.virginia.gov/', 'primary', 0.98, 1,
-    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["ai_policy","dmv"],"pageUrl":"https://lis.virginia.gov/","urlPolicy":{"allowedHosts":["lis.virginia.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/"]}}',
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"page","sectionEligibility":["ai_policy","dmv"],"pageUrl":"https://lis.virginia.gov/","urlPolicy":{"allowedHosts":["lis.virginia.gov"],"allowedPorts":[""],"allowedPathPrefixes":["/"]},"listing":{"itemSelector":"table tbody tr, .result-item","linkSelector":"a","dateSelector":"time, .date","dateAttribute":"datetime","summarySelector":".summary, td:nth-child(3)","maxItems":50,"maxBodyFetches":10}}',
     NULL, 'unknown'
   ),
   (
@@ -74,7 +74,7 @@ INSERT OR IGNORE INTO sources (
   ),
   (
     'baltimore-banner', 'The Baltimore Banner', 'https://www.thebaltimorebanner.com/', 'reporting', 0.9, 1,
-    '{"bodyRetrieval":"forbidden","paywall":"metered-or-hard","contentUse":"metadata-only","discoveryMechanism":"page","sectionEligibility":["dmv","baltimore"],"pageUrl":"https://www.thebaltimorebanner.com/community/local-news/","urlPolicy":{"allowedHosts":["www.thebaltimorebanner.com"],"allowedPorts":[""],"allowedPathPrefixes":["/community/local-news/"]}}',
+    '{"bodyRetrieval":"forbidden","paywall":"metered-or-hard","contentUse":"metadata-only","discoveryMechanism":"page","sectionEligibility":["dmv","baltimore"],"pageUrl":"https://www.thebaltimorebanner.com/community/local-news/","urlPolicy":{"allowedHosts":["www.thebaltimorebanner.com"],"allowedPorts":[""],"allowedPathPrefixes":["/community/local-news/"]},"listing":{"itemSelector":".tease-card, article","linkSelector":"a.tease-card__link, h2 a, h3 a","titleSelector":".tease-card__headline, h2, h3","dateSelector":"time","dateAttribute":"datetime","summarySelector":".tease-card__dek, .dek","maxItems":50,"maxBodyFetches":0}}',
     NULL, 'unknown'
   ),
   (
@@ -104,7 +104,7 @@ INSERT OR IGNORE INTO sources (
   ),
   (
     'monitoring-the-situation', 'Monitoring the Situation', 'https://mts.now/', 'analysis', 0.55, 1,
-    '{"bodyRetrieval":"forbidden","paywall":"unknown","contentUse":"discovery-metadata-only","discoveryMechanism":"page","sectionEligibility":["world","technology"],"pageUrl":"https://mts.now/","canCorroborateFacts":false,"urlPolicy":{"allowedHosts":["mts.now"],"allowedPorts":[""],"allowedPathPrefixes":["/"]}}',
+    '{"bodyRetrieval":"forbidden","paywall":"unknown","contentUse":"discovery-metadata-only","discoveryMechanism":"page","sectionEligibility":["world","technology"],"pageUrl":"https://mts.now/","canCorroborateFacts":false,"urlPolicy":{"allowedHosts":["mts.now"],"allowedPorts":[""],"allowedPathPrefixes":["/"]},"listing":{"itemSelector":"article","linkSelector":"h2 a, h3 a, a","titleSelector":"h2, h3","dateSelector":"time","dateAttribute":"datetime","summarySelector":"p","maxItems":50,"maxBodyFetches":0}}',
     NULL, 'unknown'
   ),
   (
