@@ -42,6 +42,10 @@ import {
   type UpdateSourceInput,
   type WorkflowRun,
 } from "./repository";
+import {
+  decodeEditionCursor,
+  encodeEditionCursor,
+} from "../pagination/edition-cursor";
 
 const DateTimeSchema = z.string().datetime();
 const EditionDateSchema = EditionSchema.shape.editionDate;
@@ -58,7 +62,7 @@ const ArchiveInputSchema = PageInputSchema.extend({
   source: z.string().trim().min(1).nullable(),
   section: EditionSectionSchema.nullable(),
 });
-const CursorSchema = z.object({
+const OffsetCursorSchema = z.object({
   offset: z.number().int().nonnegative(),
 });
 
@@ -157,7 +161,7 @@ function stringArray(value: unknown): string[] {
   return value.filter((entry): entry is string => typeof entry === "string");
 }
 
-function encodeCursor(offset: number): string {
+function encodeOffsetCursor(offset: number): string {
   const bytes = new TextEncoder().encode(JSON.stringify({ offset }));
   let binary = "";
   for (const byte of bytes) {
@@ -169,7 +173,7 @@ function encodeCursor(offset: number): string {
     .replace(/=+$/, "");
 }
 
-function decodeCursor(cursor: string | null): number {
+function decodeOffsetCursor(cursor: string | null): number {
   if (cursor === null) {
     return 0;
   }
@@ -188,7 +192,7 @@ function decodeCursor(cursor: string | null): number {
       character.charCodeAt(0),
     );
     return validated(
-      CursorSchema,
+      OffsetCursorSchema,
       JSON.parse(new TextDecoder().decode(bytes)),
       "Invalid cursor",
     ).offset;
@@ -800,28 +804,55 @@ export class D1BriefingRepository implements BriefingRepository {
       input,
       "Invalid edition list input",
     );
-    const offset = decodeCursor(validInput.cursor);
-    const result = await this.db
-      .prepare(
-        `SELECT *
-        FROM editions
-        WHERE status IN (?, ?)
-        ORDER BY edition_date DESC, id DESC
-        LIMIT ? OFFSET ?`,
-      )
-      .bind("published", "partial", validInput.limit + 1, offset)
-      .all<EditionRow>();
+    let lastEditionDate: string | null = null;
+    if (validInput.cursor !== null) {
+      try {
+        lastEditionDate = decodeEditionCursor(validInput.cursor);
+      } catch (error) {
+        throw new RepositoryValidationError("Invalid edition cursor", {
+          cause: error,
+        });
+      }
+    }
+    const statement =
+      lastEditionDate === null
+        ? this.db
+            .prepare(
+              `SELECT *
+              FROM editions
+              WHERE status IN (?, ?)
+              ORDER BY edition_date DESC, id DESC
+              LIMIT ?`,
+            )
+            .bind("published", "partial", validInput.limit + 1)
+        : this.db
+            .prepare(
+              `SELECT *
+              FROM editions
+              WHERE status IN (?, ?) AND edition_date < ?
+              ORDER BY edition_date DESC, id DESC
+              LIMIT ?`,
+            )
+            .bind(
+              "published",
+              "partial",
+              lastEditionDate,
+              validInput.limit + 1,
+            );
+    const result = await statement.all<EditionRow>();
     const hasMore = result.results.length > validInput.limit;
     const items = result.results
       .slice(0, validInput.limit)
       .map(editionFromRow);
+    const lastItem = items.at(-1);
     return validated(
       EditionPageSchema,
       {
         items,
-        nextCursor: hasMore
-          ? encodeCursor(offset + validInput.limit)
-          : null,
+        nextCursor:
+          hasMore && lastItem !== undefined
+            ? encodeEditionCursor(lastItem.editionDate)
+            : null,
       },
       "Invalid edition page",
     );
@@ -835,7 +866,7 @@ export class D1BriefingRepository implements BriefingRepository {
       input,
       "Invalid archive search input",
     );
-    const offset = decodeCursor(validInput.cursor);
+    const offset = decodeOffsetCursor(validInput.cursor);
     const clauses = ["e.status IN (?, ?)"];
     const values: unknown[] = ["published", "partial"];
 
@@ -913,7 +944,7 @@ export class D1BriefingRepository implements BriefingRepository {
       {
         items,
         nextCursor: hasMore
-          ? encodeCursor(offset + validInput.limit)
+          ? encodeOffsetCursor(offset + validInput.limit)
           : null,
       },
       "Invalid archive search page",

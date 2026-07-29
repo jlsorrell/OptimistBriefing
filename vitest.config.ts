@@ -5,6 +5,7 @@ export default defineConfig({
     environment: "node",
     exclude: [
       ...configDefaults.exclude,
+      "tests/e2e/**",
       "tests/integration/**/*.test.ts",
     ],
   },

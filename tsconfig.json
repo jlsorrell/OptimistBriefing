@@ -3,6 +3,7 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "jsx": "react-jsx",
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": [
       "node",
@@ -18,9 +19,11 @@
   },
   "include": [
     "src",
+    "scripts",
     "tests",
     "vite.config.ts",
     "vitest.config.ts",
-    "vitest.worker.config.ts"
+    "vitest.worker.config.ts",
+    "playwright.config.ts"
   ]
 }

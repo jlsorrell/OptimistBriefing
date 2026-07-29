@@ -1,12 +1,15 @@
 import { Hono } from "hono";
 
 import type { BriefingRepository } from "../db/repository";
+import { EditionSchema } from "../contracts/editorial";
+import { decodeEditionCursor } from "../pagination/edition-cursor";
 import {
   ApiError,
   AuthenticationRequiredError,
   ForbiddenError,
   InternalError,
   NotFoundError,
+  ValidationError,
   jsonError,
 } from "./errors";
 
@@ -67,6 +70,48 @@ export function createApp(dependencies: AppDependencies): Hono<AppEnv> {
 
   app.get("/api/edition/latest", async (context) => {
     const edition = await dependencies.repository.getLatestEdition();
+    if (edition === null) {
+      throw new NotFoundError();
+    }
+    return context.json(edition);
+  });
+
+  app.get("/api/editions", async (context) => {
+    const rawLimit = context.req.query("limit");
+    const limit =
+      rawLimit === undefined
+        ? 20
+        : /^\d+$/.test(rawLimit)
+          ? Number(rawLimit)
+          : Number.NaN;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 50) {
+      throw new ValidationError();
+    }
+
+    const cursor = context.req.query("cursor") ?? null;
+    if (cursor !== null) {
+      try {
+        decodeEditionCursor(cursor);
+      } catch {
+        throw new ValidationError();
+      }
+    }
+
+    return context.json(
+      await dependencies.repository.listEditions({ limit, cursor }),
+    );
+  });
+
+  app.get("/api/editions/:editionDate", async (context) => {
+    const parsedDate = EditionSchema.shape.editionDate.safeParse(
+      context.req.param("editionDate"),
+    );
+    if (!parsedDate.success) {
+      throw new ValidationError();
+    }
+    const edition = await dependencies.repository.getEditionByDate(
+      parsedDate.data,
+    );
     if (edition === null) {
       throw new NotFoundError();
     }

@@ -1,0 +1,17 @@
+:root {
+  --burgundy: #681f35;
+  --rose: #c98d98;
+  --sage: #89997d;
+  --mustard: #c69a2d;
+  --cream: #f7f0e5;
+  --ink: #302d2c;
+  --focus: #175cd3;
+  --paper: #fffdf9;
+  --cream-deep: #eee3d4;
+  --burgundy-dark: #481223;
+  --sage-dark: #4f6049;
+  --mustard-dark: #76580b;
+  --muted: #6e6761;
+  --line: rgba(104, 31, 53, 0.18);
+  --shadow: 0 18px 45px rgba(72, 18, 35, 0.08);
+}
