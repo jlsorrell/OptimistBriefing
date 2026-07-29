@@ -1,0 +1,25 @@
+[
+  {
+    "paperId": "S2-2607-00001",
+    "externalIds": {
+      "ArXiv": "2607.00001",
+      "DOI": "10.1000/example.2607.1"
+    },
+    "title": "Concept Geometry Evolves During Language Model Training",
+    "citationCount": 7,
+    "influentialCitationCount": 2,
+    "authors": [
+      {
+        "authorId": "author-ada",
+        "name": "Ada Example",
+        "affiliations": ["Massachusetts Institute of Technology"]
+      },
+      {
+        "authorId": "author-grace",
+        "name": "Grace Example",
+        "affiliations": ["Google DeepMind"]
+      }
+    ],
+    "fieldsOfStudy": ["Computer Science"]
+  }
+]

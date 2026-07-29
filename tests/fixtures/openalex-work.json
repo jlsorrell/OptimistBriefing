@@ -1,0 +1,81 @@
+{
+  "meta": {
+    "count": 1,
+    "db_response_time_ms": 4,
+    "page": 1,
+    "per_page": 50,
+    "groups_count": null,
+    "cost_usd": 0.0001
+  },
+  "results": [
+    {
+      "id": "https://openalex.org/W260700001",
+      "doi": "https://doi.org/10.1000/example.2607.1",
+      "title": "Concept Geometry Evolves During Language Model Training",
+      "publication_date": "2026-07-28",
+      "cited_by_count": 9,
+      "ids": {
+        "openalex": "https://openalex.org/W260700001",
+        "doi": "https://doi.org/10.1000/example.2607.1",
+        "arxiv": "https://arxiv.org/abs/2607.00001"
+      },
+      "authorships": [
+        {
+          "author_position": "first",
+          "author": {
+            "id": "https://openalex.org/A1",
+            "display_name": "Ada Example",
+            "orcid": null
+          },
+          "institutions": [
+            {
+              "id": "https://openalex.org/I63966007",
+              "display_name": "MIT",
+              "ror": "https://ror.org/042nb2s44",
+              "country_code": "US",
+              "type": "education",
+              "lineage": ["https://openalex.org/I63966007"]
+            }
+          ],
+          "countries": ["US"],
+          "is_corresponding": true,
+          "raw_author_name": "Ada Example",
+          "raw_affiliation_strings": ["MIT"]
+        },
+        {
+          "author_position": "last",
+          "author": {
+            "id": "https://openalex.org/A2",
+            "display_name": "Grace Example",
+            "orcid": null
+          },
+          "institutions": [
+            {
+              "id": "https://openalex.org/I1294671590",
+              "display_name": "DeepMind",
+              "ror": null,
+              "country_code": "GB",
+              "type": "company",
+              "lineage": ["https://openalex.org/I1294671590"]
+            }
+          ],
+          "countries": ["GB"],
+          "is_corresponding": false,
+          "raw_author_name": "Grace Example",
+          "raw_affiliation_strings": ["DeepMind"]
+        }
+      ],
+      "topics": [
+        {
+          "id": "https://openalex.org/T1",
+          "display_name": "Interpretability of language models",
+          "score": 0.98,
+          "subfield": {"id": "https://openalex.org/subfields/1702", "display_name": "AI"},
+          "field": {"id": "https://openalex.org/fields/17", "display_name": "Computer Science"},
+          "domain": {"id": "https://openalex.org/domains/3", "display_name": "Physical Sciences"}
+        }
+      ]
+    }
+  ],
+  "group_by": []
+}

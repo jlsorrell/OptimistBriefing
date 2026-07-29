@@ -1,0 +1,97 @@
+import { z } from "zod";
+
+import {
+  AccessLevelSchema,
+  ItemKindSchema,
+  SourceRefSchema,
+} from "../contracts/editorial";
+
+export const CollectionWindowSchema = z
+  .object({
+    from: z.string().datetime(),
+    to: z.string().datetime(),
+  })
+  .superRefine((window, context) => {
+    if (Date.parse(window.from) >= Date.parse(window.to)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Collection window must end after it starts.",
+        path: ["to"],
+      });
+    }
+  });
+
+export const ResearchSourceRestrictionsSchema = z
+  .object({
+    bodyRetrieval: z.enum(["forbidden", "permitted"]).default("forbidden"),
+  })
+  .passthrough();
+
+export const ResearchSourceRecordSchema = z.object({
+  id: z.string().min(1),
+  canonicalName: z.string().min(1),
+  canonicalUrl: z.string().url(),
+  role: SourceRefSchema.shape.role,
+  enabled: z.boolean(),
+  restrictions: ResearchSourceRestrictionsSchema,
+});
+
+export const RawItemSchema = z.object({
+  kind: ItemKindSchema,
+  sourceId: z.string().min(1),
+  sourceName: z.string().min(1),
+  sourceRole: SourceRefSchema.shape.role,
+  title: z.string().min(1),
+  originalUrl: z.string().url(),
+  externalId: z.string().min(1),
+  externalIds: z.array(z.string().min(1)).min(1),
+  publishedAt: z.string().datetime().nullable(),
+  retrievedAt: z.string().datetime(),
+  accessLevel: AccessLevelSchema,
+  authors: z.array(z.string().min(1)),
+  institutions: z.array(z.string().min(1)),
+  abstract: z.string().min(1).nullable(),
+  content: z.string().min(1).nullable(),
+  relatedPaperIds: z.array(z.string().min(1)),
+  metadata: z.record(z.string(), z.unknown()),
+});
+
+export const RawResearchCandidateSchema = RawItemSchema.extend({
+  kind: z.enum(["paper", "blog"]),
+  preferredInstitutionMatches: z.array(z.string().min(1)),
+  citationCount: z.number().int().nonnegative().nullable(),
+  influentialCitationCount: z.number().int().nonnegative().nullable(),
+  topics: z.array(z.string().min(1)),
+});
+
+export type CollectionWindow = z.infer<typeof CollectionWindowSchema>;
+export type ResearchSourceRecord = z.infer<
+  typeof ResearchSourceRecordSchema
+>;
+export type ResearchSourceInput = Omit<
+  ResearchSourceRecord,
+  "restrictions"
+> & {
+  restrictions: Record<string, unknown>;
+};
+export type RawItem = z.infer<typeof RawItemSchema>;
+export type RawResearchCandidate = z.infer<
+  typeof RawResearchCandidateSchema
+>;
+
+export interface SourceAdapter {
+  collect(window: CollectionWindow): Promise<RawItem[]>;
+}
+
+export interface ResearchEnricher {
+  enrich(
+    candidates: readonly RawResearchCandidate[],
+  ): Promise<RawResearchCandidate[]>;
+}
+
+export function bodyRetrievalPermitted(
+  source: ResearchSourceInput,
+): boolean {
+  const restrictions = ResearchSourceRecordSchema.parse(source).restrictions;
+  return restrictions.bodyRetrieval === "permitted";
+}
