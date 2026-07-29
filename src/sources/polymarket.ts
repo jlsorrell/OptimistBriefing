@@ -283,6 +283,11 @@ export class PolymarketAdapter implements NewsSourceAdapter {
           ...deriveNewsSignals({
             kind: "forecast",
             title: market.question,
+            abstract:
+              `Probability moved from ${Math.round(
+                market.priorProbability * 100,
+              )}% to ${Math.round(market.currentProbability * 100)}%.`,
+            content: null,
             originalUrl: marketUrl,
             sectionEligibility:
               this.source.sectionEligibility ?? ["forecast"],

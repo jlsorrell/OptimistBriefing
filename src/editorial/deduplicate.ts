@@ -5,9 +5,12 @@ import {
   type SourceRef,
 } from "../contracts/editorial";
 import {
-  NewsMaterialFactSchema,
   type NewsMaterialFact,
 } from "../sources/types";
+import {
+  editorialSignalKey,
+  editorialSignals,
+} from "./editorial-signals";
 import { normalizeTitleKey } from "./normalize";
 
 export type DeduplicationReason =
@@ -50,14 +53,6 @@ function stringArray(value: unknown): string[] {
 
 function identifiers(item: Item): ReadonlySet<string> {
   return new Set(stringArray(item.metadata.externalIds));
-}
-
-function newsMaterialFacts(value: unknown): NewsMaterialFact[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry): NewsMaterialFact[] => {
-    const parsed = NewsMaterialFactSchema.safeParse(entry);
-    return parsed.success ? [parsed.data] : [];
-  });
 }
 
 function intersects(
@@ -192,6 +187,20 @@ function mergeGroup(group: readonly Item[]): Item {
   const sectionEligibility = mergedStringMetadata(
     "sectionEligibility",
   );
+  const signalMap = new Map(
+    group
+      .flatMap(editorialSignals)
+      .map((signal) => [editorialSignalKey(signal), signal]),
+  );
+  const structuredSignals = [...signalMap.values()].sort(
+    (left, right) =>
+      editorialSignalKey(left).localeCompare(
+        editorialSignalKey(right),
+      ),
+  );
+  const corroboratingSignals = structuredSignals.filter(
+    (signal) => signal.canCorroborateFacts,
+  );
   const namedEntities = mergedStringMetadata("namedEntities");
   const primaryDocumentUrls = [
     ...new Set(
@@ -203,7 +212,18 @@ function mergeGroup(group: readonly Item[]): Item {
       ]),
     ),
   ].sort((left, right) => left.localeCompare(right));
-  const eventFamilies = mergedStringMetadata("eventFamilies");
+  const allEventFamilies = [
+    ...new Set(
+      structuredSignals.flatMap((signal) => signal.eventFamilies),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
+  const eventFamilies = [
+    ...new Set(
+      corroboratingSignals.flatMap(
+        (signal) => signal.eventFamilies,
+      ),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
   const primarySections = [
     ...new Set(
       group.flatMap((item) => [
@@ -215,8 +235,8 @@ function mergeGroup(group: readonly Item[]): Item {
     ),
   ].sort((left, right) => left.localeCompare(right));
   const materialFactMap = new Map<string, NewsMaterialFact>();
-  for (const fact of group.flatMap((item) =>
-    newsMaterialFacts(item.metadata.materialFacts),
+  for (const fact of corroboratingSignals.flatMap(
+    (signal) => signal.materialFacts,
   )) {
     materialFactMap.set(
       `${fact.kind}\u0000${fact.key}\u0000${fact.value}`,
@@ -250,8 +270,13 @@ function mergeGroup(group: readonly Item[]): Item {
       primaryDocumentUrl: primaryDocumentUrls[0] ?? null,
       primaryDocumentUrls,
       eventFamilies,
+      allEventFamilies,
       materialFacts,
+      editorialSignals: structuredSignals,
       primarySections,
+      canCorroborateFacts: group.some(
+        (item) => item.metadata.canCorroborateFacts === true,
+      ),
       mergedItemIds: group
         .map((item) => item.id)
         .sort((left, right) => left.localeCompare(right)),

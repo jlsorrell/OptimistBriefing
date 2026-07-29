@@ -227,6 +227,133 @@ describe("deduplicateItems", () => {
     ]);
   });
 
+  it("does not promote non-corroborating facts through an exact merge", () => {
+    const reporting = normalized("reporting-facts", {
+      externalIds: ["DOI:10.1000/fact-authority"],
+      title:
+        "Evaluation Agency adopts evaluation standard for 100 models",
+      abstract: "The standard was adopted for 100 models.",
+    });
+    const discovery = normalized("discovery-facts", {
+      externalIds: ["DOI:10.1000/fact-authority"],
+      sourceRole: "primary",
+      canCorroborateFacts: false,
+      title: "Evaluation Agency funding budget background",
+      abstract: "Background discovery metadata.",
+      materialFacts: [
+        {
+          kind: "status",
+          key: "event-status",
+          value: "proposed",
+        },
+        {
+          kind: "number",
+          key: "count:governance-instrument:models",
+          value: "200",
+        },
+      ],
+    });
+
+    const merged = deduplicateItems([reporting, discovery]).items[0];
+
+    expect(merged?.metadata.editorialSignals).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceId: "reporting-facts",
+          sourceRole: "reporting",
+          canCorroborateFacts: true,
+          eventFamilies: expect.arrayContaining([
+            "evaluation-standards",
+          ]),
+        }),
+        expect.objectContaining({
+          sourceId: "discovery-facts",
+          sourceRole: "primary",
+          canCorroborateFacts: false,
+          eventFamilies: expect.arrayContaining(["funding-budget"]),
+        }),
+      ]),
+    );
+    expect(merged?.metadata.materialFacts).toEqual(
+      expect.arrayContaining([
+        {
+          kind: "status",
+          key: "event-status",
+          value: "adopted",
+        },
+      ]),
+    );
+    expect(merged?.metadata.materialFacts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "proposed" }),
+        expect.objectContaining({ value: "200" }),
+      ]),
+    );
+    const originalDevelopment = clusterNews([reporting], {})[0];
+    const mergedDevelopment =
+      merged === undefined ? undefined : clusterNews([merged], {})[0];
+    expect(mergedDevelopment?.developmentKey).toBe(
+      originalDevelopment?.developmentKey,
+    );
+    expect(mergedDevelopment?.materialFactsFingerprint).toBe(
+      originalDevelopment?.materialFactsFingerprint,
+    );
+    expect(mergedDevelopment?.repeatable).toBe(true);
+    expect(mergedDevelopment?.editorialSignals).toHaveLength(2);
+    expect(mergedDevelopment?.sourceEvidence).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sourceId: "reporting-facts",
+          canCorroborateFacts: true,
+        }),
+        expect.objectContaining({
+          sourceId: "discovery-facts",
+          canCorroborateFacts: false,
+        }),
+      ]),
+    );
+  });
+
+  it("retains distinct same-source signals independent of input order", () => {
+    const withoutDocument = normalized("same-source", {
+      externalIds: ["DOI:10.1000/same-source-signals"],
+      primaryDocumentUrl: null,
+      primaryDocumentUrls: [],
+    });
+    const withDocument = normalized("same-source", {
+      externalIds: ["DOI:10.1000/same-source-signals"],
+      primaryDocumentUrl: "https://agency.gov/canonical-rule",
+      primaryDocumentUrls: [],
+    });
+
+    const forward = deduplicateItems([
+      withoutDocument,
+      withDocument,
+    ]).items[0];
+    const reverse = deduplicateItems([
+      withDocument,
+      withoutDocument,
+    ]).items[0];
+    expect(forward?.metadata.editorialSignals).toHaveLength(2);
+    expect(reverse?.metadata.editorialSignals).toEqual(
+      forward?.metadata.editorialSignals,
+    );
+
+    const forwardDevelopment =
+      forward === undefined ? undefined : clusterNews([forward], {})[0];
+    const reverseDevelopment =
+      reverse === undefined ? undefined : clusterNews([reverse], {})[0];
+    expect(forwardDevelopment?.canonicalPrimaryDocument).toBe(
+      "https://agency.gov/canonical-rule",
+    );
+    expect(reverseDevelopment?.developmentKey).toBe(
+      forwardDevelopment?.developmentKey,
+    );
+    expect(reverseDevelopment?.materialFactsFingerprint).toBe(
+      forwardDevelopment?.materialFactsFingerprint,
+    );
+  });
+
   it("requires both similar titles and a compatible publication window", () => {
     const baseline = normalized("ap", {
       title: "Baltimore approves a secure evaluation framework",

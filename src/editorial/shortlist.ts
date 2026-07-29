@@ -157,6 +157,7 @@ function unchangedFromPreviousEdition(
   development: NewsDevelopment,
   previous: ReadonlyMap<string, string>,
 ): boolean {
+  if (!development.repeatable) return false;
   if (development.materialChange) return false;
   const priorFingerprint = previous.get(development.developmentKey);
   if (priorFingerprint === undefined) return false;

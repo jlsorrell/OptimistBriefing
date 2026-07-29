@@ -360,6 +360,8 @@ class DirectPageAdapter implements NewsSourceAdapter {
             ...deriveNewsSignals({
               kind,
               title: item.title,
+              abstract: extraction.excerpt ?? item.summary,
+              content: extraction.text,
               originalUrl,
               sectionEligibility:
                 this.source.sectionEligibility ?? [],
@@ -465,6 +467,8 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
           ...deriveNewsSignals({
             kind: "document",
             title: item.title,
+            abstract: item.abstract ?? null,
+            content: null,
             originalUrl,
             sectionEligibility:
               this.source.sectionEligibility ?? [],
@@ -570,6 +574,8 @@ export class NewsCollector {
           ...deriveNewsSignals({
             kind,
             title: item.title,
+            abstract: item.abstract,
+            content: extraction.text,
             originalUrl: item.originalUrl,
             sectionEligibility: source.sectionEligibility ?? [],
             metadata,

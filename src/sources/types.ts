@@ -73,6 +73,22 @@ export const NewsMaterialFactSchema = z.object({
   value: z.string().min(1),
 });
 
+export const EditorialSignalRecordSchema = z.object({
+  itemId: z.string().min(1),
+  itemKind: ItemKindSchema,
+  sourceId: z.string().min(1),
+  sourceName: z.string().min(1),
+  sourceUrl: z.string().url(),
+  sourceRole: SourceRefSchema.shape.role,
+  accessLevel: AccessLevelSchema,
+  canCorroborateFacts: z.boolean(),
+  sectionEligibility: z.array(EditionSectionSchema),
+  namedEntities: z.array(z.string().min(1)),
+  primaryDocumentUrls: z.array(z.string().url()),
+  eventFamilies: z.array(z.string().min(1)),
+  materialFacts: z.array(NewsMaterialFactSchema),
+});
+
 export const RawNewsCandidateSchema = RawItemSchema.extend({
   kind: z.enum(["article", "document", "forecast"]),
   canCorroborateFacts: z.boolean(),
@@ -124,6 +140,9 @@ export type RawResearchCandidate = z.infer<
 >;
 export type RawNewsCandidate = z.infer<typeof RawNewsCandidateSchema>;
 export type NewsMaterialFact = z.infer<typeof NewsMaterialFactSchema>;
+export type EditorialSignalRecord = z.infer<
+  typeof EditorialSignalRecordSchema
+>;
 
 export interface SourceAdapter {
   collect(window: CollectionWindow): Promise<RawItem[]>;

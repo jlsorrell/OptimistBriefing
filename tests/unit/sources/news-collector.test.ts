@@ -723,6 +723,66 @@ describe("catalog-driven news collection", () => {
     },
   );
 
+  it("derives contextual material facts from listing summaries", async () => {
+    const host = "facts.example.com";
+    const pageUrl = `https://${host}/news`;
+    const fetch = vi.fn(async () =>
+      new Response(
+        `<article>
+          <h2><a href="/story">Evaluation Agency evaluation standard update</a></h2>
+          <time datetime="2026-07-29T08:00:00.000Z"></time>
+          <p>The requirements were adopted for 200 models.</p>
+        </article>`,
+        { headers: { "content-type": "text/html" } },
+      ),
+    );
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        now: () => new Date("2026-07-29T10:00:00.000Z"),
+      }),
+      sources: [
+        catalogSource({
+          id: "facts-source",
+          canonicalName: "Facts Source",
+          canonicalUrl: `https://${host}/`,
+          role: "reporting",
+          discoveryMechanism: "page",
+          sectionEligibility: ["ai_policy"],
+          restrictions: {
+            bodyRetrieval: "forbidden",
+            paywall: "none",
+            contentUse: "metadata-only",
+            pageUrl,
+            urlPolicy: policy(host, ["/"]),
+            listing: {
+              itemSelector: "article",
+              linkSelector: "h2 a",
+              titleSelector: "h2",
+              dateSelector: "time",
+              dateAttribute: "datetime",
+              summarySelector: "p",
+              maxItems: 10,
+              maxBodyFetches: 0,
+            },
+          },
+        }),
+      ],
+    });
+
+    expect((await collector.collect(fixedWindow()))[0]).toMatchObject({
+      eventFamilies: ["evaluation-standards"],
+      materialFacts: expect.arrayContaining([
+        { kind: "status", key: "event-status", value: "adopted" },
+        {
+          kind: "number",
+          key: "count:governance-instrument:models",
+          value: "200",
+        },
+      ]),
+    });
+  });
+
   it.each([
     {
       id: "reuters",

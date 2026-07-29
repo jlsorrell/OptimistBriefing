@@ -242,6 +242,558 @@ describe("editorial production path", () => {
     });
   });
 
+  it("keeps identity when a no-family paraphrase changes the representative or input order", () => {
+    const originalItem = normalizeCandidate(
+      rawNews("reuters", {
+        title:
+          "Evaluation Agency approves AI evaluation standard for 100 models",
+        primaryDocumentUrl: null,
+        accessLevel: "metadata",
+        abstract:
+          "The Evaluation Agency adopted an evaluation standard covering 100 models.",
+      }),
+    );
+    const paraphrasedRepresentative = normalizeCandidate(
+      rawNews("agency", {
+        title: "Evaluation Agency provides its morning update",
+        primaryDocumentUrl: null,
+        abstract:
+          "Its evaluation standard was adopted and covers 100 models.",
+      }),
+    );
+    const original = clusterNews([originalItem], {})[0];
+    const forward = clusterNews(
+      [originalItem, paraphrasedRepresentative],
+      {
+        [originalItem.id]: [1, 0],
+        [paraphrasedRepresentative.id]: [0.99, 0.01],
+      },
+    )[0];
+    const reverse = clusterNews(
+      [paraphrasedRepresentative, originalItem],
+      {
+        [originalItem.id]: [1, 0],
+        [paraphrasedRepresentative.id]: [0.99, 0.01],
+      },
+    )[0];
+    const paraphrased = clusterNews(
+      [paraphrasedRepresentative],
+      {},
+    )[0];
+    expect(original).toBeDefined();
+    expect(forward).toBeDefined();
+    expect(reverse).toBeDefined();
+    expect(paraphrased).toBeDefined();
+    if (
+      original === undefined ||
+      forward === undefined ||
+      reverse === undefined ||
+      paraphrased === undefined
+    ) {
+      return;
+    }
+
+    expect(forward.representativeItem.sourceRefs[0]?.id).toBe("agency");
+    expect(forward.title).not.toBe(original.title);
+    expect(paraphrased.developmentKey).toBe(original.developmentKey);
+    expect(paraphrased.materialFactsFingerprint).toBe(
+      original.materialFactsFingerprint,
+    );
+    expect(forward.developmentKey).toBe(original.developmentKey);
+    expect(forward.materialFactsFingerprint).toBe(
+      original.materialFactsFingerprint,
+    );
+    expect(reverse.developmentKey).toBe(forward.developmentKey);
+    expect(reverse.materialFactsFingerprint).toBe(
+      forward.materialFactsFingerprint,
+    );
+  });
+
+  it("ignores incidental source dates and numbers in material fingerprints", () => {
+    const originalItem = normalizeCandidate(
+      rawNews("reuters", {
+        title:
+          "Evaluation Agency approves AI evaluation standard for 100 models",
+        primaryDocumentUrl: null,
+        abstract:
+          "The adopted standard covers 100 models.",
+      }),
+    );
+    const incidentalItem = normalizeCandidate(
+      rawNews("npr", {
+        title:
+          "Evaluation Agency offers July 29 briefing on 3 earlier reports",
+        primaryDocumentUrl: null,
+        abstract:
+          "The evaluation standard was adopted for 100 models. It cites an earlier benchmark covering 50 models.",
+      }),
+    );
+    const original = clusterNews([originalItem], {})[0];
+    const expanded = clusterNews(
+      [originalItem, incidentalItem],
+      {
+        [originalItem.id]: [1, 0],
+        [incidentalItem.id]: [0.99, 0.01],
+      },
+    )[0];
+    expect(original).toBeDefined();
+    expect(expanded).toBeDefined();
+    if (original === undefined || expanded === undefined) return;
+
+    expect(expanded.developmentKey).toBe(original.developmentKey);
+    expect(expanded.materialFactsFingerprint).toBe(
+      original.materialFactsFingerprint,
+    );
+    expect(expanded.materialFacts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "29" }),
+        expect.objectContaining({ value: "3" }),
+        expect.objectContaining({ value: "50" }),
+      ]),
+    );
+  });
+
+  it("keeps fallback identity stable when added sources introduce section and family variants", () => {
+    const originalItem = normalizeCandidate(
+      rawNews("reuters", {
+        title: "Evaluation Agency issues a governance rule",
+        primaryDocumentUrl: null,
+        sectionEligibility: ["world"],
+        metadata: { primarySection: "world" },
+      }),
+    );
+    const variantItem = normalizeCandidate(
+      rawNews("analysis", {
+        title: "Evaluation Agency evaluation standard update",
+        primaryDocumentUrl: null,
+        sectionEligibility: ["ai_policy"],
+        metadata: { primarySection: "ai_policy" },
+      }),
+    );
+    const original = clusterNews([originalItem], {})[0];
+    const expanded = clusterNews(
+      [originalItem, variantItem],
+      {
+        [originalItem.id]: [1, 0],
+        [variantItem.id]: [0.99, 0.01],
+      },
+    )[0];
+    expect(original).toBeDefined();
+    expect(expanded).toBeDefined();
+    if (original === undefined || expanded === undefined) return;
+
+    expect(expanded.developmentKey).toBe(original.developmentKey);
+  });
+
+  it("uses structured generic semantics rather than the reporting URL", () => {
+    const first = normalizeCandidate(
+      rawNews("first-generic", {
+        title: "AI product release",
+        namedEntities: ["AI"],
+        primaryDocumentUrl: null,
+        publishedAt: "2026-07-29T11:00:00.000Z",
+        sectionEligibility: ["technology"],
+        metadata: { primarySection: "technology" },
+      }),
+    );
+    const paraphrase = normalizeCandidate(
+      rawNews("second-generic", {
+        title: "AI product launches",
+        namedEntities: ["AI"],
+        primaryDocumentUrl: null,
+        sectionEligibility: ["technology"],
+        metadata: { primarySection: "technology" },
+      }),
+    );
+    const firstDevelopment = clusterNews([first], {})[0];
+    const secondDevelopment = clusterNews([paraphrase], {})[0];
+    expect(firstDevelopment).toBeDefined();
+    expect(secondDevelopment).toBeDefined();
+    if (
+      firstDevelopment === undefined ||
+      secondDevelopment === undefined
+    ) {
+      return;
+    }
+
+    expect(secondDevelopment.developmentKey).toBe(
+      firstDevelopment.developmentKey,
+    );
+    expect(firstDevelopment.repeatable).toBe(false);
+    expect(secondDevelopment.repeatable).toBe(false);
+
+    const score = scoreNewsDevelopment(firstDevelopment, {
+      publicImportance: 0.8,
+      personalRelevance: 0.8,
+      sourceQuality: 0.8,
+      recency: 0.8,
+      geography: 0.2,
+      novelty: 0.8,
+    });
+    const result = shortlist(
+      [firstDevelopment],
+      [score],
+      {
+        ...preferences,
+        previousEditionDevelopments: [
+          {
+            developmentKey: firstDevelopment.developmentKey,
+            materialFactsFingerprint:
+              firstDevelopment.materialFactsFingerprint,
+          },
+        ],
+      },
+      budgets,
+    );
+    expect(result.technology.map(({ id }) => id)).toEqual([
+      firstDevelopment.id,
+    ]);
+  });
+
+  it("keeps distinct event semantics separate for the same subject", () => {
+    const development = (sourceId: string, title: string) =>
+      clusterNews(
+        [
+          normalizeCandidate(
+            rawNews(sourceId, {
+              title,
+              primaryDocumentUrl: null,
+              namedEntities: ["Evaluation Agency"],
+              abstract: title,
+            }),
+          ),
+        ],
+        {},
+      )[0];
+    const governance = development(
+      "governance-event",
+      "Evaluation Agency adopts an evaluation standard",
+    );
+    const funding = development(
+      "funding-event",
+      "Evaluation Agency approves a new funding budget",
+    );
+    const product = development(
+      "product-event",
+      "Evaluation Agency launches a software product",
+    );
+    expect(governance).toBeDefined();
+    expect(funding).toBeDefined();
+    expect(product).toBeDefined();
+    if (
+      governance === undefined ||
+      funding === undefined ||
+      product === undefined
+    ) {
+      return;
+    }
+
+    expect(funding.developmentKey).not.toBe(
+      governance.developmentKey,
+    );
+    expect(product.developmentKey).not.toBe(
+      governance.developmentKey,
+    );
+    expect(product.developmentKey).not.toBe(funding.developmentKey);
+  });
+
+  it("retains independent contextual facts when only one is re-corroborated", () => {
+    const baselineItem = normalizeCandidate(
+      rawNews("baseline-facts", {
+        title: "Evaluation Agency adopts evaluation standard",
+        primaryDocumentUrl: null,
+        abstract:
+          "The standard covers 100 models across 10 states.",
+      }),
+    );
+    const partialItem = normalizeCandidate(
+      rawNews("partial-facts", {
+        title: "Evaluation Agency confirms evaluation standard",
+        primaryDocumentUrl: null,
+        abstract: "The standard covers 100 models.",
+      }),
+    );
+    const baseline = clusterNews([baselineItem], {})[0];
+    const expanded = clusterNews(
+      [baselineItem, partialItem],
+      {
+        [baselineItem.id]: [1, 0],
+        [partialItem.id]: [0.99, 0.01],
+      },
+    )[0];
+    expect(baseline).toBeDefined();
+    expect(expanded).toBeDefined();
+    if (baseline === undefined || expanded === undefined) return;
+
+    expect(expanded.materialFactsFingerprint).toBe(
+      baseline.materialFactsFingerprint,
+    );
+    expect(expanded.materialFacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "100" }),
+        expect.objectContaining({ value: "10" }),
+      ]),
+    );
+  });
+
+  it("filters incidental fact contexts for document-anchored generic developments", () => {
+    const official = normalizeCandidate(
+      rawNews("official-document", {
+        kind: "document",
+        sourceRole: "primary",
+        title: "AI evaluation standard adopted for 100 models",
+        originalUrl: "https://agency.gov/ai-standard",
+        primaryDocumentUrl: "https://agency.gov/ai-standard",
+        namedEntities: ["AI"],
+        abstract: "The standard covers 100 models.",
+      }),
+    );
+    const reporting = normalizeCandidate(
+      rawNews("document-reporting", {
+        title: "Coverage of the agency update",
+        primaryDocumentUrl: "https://agency.gov/ai-standard",
+        namedEntities: ["AI"],
+        abstract:
+          "An earlier evaluation benchmark covered 50 models.",
+      }),
+    );
+    const materiallyChanged = normalizeCandidate(
+      rawNews("changed-document", {
+        kind: "document",
+        sourceRole: "primary",
+        title: "AI evaluation standard adopted for 200 models",
+        originalUrl: "https://agency.gov/ai-standard",
+        primaryDocumentUrl: "https://agency.gov/ai-standard",
+        namedEntities: ["AI"],
+        abstract: "The adopted standard covers 200 models.",
+      }),
+    );
+    const original = clusterNews([official], {})[0];
+    const expanded = clusterNews([official, reporting], {})[0];
+    const changed = clusterNews([materiallyChanged], {})[0];
+    expect(original).toBeDefined();
+    expect(expanded).toBeDefined();
+    expect(changed).toBeDefined();
+    if (
+      original === undefined ||
+      expanded === undefined ||
+      changed === undefined
+    ) {
+      return;
+    }
+
+    expect(original.repeatable).toBe(true);
+    expect(expanded.developmentKey).toBe(original.developmentKey);
+    expect(expanded.materialFactsFingerprint).toBe(
+      original.materialFactsFingerprint,
+    );
+    expect(expanded.materialFacts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "50" }),
+      ]),
+    );
+    expect(changed.developmentKey).toBe(original.developmentKey);
+    expect(changed.materialFactsFingerprint).not.toBe(
+      original.materialFactsFingerprint,
+    );
+  });
+
+  it("lets a later terminal status in extracted content supersede a proposal mention", () => {
+    const item = normalizeCandidate(
+      rawNews("status-progression", {
+        title:
+          "Evaluation Agency proposes an AI evaluation standard",
+        primaryDocumentUrl: null,
+        abstract: "The proposal covered 100 models.",
+        content:
+          "The Evaluation Agency later adopted the standard for 100 models.",
+      }),
+    );
+    const development = clusterNews([item], {})[0];
+
+    expect(development?.materialFacts).toContainEqual({
+      kind: "status",
+      key: "event-status",
+      value: "adopted",
+    });
+    expect(development?.materialFacts).not.toContainEqual({
+      kind: "status",
+      key: "event-status",
+      value: "proposed",
+    });
+  });
+
+  it("canonicalizes equivalent contextual counts and dates", () => {
+    const development = (
+      sourceId: string,
+      content: string,
+    ) =>
+      clusterNews(
+        [
+          normalizeCandidate(
+            rawNews(sourceId, {
+              title:
+                "Evaluation Agency evaluation standard update",
+              primaryDocumentUrl: null,
+              abstract: null,
+              content,
+            }),
+          ),
+        ],
+        {},
+      )[0];
+    const prose = development(
+      "prose-values",
+      "The standard was adopted for 100.0 models and becomes effective July 29, 2026.",
+    );
+    const machine = development(
+      "machine-values",
+      "The standard was adopted for 100 models and becomes effective 2026-07-29.",
+    );
+    expect(prose).toBeDefined();
+    expect(machine).toBeDefined();
+    if (prose === undefined || machine === undefined) return;
+
+    expect(machine.developmentKey).toBe(prose.developmentKey);
+    expect(machine.materialFactsFingerprint).toBe(
+      prose.materialFactsFingerprint,
+    );
+  });
+
+  it("excludes non-corroborating facts from authoritative reconciliation", () => {
+    const reporting = normalizeCandidate(
+      rawNews("reporting", {
+        title:
+          "Evaluation Agency adopts evaluation standard for 100 models",
+        primaryDocumentUrl: null,
+        abstract: "The standard was adopted for 100 models.",
+      }),
+    );
+    const discovery = normalizeCandidate(
+      rawNews("discovery", {
+        sourceRole: "primary",
+        canCorroborateFacts: false,
+        title: "Evaluation Agency funding budget background",
+        primaryDocumentUrl: null,
+        abstract: "Background details from discovery metadata.",
+        materialFacts: [
+          {
+            kind: "status",
+            key: "event-status",
+            value: "proposed",
+          },
+          {
+            kind: "number",
+            key: "count:governance-instrument:models",
+            value: "200",
+          },
+        ],
+      }),
+    );
+    const original = clusterNews([reporting], {})[0];
+    const expanded = clusterNews(
+      [reporting, discovery],
+      {
+        [reporting.id]: [1, 0],
+        [discovery.id]: [0.99, 0.01],
+      },
+    )[0];
+    expect(original).toBeDefined();
+    expect(expanded).toBeDefined();
+    if (original === undefined || expanded === undefined) return;
+
+    expect(expanded.developmentKey).toBe(original.developmentKey);
+    expect(expanded.materialFactsFingerprint).toBe(
+      original.materialFactsFingerprint,
+    );
+  });
+
+  it("detects status and contextual numeric changes found only in source content", () => {
+    const development = (
+      sourceId: string,
+      abstract: string,
+      content: string | null = null,
+    ) =>
+      clusterNews(
+        [
+          normalizeCandidate(
+            rawNews(sourceId, {
+              title: "Evaluation Agency evaluation standard update",
+              primaryDocumentUrl: null,
+              abstract,
+              content,
+            }),
+          ),
+        ],
+        {},
+      )[0];
+    const proposed = development(
+      "proposed",
+      "The requirements were proposed for 100 models.",
+    );
+    const statusChanged = development(
+      "status-changed",
+      "Background on the evaluation program.",
+      "The requirements were adopted for 100 models.",
+    );
+    const numericChanged = development(
+      "numeric-changed",
+      "Background on the evaluation program.",
+      "The requirements were proposed for 200 models.",
+    );
+    expect(proposed).toBeDefined();
+    expect(statusChanged).toBeDefined();
+    expect(numericChanged).toBeDefined();
+    if (
+      proposed === undefined ||
+      statusChanged === undefined ||
+      numericChanged === undefined
+    ) {
+      return;
+    }
+
+    expect(statusChanged.developmentKey).toBe(proposed.developmentKey);
+    expect(numericChanged.developmentKey).toBe(
+      proposed.developmentKey,
+    );
+    expect(statusChanged.materialFactsFingerprint).not.toBe(
+      proposed.materialFactsFingerprint,
+    );
+    expect(numericChanged.materialFactsFingerprint).not.toBe(
+      proposed.materialFactsFingerprint,
+    );
+    expect(proposed.materialFacts).toEqual(
+      expect.arrayContaining([
+        { kind: "status", key: "event-status", value: "proposed" },
+        {
+          kind: "number",
+          key: "count:governance-instrument:models",
+          value: "100",
+        },
+      ]),
+    );
+    expect(statusChanged.materialFacts).toEqual(
+      expect.arrayContaining([
+        { kind: "status", key: "event-status", value: "adopted" },
+        {
+          kind: "number",
+          key: "count:governance-instrument:models",
+          value: "100",
+        },
+      ]),
+    );
+    expect(numericChanged.materialFacts).toEqual(
+      expect.arrayContaining([
+        { kind: "status", key: "event-status", value: "proposed" },
+        {
+          kind: "number",
+          key: "count:governance-instrument:models",
+          value: "200",
+        },
+      ]),
+    );
+  });
+
   it("changes material fingerprints for status or numeric fact changes", () => {
     const development = (title: string) =>
       clusterNews(

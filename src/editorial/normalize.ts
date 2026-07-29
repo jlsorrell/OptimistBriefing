@@ -4,6 +4,7 @@ import {
   normalizeDoi,
 } from "../sources/identifiers";
 import {
+  EditorialSignalRecordSchema,
   NewsMaterialFactSchema,
   RawItemSchema,
   type NewsMaterialFact,
@@ -196,18 +197,31 @@ export function normalizeCandidate(raw: unknown): Item {
     input.eventFamilies ?? candidate.metadata.eventFamilies,
   );
   const eventFamilies = uniqueSorted(
-    explicitEventFamilies.length > 0
-      ? explicitEventFamilies
-      : deriveEventFamilies(title, candidate.metadata),
+    [
+      ...explicitEventFamilies,
+      ...deriveEventFamilies(
+        [title, candidate.abstract, candidate.content],
+        candidate.metadata,
+      ),
+    ],
   );
   const explicitMaterialFacts = materialFacts(
     input.materialFacts ?? candidate.metadata.materialFacts,
   );
-  const structuredMaterialFacts = (
-    explicitMaterialFacts.length > 0
-      ? explicitMaterialFacts
-      : deriveMaterialFacts(title, candidate.metadata)
-  ).sort(
+  const materialFactMap = new Map<string, NewsMaterialFact>();
+  for (const fact of [
+    ...explicitMaterialFacts,
+    ...deriveMaterialFacts(
+      [title, candidate.abstract, candidate.content],
+      candidate.metadata,
+    ),
+  ]) {
+    materialFactMap.set(
+      `${fact.kind}\u0000${fact.key}\u0000${fact.value}`,
+      fact,
+    );
+  }
+  const structuredMaterialFacts = [...materialFactMap.values()].sort(
     (left, right) =>
       left.kind.localeCompare(right.kind) ||
       left.key.localeCompare(right.key) ||
@@ -242,9 +256,17 @@ export function normalizeCandidate(raw: unknown): Item {
     ) ??
     externalIds[0] ??
     canonicalUrl;
+  const id = `item-${stableHash(
+    `${candidate.kind}:${stableIdentifier}`,
+  )}`;
+  const sourceUrl = canonicalizeUrl(candidate.originalUrl);
+  const signalPrimaryDocumentUrls = uniqueSorted([
+    ...primaryDocumentUrls,
+    ...(candidate.kind === "document" ? [canonicalUrl] : []),
+  ]);
 
   return ItemSchema.parse({
-    id: `item-${stableHash(`${candidate.kind}:${stableIdentifier}`)}`,
+    id,
     kind: candidate.kind,
     canonicalUrl,
     title,
@@ -253,7 +275,7 @@ export function normalizeCandidate(raw: unknown): Item {
       {
         id: candidate.sourceId,
         name: normalizedWhitespace(candidate.sourceName),
-        url: canonicalizeUrl(candidate.originalUrl),
+        url: sourceUrl,
         role: candidate.sourceRole,
         retrievedAt: new Date(candidate.retrievedAt).toISOString(),
       },
@@ -287,6 +309,23 @@ export function normalizeCandidate(raw: unknown): Item {
       primaryDocumentUrls,
       eventFamilies,
       materialFacts: structuredMaterialFacts,
+      editorialSignals: [
+        EditorialSignalRecordSchema.parse({
+          itemId: id,
+          itemKind: candidate.kind,
+          sourceId: candidate.sourceId,
+          sourceName: normalizedWhitespace(candidate.sourceName),
+          sourceUrl,
+          sourceRole: candidate.sourceRole,
+          accessLevel: candidate.accessLevel,
+          canCorroborateFacts,
+          sectionEligibility: uniqueSorted(sectionEligibility),
+          namedEntities: uniqueSorted(namedEntities),
+          primaryDocumentUrls: signalPrimaryDocumentUrls,
+          eventFamilies,
+          materialFacts: structuredMaterialFacts,
+        }),
+      ],
       relatedPaperIds: uniqueSorted(
         candidate.relatedPaperIds.map(canonicalIdentifier),
       ),

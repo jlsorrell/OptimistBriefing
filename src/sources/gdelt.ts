@@ -149,6 +149,8 @@ export class GdeltAdapter implements NewsSourceAdapter {
           ...deriveNewsSignals({
             kind: "article",
             title: article.title,
+            abstract: null,
+            content: null,
             originalUrl,
             sectionEligibility:
               this.source.sectionEligibility ?? [
