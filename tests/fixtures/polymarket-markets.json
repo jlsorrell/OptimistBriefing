@@ -1,0 +1,36 @@
+[
+  {
+    "id": "market-material",
+    "question": "Will the Maryland AI accountability bill pass in 2026?",
+    "slug": "maryland-ai-accountability-bill-2026",
+    "outcomes": "[\"Yes\", \"No\"]",
+    "outcomePrices": "[\"0.64\", \"0.36\"]",
+    "oneDayPriceChange": 0.16,
+    "liquidity": "250000",
+    "updatedAt": "2026-07-29T08:20:00.000Z",
+    "endDate": "2026-12-31T23:59:59.000Z",
+    "resolutionSource": "https://mgaleg.maryland.gov/mgawebsite/Legislation/Details/hb0001"
+  },
+  {
+    "id": "market-small-change",
+    "question": "Will a federal AI evaluation bill pass in 2026?",
+    "slug": "federal-ai-evaluation-bill-2026",
+    "currentProbability": 0.53,
+    "priorProbability": 0.50,
+    "liquidity": 400000,
+    "updatedAt": "2026-07-29T08:21:00.000Z",
+    "endDate": "2026-12-31T23:59:59.000Z",
+    "resolutionSource": "https://www.congress.gov/"
+  },
+  {
+    "id": "market-low-liquidity",
+    "question": "Will Baltimore adopt a model-evaluation ordinance in 2026?",
+    "slug": "baltimore-model-evaluation-ordinance-2026",
+    "currentProbability": 0.75,
+    "priorProbability": 0.50,
+    "liquidity": 2500,
+    "updatedAt": "2026-07-29T08:22:00.000Z",
+    "endDate": "2026-12-31T23:59:59.000Z",
+    "resolutionSource": "https://baltimore.legistar.com/"
+  }
+]

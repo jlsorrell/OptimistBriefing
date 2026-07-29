@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { applyD1Migrations, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import type {
@@ -110,6 +110,88 @@ async function publishFixtureEdition(
 }
 
 describe("D1BriefingRepository", () => {
+  it("seeds an editable source catalog without overwriting local customization", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const catalog = await repo.listSources();
+    const ids = new Set(catalog.map((source) => source.id));
+
+    for (const id of [
+      "reuters",
+      "associated-press",
+      "npr",
+      "economist",
+      "nist",
+      "federal-register",
+      "congress-gov",
+      "maryland-gov",
+      "dc-gov",
+      "virginia-gov",
+      "wypr",
+      "baltimore-banner",
+      "baltimore-brew",
+      "wtop",
+      "maryland-matters",
+      "wamu",
+      "gdelt",
+      "monitoring-the-situation",
+      "polymarket",
+      "stanford-research",
+      "berkeley-research",
+      "harvard-research",
+      "mit-research",
+      "cmu-research",
+      "penn-research",
+      "johns-hopkins-research",
+      "ut-austin-research",
+      "georgia-tech-research",
+      "google-research",
+      "google-deepmind",
+      "anthropic",
+      "openai",
+    ]) {
+      expect(ids.has(id), `missing source ${id}`).toBe(true);
+    }
+    for (const catalogSource of catalog) {
+      expect(catalogSource.restrictions).toMatchObject({
+        paywall: expect.any(String),
+        contentUse: expect.any(String),
+        bodyRetrieval: expect.stringMatching(/^(forbidden|permitted)$/),
+      });
+    }
+
+    await repo.updateSource("reuters", {
+      enabled: false,
+      restrictions: {
+        paywall: "locally-overridden",
+        contentUse: "metadata-only",
+        bodyRetrieval: "forbidden",
+      },
+    });
+    const catalogMigration = env.TEST_MIGRATIONS.find(
+      (migration) => migration.name === "0002_source_catalog.sql",
+    );
+    expect(catalogMigration).toBeDefined();
+    await applyD1Migrations(
+      env.DB,
+      catalogMigration === undefined ? [] : [catalogMigration],
+      "source_catalog_idempotency",
+    );
+
+    expect(
+      catalog.find((source) => source.id === "reuters")?.canonicalName,
+    ).toBe("Reuters");
+    expect(
+      (await repo.listSources()).find((source) => source.id === "reuters"),
+    ).toMatchObject({
+      enabled: false,
+      restrictions: {
+        paywall: "locally-overridden",
+        contentUse: "metadata-only",
+        bodyRetrieval: "forbidden",
+      },
+    });
+  });
+
   it("does not expose draft editions and atomically exposes published editions", async () => {
     const repo = new D1BriefingRepository(env.DB);
     const draft = await repo.createDraftEdition("2026-07-29", "run-1");
@@ -203,7 +285,11 @@ describe("D1BriefingRepository", () => {
     });
     expect(updated.discoveryMechanism).toBe("api");
     expect(updated.sectionEligibility).toEqual(["morning_brief"]);
-    expect(await repo.listSources()).toEqual([updated]);
+    expect(
+      (await repo.listSources()).find(
+        (catalogSource) => catalogSource.id === updated.id,
+      ),
+    ).toEqual(updated);
   });
 
   it("rejects malformed stored source booleans instead of normalizing them", async () => {

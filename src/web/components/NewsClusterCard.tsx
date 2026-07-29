@@ -47,7 +47,7 @@ export function NewsClusterCard({ entry }: NewsClusterCardProps) {
       <div className="card-eyebrow">
         <span className="content-label">
           <span aria-hidden="true">{forecast ? "◇" : "●"}</span>
-          {forecast ? "Forecast — not a fact" : "Reported development"}
+          {forecast ? "Forecast, not fact" : "Reported development"}
         </span>
         <span className="confidence-label">
           <span aria-hidden="true">{qualifyingSourceCount > 1 ? "✓" : "◎"}</span>

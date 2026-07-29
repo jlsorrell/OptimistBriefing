@@ -64,6 +64,35 @@ export const RawResearchCandidateSchema = RawItemSchema.extend({
   topics: z.array(z.string().min(1)),
 });
 
+export const RawNewsCandidateSchema = RawItemSchema.extend({
+  kind: z.enum(["article", "document", "forecast"]),
+  canCorroborateFacts: z.boolean(),
+}).superRefine((candidate, context) => {
+  if (
+    candidate.canCorroborateFacts &&
+    candidate.sourceRole !== "primary" &&
+    candidate.sourceRole !== "reporting"
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message:
+        "Only primary documents and reporting may corroborate facts.",
+      path: ["canCorroborateFacts"],
+    });
+  }
+  if (
+    candidate.kind === "forecast" &&
+    (candidate.sourceRole !== "forecast" ||
+      candidate.canCorroborateFacts)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Forecasts must be non-corroborating forecast sources.",
+      path: ["sourceRole"],
+    });
+  }
+});
+
 export type CollectionWindow = z.infer<typeof CollectionWindowSchema>;
 export type ResearchSourceRecord = z.infer<
   typeof ResearchSourceRecordSchema
@@ -78,6 +107,7 @@ export type RawItem = z.infer<typeof RawItemSchema>;
 export type RawResearchCandidate = z.infer<
   typeof RawResearchCandidateSchema
 >;
+export type RawNewsCandidate = z.infer<typeof RawNewsCandidateSchema>;
 
 export interface SourceAdapter {
   collect(window: CollectionWindow): Promise<RawItem[]>;
@@ -87,6 +117,10 @@ export interface ResearchEnricher {
   enrich(
     candidates: readonly RawResearchCandidate[],
   ): Promise<RawResearchCandidate[]>;
+}
+
+export interface NewsSourceAdapter {
+  collect(window: CollectionWindow): Promise<RawNewsCandidate[]>;
 }
 
 export function bodyRetrievalPermitted(

@@ -1,0 +1,194 @@
+INSERT OR IGNORE INTO sources (
+  id, canonical_name, canonical_url, role, trust_prior, enabled,
+  restrictions_json, last_success_at, health_status
+) VALUES
+  (
+    'reuters', 'Reuters', 'https://www.reuters.com/', 'reporting', 0.95, 1,
+    '{"bodyRetrieval":"forbidden","paywall":"licensed-or-metered","contentUse":"metadata-and-linked-excerpts","discoveryMechanism":"rss","sectionEligibility":["morning_brief","world","technology","ai_policy"],"feedUrl":"https://www.reutersagency.com/feed/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'associated-press', 'Associated Press', 'https://apnews.com/', 'reporting', 0.95, 1,
+    '{"bodyRetrieval":"forbidden","paywall":"none","contentUse":"metadata-and-linked-excerpts","discoveryMechanism":"rss","sectionEligibility":["morning_brief","world","technology","ai_policy"],"pageUrl":"https://apnews.com/hub/ap-top-news"}',
+    NULL, 'unknown'
+  ),
+  (
+    'npr', 'NPR', 'https://www.npr.org/', 'reporting', 0.9, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["morning_brief","world","technology","ai_policy"],"feedUrl":"https://feeds.npr.org/1001/rss.xml"}',
+    NULL, 'unknown'
+  ),
+  (
+    'economist', 'The Economist', 'https://www.economist.com/', 'analysis', 0.85, 1,
+    '{"bodyRetrieval":"forbidden","paywall":"hard","contentUse":"metadata-only","discoveryMechanism":"rss","sectionEligibility":["world","technology","ai_policy"],"feedUrl":"https://www.economist.com/the-world-this-week/rss.xml"}',
+    NULL, 'unknown'
+  ),
+  (
+    'nist', 'National Institute of Standards and Technology', 'https://www.nist.gov/', 'primary', 0.98, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"rss","sectionEligibility":["technology","ai_policy"],"feedUrl":"https://www.nist.gov/news-events/news/rss.xml"}',
+    NULL, 'unknown'
+  ),
+  (
+    'federal-register', 'Federal Register', 'https://www.federalregister.gov/', 'primary', 0.98, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"api","sectionEligibility":["morning_brief","ai_policy"],"pageUrl":"https://www.federalregister.gov/agencies"}',
+    NULL, 'unknown'
+  ),
+  (
+    'congress-gov', 'Congress.gov', 'https://www.congress.gov/', 'primary', 0.98, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"rss","sectionEligibility":["morning_brief","ai_policy"],"pageUrl":"https://www.congress.gov/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'maryland-gov', 'Maryland.gov', 'https://www.maryland.gov/', 'primary', 0.98, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"manual","sectionEligibility":["dmv","baltimore"],"pageUrl":"https://news.maryland.gov/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'maryland-general-assembly', 'Maryland General Assembly', 'https://mgaleg.maryland.gov/', 'primary', 0.98, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"manual","sectionEligibility":["ai_policy","dmv","baltimore"],"pageUrl":"https://mgaleg.maryland.gov/mgawebsite/Legislation/Tracking"}',
+    NULL, 'unknown'
+  ),
+  (
+    'dc-gov', 'DC.gov', 'https://dc.gov/', 'primary', 0.98, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"rss","sectionEligibility":["dmv"],"pageUrl":"https://dc.gov/newsroom"}',
+    NULL, 'unknown'
+  ),
+  (
+    'dc-register', 'District of Columbia Register', 'https://dcregs.dc.gov/', 'primary', 0.98, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"manual","sectionEligibility":["ai_policy","dmv"],"pageUrl":"https://dcregs.dc.gov/Common/DCR/Issues/IssueCategoryList.aspx?CategoryID=1"}',
+    NULL, 'unknown'
+  ),
+  (
+    'virginia-gov', 'Virginia.gov', 'https://www.virginia.gov/', 'primary', 0.98, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"manual","sectionEligibility":["dmv"],"pageUrl":"https://www.virginia.gov/news/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'virginia-lis', 'Virginia Legislative Information System', 'https://lis.virginia.gov/', 'primary', 0.98, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-government","discoveryMechanism":"manual","sectionEligibility":["ai_policy","dmv"],"pageUrl":"https://lis.virginia.gov/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'wypr', 'WYPR', 'https://www.wypr.org/', 'reporting', 0.9, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["dmv","baltimore"],"feedUrl":"https://www.wypr.org/rss/local-news"}',
+    NULL, 'unknown'
+  ),
+  (
+    'baltimore-banner', 'The Baltimore Banner', 'https://www.thebaltimorebanner.com/', 'reporting', 0.9, 1,
+    '{"bodyRetrieval":"forbidden","paywall":"metered-or-hard","contentUse":"metadata-only","discoveryMechanism":"rss","sectionEligibility":["dmv","baltimore"],"pageUrl":"https://www.thebaltimorebanner.com/community/local-news/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'baltimore-brew', 'Baltimore Brew', 'https://www.baltimorebrew.com/', 'reporting', 0.88, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["baltimore"],"feedUrl":"https://www.baltimorebrew.com/feed/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'wtop', 'WTOP', 'https://wtop.com/', 'reporting', 0.88, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["dmv"],"feedUrl":"https://wtop.com/feed/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'maryland-matters', 'Maryland Matters', 'https://marylandmatters.org/', 'reporting', 0.9, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["ai_policy","dmv","baltimore"],"feedUrl":"https://marylandmatters.org/feed/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'wamu', 'WAMU', 'https://wamu.org/', 'reporting', 0.9, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["dmv"],"feedUrl":"https://wamu.org/feed/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'gdelt', 'GDELT', 'https://www.gdeltproject.org/', 'analysis', 0.5, 1,
+    '{"bodyRetrieval":"forbidden","paywall":"none","contentUse":"discovery-metadata-only","discoveryMechanism":"api","sectionEligibility":["morning_brief","world","technology","ai_policy","dmv","baltimore"],"apiUrl":"https://api.gdeltproject.org/api/v2/doc/doc","discoveryOnly":true}',
+    NULL, 'unknown'
+  ),
+  (
+    'monitoring-the-situation', 'Monitoring the Situation', 'https://mts.now/', 'analysis', 0.55, 1,
+    '{"bodyRetrieval":"forbidden","paywall":"unknown","contentUse":"discovery-metadata-only","discoveryMechanism":"manual","sectionEligibility":["world","technology"],"pageUrl":"https://mts.now/","canCorroborateFacts":false}',
+    NULL, 'unknown'
+  ),
+  (
+    'polymarket', 'Polymarket', 'https://polymarket.com/', 'forecast', 0.5, 1,
+    '{"bodyRetrieval":"forbidden","paywall":"none","contentUse":"forecast-metadata-only","discoveryMechanism":"api","sectionEligibility":["forecast"],"apiUrl":"https://gamma-api.polymarket.com/markets","canCorroborateFacts":false}',
+    NULL, 'unknown'
+  ),
+  (
+    'arxiv', 'arXiv', 'https://arxiv.org/', 'primary', 0.85, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"open-research","discoveryMechanism":"api","sectionEligibility":["research","research_radar"],"apiUrl":"https://export.arxiv.org/api/query"}',
+    NULL, 'unknown'
+  ),
+  (
+    'semantic-scholar', 'Semantic Scholar', 'https://www.semanticscholar.org/', 'analysis', 0.75, 1,
+    '{"bodyRetrieval":"forbidden","paywall":"none","contentUse":"research-metadata-only","discoveryMechanism":"api","sectionEligibility":["research","research_radar"],"apiUrl":"https://api.semanticscholar.org/graph/v1/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'openalex', 'OpenAlex', 'https://openalex.org/', 'analysis', 0.75, 1,
+    '{"bodyRetrieval":"forbidden","paywall":"none","contentUse":"research-metadata-only","discoveryMechanism":"api","sectionEligibility":["research","research_radar"],"apiUrl":"https://api.openalex.org/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'stanford-research', 'Stanford Research', 'https://research.stanford.edu/', 'blog', 0.85, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["research","research_radar"],"pageUrl":"https://research.stanford.edu/news"}',
+    NULL, 'unknown'
+  ),
+  (
+    'berkeley-research', 'UC Berkeley Research', 'https://vcresearch.berkeley.edu/', 'blog', 0.85, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["research","research_radar"],"pageUrl":"https://vcresearch.berkeley.edu/news"}',
+    NULL, 'unknown'
+  ),
+  (
+    'harvard-research', 'Harvard Research', 'https://research.harvard.edu/', 'blog', 0.85, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["research","research_radar"],"pageUrl":"https://research.harvard.edu/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'mit-research', 'MIT News Research', 'https://news.mit.edu/', 'blog', 0.88, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["research","research_radar"],"feedUrl":"https://news.mit.edu/rss/topic/artificial-intelligence2"}',
+    NULL, 'unknown'
+  ),
+  (
+    'cmu-research', 'Carnegie Mellon University Research', 'https://www.cmu.edu/research/', 'blog', 0.85, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["research","research_radar"],"pageUrl":"https://www.cmu.edu/news/stories/archives/research.html"}',
+    NULL, 'unknown'
+  ),
+  (
+    'penn-research', 'University of Pennsylvania Research', 'https://research.upenn.edu/', 'blog', 0.85, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["research","research_radar"],"pageUrl":"https://research.upenn.edu/news/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'johns-hopkins-research', 'Johns Hopkins Research', 'https://research.jhu.edu/', 'blog', 0.88, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["research","research_radar","baltimore"],"pageUrl":"https://hub.jhu.edu/topics/research/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'ut-austin-research', 'UT Austin Research', 'https://research.utexas.edu/', 'blog', 0.85, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["research","research_radar"],"pageUrl":"https://research.utexas.edu/news"}',
+    NULL, 'unknown'
+  ),
+  (
+    'georgia-tech-research', 'Georgia Tech Research', 'https://research.gatech.edu/', 'blog', 0.85, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["research","research_radar"],"pageUrl":"https://research.gatech.edu/news"}',
+    NULL, 'unknown'
+  ),
+  (
+    'google-research', 'Google Research', 'https://research.google/', 'blog', 0.9, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["research","research_radar","technology"],"pageUrl":"https://research.google/blog/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'google-deepmind', 'Google DeepMind', 'https://deepmind.google/', 'blog', 0.9, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["research","research_radar","technology"],"pageUrl":"https://deepmind.google/discover/blog/"}',
+    NULL, 'unknown'
+  ),
+  (
+    'anthropic', 'Anthropic Research', 'https://www.anthropic.com/research', 'blog', 0.92, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["research","research_radar","technology","ai_policy"],"pageUrl":"https://www.anthropic.com/research"}',
+    NULL, 'unknown'
+  ),
+  (
+    'openai', 'OpenAI Research', 'https://openai.com/research/', 'blog', 0.92, 1,
+    '{"bodyRetrieval":"permitted","paywall":"none","contentUse":"ephemeral-summarization","discoveryMechanism":"rss","sectionEligibility":["research","research_radar","technology","ai_policy"],"pageUrl":"https://openai.com/research/"}',
+    NULL, 'unknown'
+  );

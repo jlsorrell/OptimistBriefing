@@ -132,6 +132,37 @@ describe("EditionView", () => {
     expect(screen.getByText("24 minute read")).toBeTruthy();
   });
 
+  it("labels forecast signals with the required non-factual wording", () => {
+    const fixture = fixtureEdition().entries[0];
+    if (fixture === undefined) throw new Error("Missing fixture entry.");
+    render(
+      <NewsClusterCard
+        entry={{
+          ...fixture,
+          section: "forecast",
+          sourceRefs: [
+            {
+              id: "polymarket",
+              name: "Polymarket",
+              url: "https://polymarket.com/event/fixture",
+              role: "forecast",
+              retrievedAt: "2026-07-29T08:00:00.000Z",
+            },
+          ],
+          summary: {
+            ...fixture.summary,
+            claims: fixture.summary.claims.map((claim) => ({
+              ...claim,
+              sourceIds: ["polymarket"],
+            })),
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText("Forecast, not fact")).toBeTruthy();
+  });
+
   it.each(["forecast", "analysis", "opinion", "blog"] as const)(
     "does not treat a reporting plus %s pair as corroboration",
     (role) => {

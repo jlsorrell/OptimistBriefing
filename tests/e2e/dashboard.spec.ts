@@ -56,7 +56,7 @@ test("renders a source-grounded edition at desktop and mobile viewports", async 
       .getByText("Abstract only"),
   ).toBeVisible();
   await expect(page.getByText("Primary source").first()).toBeVisible();
-  await expect(page.getByText("Forecast — not a fact")).toBeVisible();
+  await expect(page.getByText("Forecast, not fact")).toBeVisible();
   await expect(
     page
       .locator('[data-entry-id="entry-forecast"]')
