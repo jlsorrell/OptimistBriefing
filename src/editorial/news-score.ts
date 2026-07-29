@@ -4,6 +4,10 @@ import {
   AccessLevelSchema,
   SourceRefSchema,
 } from "../contracts/editorial";
+import {
+  NewsDevelopmentSchema,
+  type NewsDevelopment,
+} from "./cluster";
 
 export const NEWS_SCORE_WEIGHTS = Object.freeze({
   publicImportance: 0.25,
@@ -53,6 +57,10 @@ export const NewsScoreSchema = z.object({
 export type NewsEvidenceSource = z.infer<typeof NewsEvidenceSourceSchema>;
 export type NewsScoreInput = z.input<typeof NewsScoreInputSchema>;
 export type NewsScore = z.infer<typeof NewsScoreSchema>;
+export type NewsDevelopmentScoreInput = Omit<
+  NewsScoreInput,
+  "itemId" | "evidence"
+>;
 
 function normalized(value: number): number {
   return Math.max(0, Math.min(1, value));
@@ -128,5 +136,23 @@ export function scoreNews(input: NewsScoreInput): NewsScore {
       reason("Geographic fit", components.geography),
       reason("Novelty", components.novelty),
     ],
+  });
+}
+
+export function scoreNewsDevelopment(
+  development: NewsDevelopment,
+  input: NewsDevelopmentScoreInput,
+): NewsScore {
+  const parsed = NewsDevelopmentSchema.parse(development);
+  return scoreNews({
+    ...input,
+    itemId: parsed.id,
+    evidence: parsed.sourceEvidence.map((source) => ({
+      sourceId: source.sourceId,
+      role: source.role,
+      accessLevel: source.accessLevel,
+      provenanceUrl: source.provenanceUrl,
+      canCorroborateFacts: source.canCorroborateFacts,
+    })),
   });
 }

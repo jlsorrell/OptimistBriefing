@@ -4,6 +4,7 @@ import {
   normalizeDoi,
 } from "../sources/identifiers";
 import { RawItemSchema } from "../sources/types";
+import { mapResearchTopicIds } from "./research-topics";
 
 const TRACKING_PARAMETERS = new Set([
   "fbclid",
@@ -146,15 +147,40 @@ export function normalizeCandidate(raw: unknown): Item {
     ),
   );
   const topics = stringArray(input.topics);
+  const configuredTopics =
+    candidate.kind === "paper" || candidate.kind === "blog"
+      ? mapResearchTopicIds([
+          title,
+          ...topics,
+          candidate.abstract ?? "",
+        ])
+      : [];
+  const sectionEligibility = stringArray(
+    input.sectionEligibility ?? candidate.metadata.sectionEligibility,
+  );
+  const namedEntities = stringArray(
+    input.namedEntities ?? candidate.metadata.namedEntities,
+  );
+  const primaryDocumentUrl =
+    typeof (input.primaryDocumentUrl ??
+      candidate.metadata.primaryDocumentUrl) === "string"
+      ? canonicalizeUrl(
+          (input.primaryDocumentUrl ??
+            candidate.metadata.primaryDocumentUrl) as string,
+        )
+      : null;
   const section =
-    typeof candidate.metadata.section === "string"
-      ? normalizedWhitespace(candidate.metadata.section)
+    typeof candidate.metadata.primarySection === "string"
+      ? normalizedWhitespace(candidate.metadata.primarySection)
+      : typeof candidate.metadata.section === "string"
+        ? normalizedWhitespace(candidate.metadata.section)
       : null;
   const primaryTopic =
-    topics[0] ??
+    configuredTopics[0] ??
     (typeof candidate.metadata.primaryTopic === "string"
       ? normalizedWhitespace(candidate.metadata.primaryTopic)
       : section) ??
+    topics[0] ??
     "general";
   const canCorroborateFacts =
     input.canCorroborateFacts === true &&
@@ -191,7 +217,8 @@ export function normalizeCandidate(raw: unknown): Item {
     accessLevel: candidate.accessLevel,
     primaryTopic,
     tags: uniqueSorted([
-      ...topics,
+      ...configuredTopics,
+      ...sectionEligibility,
       ...stringArray(candidate.metadata.tags),
       ...(section === null ? [] : [section]),
     ]),
@@ -208,6 +235,11 @@ export function normalizeCandidate(raw: unknown): Item {
       institutions: uniqueSorted(
         candidate.institutions.map(normalizedWhitespace),
       ),
+      providerTopics: uniqueSorted(topics),
+      configuredTopics,
+      sectionEligibility: uniqueSorted(sectionEligibility),
+      namedEntities: uniqueSorted(namedEntities),
+      primaryDocumentUrl,
       relatedPaperIds: uniqueSorted(
         candidate.relatedPaperIds.map(canonicalIdentifier),
       ),

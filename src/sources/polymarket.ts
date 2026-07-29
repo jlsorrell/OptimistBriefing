@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { SourceHttpClient } from "./http-client";
+import { deriveNewsSignals } from "./news-signals";
 import { assertSafeOutboundUrl } from "./outbound-url";
 import {
   CollectionWindowSchema,
@@ -246,6 +247,16 @@ export class PolymarketAdapter implements NewsSourceAdapter {
       const marketUrl = assertSafeOutboundUrl(
         `https://polymarket.com/event/${market.slug}`,
       ).toString();
+      const metadata = {
+        currentProbability: market.currentProbability,
+        priorProbability: market.priorProbability,
+        absoluteChange,
+        retrievedAt: response.retrievedAt,
+        liquidity: market.liquidity,
+        resolutionSource,
+        resolvesAt: market.endDate,
+        label: "Forecast, not fact",
+      };
 
       return [
         RawNewsCandidateSchema.parse({
@@ -269,16 +280,14 @@ export class PolymarketAdapter implements NewsSourceAdapter {
           content: null,
           relatedPaperIds: [],
           canCorroborateFacts: false,
-          metadata: {
-            currentProbability: market.currentProbability,
-            priorProbability: market.priorProbability,
-            absoluteChange,
-            retrievedAt: response.retrievedAt,
-            liquidity: market.liquidity,
-            resolutionSource,
-            resolvesAt: market.endDate,
-            label: "Forecast, not fact",
-          },
+          ...deriveNewsSignals({
+            kind: "forecast",
+            title: market.question,
+            originalUrl: marketUrl,
+            sectionEligibility:
+              this.source.sectionEligibility ?? ["forecast"],
+            metadata,
+          }),
         }),
       ];
     });

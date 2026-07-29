@@ -12,7 +12,7 @@ import type { RawNewsCandidate } from "../../../src/sources/types";
 function rawNews(
   overrides: Partial<RawNewsCandidate> = {},
 ): RawNewsCandidate {
-  return {
+  const base: RawNewsCandidate = {
     kind: "article",
     sourceId: "reuters",
     sourceName: "Reuters",
@@ -31,11 +31,31 @@ function rawNews(
     content: null,
     relatedPaperIds: [],
     canCorroborateFacts: true,
+    sectionEligibility: ["ai_policy"],
+    namedEntities: [],
+    primaryDocumentUrl: null,
     metadata: {
       section: "ai_policy",
       namedEntities: ["Evaluation Agency"],
     },
-    ...overrides,
+  };
+  const candidate: RawNewsCandidate = { ...base, ...overrides };
+  return {
+    ...candidate,
+    sectionEligibility: candidate.sectionEligibility,
+    namedEntities:
+      candidate.namedEntities.length > 0
+        ? candidate.namedEntities
+        : Array.isArray(candidate.metadata.namedEntities)
+          ? candidate.metadata.namedEntities.filter(
+              (value): value is string => typeof value === "string",
+            )
+          : [],
+    primaryDocumentUrl:
+      candidate.primaryDocumentUrl ??
+      (typeof candidate.metadata.primaryDocumentUrl === "string"
+        ? candidate.metadata.primaryDocumentUrl
+        : null),
   };
 }
 

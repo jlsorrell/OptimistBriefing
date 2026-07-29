@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { SourceHttpClient } from "./http-client";
+import { deriveNewsSignals } from "./news-signals";
 import { assertSafeOutboundUrl } from "./outbound-url";
 import {
   CollectionWindowSchema,
@@ -118,6 +119,14 @@ export class GdeltAdapter implements NewsSourceAdapter {
       if (seenAt < validWindow.from || seenAt > validWindow.to) {
         return [];
       }
+      const metadata = {
+        discoveryOnly: true,
+        discoveryProvider: "GDELT",
+        seenAt,
+        publisherDomain: article.domain,
+        language: article.language,
+        sourceCountry: article.sourcecountry,
+      };
       return [
         RawNewsCandidateSchema.parse({
           kind: "article",
@@ -137,14 +146,20 @@ export class GdeltAdapter implements NewsSourceAdapter {
           content: null,
           relatedPaperIds: [],
           canCorroborateFacts: false,
-          metadata: {
-            discoveryOnly: true,
-            discoveryProvider: "GDELT",
-            seenAt,
-            publisherDomain: article.domain,
-            language: article.language,
-            sourceCountry: article.sourcecountry,
-          },
+          ...deriveNewsSignals({
+            kind: "article",
+            title: article.title,
+            originalUrl,
+            sectionEligibility:
+              this.source.sectionEligibility ?? [
+                "world",
+                "technology",
+                "ai_policy",
+                "dmv",
+                "baltimore",
+              ],
+            metadata,
+          }),
         }),
       ];
     });

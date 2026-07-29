@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
 
 import type { Item, ItemScore } from "../../../src/contracts/editorial";
+import {
+  clusterNews,
+  type NewsDevelopment,
+} from "../../../src/editorial/cluster";
 import type { NewsScore } from "../../../src/editorial/news-score";
+import { scoreResearch } from "../../../src/editorial/research-score";
 import {
   shortlist,
   type SectionBudgets,
@@ -16,6 +21,8 @@ function item(
   kind: Item["kind"] = "paper",
   metadata: Record<string, unknown> = {},
 ): Item {
+  const section =
+    typeof metadata.section === "string" ? metadata.section : null;
   return {
     id,
     kind,
@@ -35,10 +42,25 @@ function item(
     primaryTopic,
     tags: [primaryTopic],
     normalizedText: `Text ${id}`,
-    metadata,
+    metadata:
+      kind === "paper" || kind === "blog" || section === null
+        ? metadata
+        : {
+            ...metadata,
+            primarySection: section,
+            sectionEligibility: [section],
+          },
     createdAt: NOW,
     expiresAt: null,
   };
+}
+
+function development(itemValue: Item): NewsDevelopment {
+  const value = clusterNews([itemValue], {})[0];
+  if (value === undefined) {
+    throw new Error("Expected a news development fixture.");
+  }
+  return value;
 }
 
 function researchScore(itemId: string, total: number): ItemScore {
@@ -78,6 +100,10 @@ const preferences: ShortlistPreferences = {
     "oversight-governance",
     "secure-computation-ml",
   ],
+  researchQualityGates: {
+    minimumTopicalFit: 0.5,
+    minimumTechnicalQuality: 0.5,
+  },
 };
 
 const budgets: SectionBudgets = {
@@ -121,22 +147,25 @@ describe("shortlist", () => {
     const loneWorldItem = item("world-1", "world", "article", {
       section: "world",
     });
+    const loneWorld = development(loneWorldItem);
 
     const result = shortlist(
-      [loneWorldItem],
-      [newsScore(loneWorldItem.id, 0.9)],
+      [loneWorld],
+      [newsScore(loneWorld.id, 0.9)],
       preferences,
       budgets,
     );
 
-    expect(result.world).toEqual([loneWorldItem]);
+    expect(result.world).toEqual([loneWorld]);
     expect(result.technology).toEqual([]);
     expect(result.world).toHaveLength(1);
   });
 
   it("never exceeds the approved section maximum when given a larger budget", () => {
     const items = Array.from({ length: 6 }, (_, index) =>
-      item(`world-${index}`, "world", "article", { section: "world" }),
+      development(
+        item(`world-${index}`, "world", "article", { section: "world" }),
+      ),
     );
 
     const result = shortlist(
@@ -160,12 +189,14 @@ describe("shortlist", () => {
       developmentKey: "evaluation-rule",
       materialFactsFingerprint: "version-2",
     });
+    const unchangedDevelopment = development(unchanged);
+    const changedDevelopment = development(changed);
 
     const result = shortlist(
-      [unchanged, changed],
+      [unchangedDevelopment, changedDevelopment],
       [
-        newsScore(unchanged.id, 0.95),
-        newsScore(changed.id, 0.8),
+        newsScore(unchangedDevelopment.id, 0.95),
+        newsScore(changedDevelopment.id, 0.8),
       ],
       {
         ...preferences,
@@ -183,10 +214,12 @@ describe("shortlist", () => {
       budgets,
     );
 
-    expect(result.aiPolicy.map(({ id }) => id)).toEqual(["changed"]);
+    expect(result.aiPolicy.map(({ id }) => id)).toEqual([
+      changedDevelopment.id,
+    ]);
     expect(result.exclusions).toEqual([
       {
-        itemId: "unchanged",
+        itemId: unchangedDevelopment.id,
         reason: "unchanged_from_previous_edition",
       },
     ]);
@@ -195,8 +228,13 @@ describe("shortlist", () => {
   it("uses stable item IDs to break score and timestamp ties", () => {
     const a = item("a", "world", "article", { section: "world" });
     const b = item("b", "world", "article", { section: "world" });
-    const inputs = [b, a];
-    const scores = [newsScore("b", 0.8), newsScore("a", 0.8)];
+    const aDevelopment = development(a);
+    const bDevelopment = development(b);
+    const inputs = [bDevelopment, aDevelopment];
+    const scores = [
+      newsScore(bDevelopment.id, 0.8),
+      newsScore(aDevelopment.id, 0.8),
+    ];
 
     const forward = shortlist(
       inputs,
@@ -211,7 +249,71 @@ describe("shortlist", () => {
       { ...budgets, world: 1 },
     );
 
-    expect(forward.world.map(({ id }) => id)).toEqual(["a"]);
+    expect(forward.world.map(({ id }) => id)).toEqual([
+      aDevelopment.id,
+    ]);
     expect(reverse.world).toEqual(forward.world);
+  });
+
+  it("rejects weak topical fit independently of a high aggregate score", () => {
+    const weak = item("weak-topic", "alignment-interpretability");
+    const score = {
+      ...researchScore(weak.id, 0.9),
+      topicalFit: 0.49,
+      technicalQuality: 1,
+      researchSignal: 1,
+      novelty: 1,
+      seriousAttention: 1,
+      total: 0.9,
+    };
+
+    const result = shortlist([weak], [score], preferences, budgets);
+
+    expect(result.researchFeatured).toEqual([]);
+    expect(result.exclusions).toContainEqual({
+      itemId: weak.id,
+      reason: "below_topical_fit_gate",
+    });
+  });
+
+  it("rejects weak technical quality independently of popularity signals", () => {
+    const weak = item("weak-quality", "alignment-interpretability");
+    const score = {
+      ...researchScore(weak.id, 0.9),
+      topicalFit: 1,
+      technicalQuality: 0.49,
+      researchSignal: 1,
+      novelty: 1,
+      seriousAttention: 1,
+      total: 0.9,
+    };
+
+    const result = shortlist([weak], [score], preferences, budgets);
+
+    expect(result.researchFeatured).toEqual([]);
+    expect(result.exclusions).toContainEqual({
+      itemId: weak.id,
+      reason: "below_technical_quality_gate",
+    });
+  });
+
+  it("allows a neutral absent assessment at the configured technical gate", () => {
+    const neutral = item("neutral-assessment", "alignment-interpretability");
+    const score = scoreResearch({
+      itemId: neutral.id,
+      topicalFit: 0.8,
+      technicalQuality: null,
+      researchSignal: 0.8,
+      novelty: null,
+      seriousAttention: null,
+      assessment: null,
+    });
+
+    const result = shortlist([neutral], [score], preferences, budgets);
+
+    expect(score.technicalQuality).toBe(0.5);
+    expect(result.researchFeatured.map(({ id }) => id)).toEqual([
+      neutral.id,
+    ]);
   });
 });

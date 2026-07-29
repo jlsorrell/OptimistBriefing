@@ -1,12 +1,15 @@
 import { z } from "zod";
 
 import {
+  EditionSectionSchema,
   ItemSchema,
+  SourceRefSchema,
   type AccessLevel,
+  type EditionSection,
   type Item,
   type SourceRef,
 } from "../contracts/editorial";
-import { canonicalizeUrl } from "./normalize";
+import { canonicalizeUrl, normalizeTitleKey } from "./normalize";
 
 const NEWS_KINDS = new Set<Item["kind"]>([
   "article",
@@ -41,19 +44,38 @@ export type ClusterSourceEvidence = z.infer<
   typeof ClusterSourceEvidenceSchema
 >;
 
-export type NewsCluster = {
-  id: string;
-  itemIds: string[];
-  items: Item[];
-  canonicalPrimaryDocument: string | null;
-  namedEntities: string[];
-  publishedFrom: string | null;
-  publishedTo: string | null;
-  sourceRefs: SourceRef[];
-  sourceEvidence: ClusterSourceEvidence[];
-  corroboratingSourceIds: string[];
-  corroboratingSourceCount: number;
-};
+const NewsSectionSchema = z.enum([
+  "world",
+  "technology",
+  "ai_policy",
+  "dmv",
+  "baltimore",
+  "forecast",
+]);
+
+export const NewsDevelopmentSchema = z.object({
+  id: z.string().min(1),
+  title: z.string().min(1),
+  itemIds: z.array(z.string().min(1)).min(1),
+  items: z.array(ItemSchema).min(1),
+  representativeItem: ItemSchema,
+  canonicalPrimaryDocument: z.string().url().nullable(),
+  namedEntities: z.array(z.string().min(1)),
+  sectionEligibility: z.array(EditionSectionSchema),
+  primarySection: NewsSectionSchema,
+  developmentKey: z.string().min(1),
+  materialFactsFingerprint: z.string().min(1),
+  materialChange: z.boolean(),
+  publishedFrom: z.string().datetime().nullable(),
+  publishedTo: z.string().datetime().nullable(),
+  sourceRefs: z.array(SourceRefSchema).min(1),
+  sourceEvidence: z.array(ClusterSourceEvidenceSchema).min(1),
+  corroboratingSourceIds: z.array(z.string().min(1)),
+  corroboratingSourceCount: z.number().int().nonnegative(),
+});
+
+export type NewsDevelopment = z.infer<typeof NewsDevelopmentSchema>;
+export type NewsCluster = NewsDevelopment;
 
 export type EmbeddingLookup =
   | Readonly<Record<string, readonly number[]>>
@@ -197,6 +219,76 @@ function stableHash(value: string): string {
   return (hash >>> 0).toString(36).padStart(7, "0");
 }
 
+const ACCESS_PRIORITY: Record<AccessLevel, number> = {
+  metadata: 0,
+  secondary: 1,
+  abstract: 2,
+  full_text: 3,
+};
+const ROLE_PRIORITY: Record<SourceRef["role"], number> = {
+  forecast: 0,
+  opinion: 1,
+  blog: 2,
+  analysis: 3,
+  reporting: 4,
+  primary: 5,
+};
+const SECTION_PRIORITY = [
+  "baltimore",
+  "dmv",
+  "ai_policy",
+  "technology",
+  "world",
+  "forecast",
+] as const;
+
+function representative(items: readonly Item[]): Item {
+  return [...items].sort((left, right) => {
+    const leftRole = Math.max(
+      ...left.sourceRefs.map((source) => ROLE_PRIORITY[source.role]),
+    );
+    const rightRole = Math.max(
+      ...right.sourceRefs.map((source) => ROLE_PRIORITY[source.role]),
+    );
+    return (
+      rightRole - leftRole ||
+      ACCESS_PRIORITY[right.accessLevel] -
+        ACCESS_PRIORITY[left.accessLevel] ||
+      (right.publishedAt ?? "").localeCompare(left.publishedAt ?? "") ||
+      left.id.localeCompare(right.id)
+    );
+  })[0] as Item;
+}
+
+function itemSections(item: Item): EditionSection[] {
+  return stringArray(item.metadata.sectionEligibility).flatMap(
+    (value): EditionSection[] => {
+      const parsed = EditionSectionSchema.safeParse(value);
+      return parsed.success ? [parsed.data] : [];
+    },
+  );
+}
+
+function primarySection(items: readonly Item[]): NewsDevelopment["primarySection"] {
+  const counts = new Map<NewsDevelopment["primarySection"], number>();
+  for (const item of items) {
+    const value = item.metadata.primarySection;
+    const parsed = NewsSectionSchema.safeParse(value);
+    if (!parsed.success) continue;
+    counts.set(parsed.data, (counts.get(parsed.data) ?? 0) + 1);
+  }
+  if (counts.size === 0) {
+    return items.every((item) => item.kind === "forecast")
+      ? "forecast"
+      : "world";
+  }
+  return [...SECTION_PRIORITY].sort(
+    (left, right) =>
+      (counts.get(right) ?? 0) - (counts.get(left) ?? 0) ||
+      SECTION_PRIORITY.indexOf(left) - SECTION_PRIORITY.indexOf(right),
+  )[0] ?? "world";
+}
+
 function sourceRefKey(source: SourceRef): string {
   return `${source.id}\u0000${source.url}\u0000${source.role}`;
 }
@@ -256,15 +348,69 @@ function cluster(items: readonly Item[]): NewsCluster {
   const published = sortedItems
     .flatMap((item) => item.publishedAt ?? [])
     .sort((left, right) => left.localeCompare(right));
+  const representativeItem = representative(sortedItems);
+  const sectionEligibility = [
+    ...new Set(sortedItems.flatMap(itemSections)),
+  ].sort((left, right) => left.localeCompare(right));
+  const explicitDevelopmentKeys = [
+    ...new Set(
+      sortedItems.flatMap((item) =>
+        typeof item.metadata.developmentKey === "string"
+          ? [item.metadata.developmentKey]
+          : [],
+      ),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
+  const developmentKey =
+    explicitDevelopmentKeys[0] ??
+    primaryDocuments[0] ??
+    `development-${stableHash(
+      [
+        ...entities.keys(),
+        normalizeTitleKey(representativeItem.title),
+      ].join("|"),
+    )}`;
+  const explicitFingerprints = [
+    ...new Set(
+      sortedItems.flatMap((item) =>
+        typeof item.metadata.materialFactsFingerprint === "string"
+          ? [item.metadata.materialFactsFingerprint]
+          : [],
+      ),
+    ),
+  ].sort((left, right) => left.localeCompare(right));
+  const materialFactsFingerprint =
+    explicitFingerprints.length === 1
+      ? (explicitFingerprints[0] as string)
+      : `facts-${stableHash(
+          explicitFingerprints.length > 0
+            ? explicitFingerprints.join("|")
+            : sortedItems
+                .map(
+                  (item) =>
+                    `${normalizeTitleKey(item.title)}|${item.normalizedText}`,
+                )
+                .sort()
+                .join("|"),
+        )}`;
 
-  return {
+  return NewsDevelopmentSchema.parse({
     id: `cluster-${stableHash(sortedItems.map(({ id }) => id).join("|"))}`,
+    title: representativeItem.title,
     itemIds: sortedItems.map(({ id }) => id),
     items: sortedItems,
+    representativeItem,
     canonicalPrimaryDocument: primaryDocuments[0] ?? null,
     namedEntities: [...entities.entries()]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([, value]) => value),
+    sectionEligibility,
+    primarySection: primarySection(sortedItems),
+    developmentKey,
+    materialFactsFingerprint,
+    materialChange: sortedItems.some(
+      (item) => item.metadata.materialChange === true,
+    ),
     publishedFrom: published[0] ?? null,
     publishedTo: published.at(-1) ?? null,
     sourceRefs: [...sourceRefs.values()].sort((left, right) =>
@@ -273,7 +419,7 @@ function cluster(items: readonly Item[]): NewsCluster {
     sourceEvidence,
     corroboratingSourceIds,
     corroboratingSourceCount: corroboratingSourceIds.length,
-  };
+  });
 }
 
 export function clusterNews(

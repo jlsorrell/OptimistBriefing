@@ -6,6 +6,10 @@ import {
   type Item,
   type ItemScore,
 } from "../contracts/editorial";
+import {
+  NewsDevelopmentSchema,
+  type NewsDevelopment,
+} from "./cluster";
 import { NewsScoreSchema, type NewsScore } from "./news-score";
 
 export type SectionBudgets = {
@@ -26,6 +30,10 @@ export type PreviousEditionDevelopment = {
 
 export type ShortlistPreferences = {
   researchTopics: readonly string[];
+  researchQualityGates: {
+    minimumTopicalFit: number;
+    minimumTechnicalQuality: number;
+  };
   previousEditionDevelopments?: readonly PreviousEditionDevelopment[];
   minimumResearchScore?: number;
   minimumNewsScore?: number;
@@ -36,19 +44,21 @@ export type ShortlistExclusion = {
   reason:
     | "missing_score"
     | "below_quality_threshold"
+    | "below_topical_fit_gate"
+    | "below_technical_quality_gate"
     | "unchanged_from_previous_edition";
 };
 
 export type Shortlist = {
-  morningBrief: Item[];
+  morningBrief: (Item | NewsDevelopment)[];
   researchFeatured: Item[];
   researchRadar: Item[];
-  world: Item[];
-  technology: Item[];
-  aiPolicy: Item[];
-  dmv: Item[];
-  baltimore: Item[];
-  forecastSignals: Item[];
+  world: NewsDevelopment[];
+  technology: NewsDevelopment[];
+  aiPolicy: NewsDevelopment[];
+  dmv: NewsDevelopment[];
+  baltimore: NewsDevelopment[];
+  forecastSignals: NewsDevelopment[];
   exclusions: ShortlistExclusion[];
 };
 
@@ -77,6 +87,10 @@ export const APPROVED_SECTION_MAXIMA: Readonly<SectionBudgets> =
 
 const PreferencesSchema = z.object({
   researchTopics: z.array(z.string().min(1)),
+  researchQualityGates: z.object({
+    minimumTopicalFit: z.number().finite().min(0).max(1),
+    minimumTechnicalQuality: z.number().finite().min(0).max(1),
+  }),
   previousEditionDevelopments: z
     .array(
       z.object({
@@ -89,18 +103,36 @@ const PreferencesSchema = z.object({
   minimumNewsScore: z.number().finite().min(0).max(1).optional(),
 });
 
-type RankedItem = {
+type RankedResearch = {
   item: Item;
-  score: ItemScore | NewsScore;
+  score: ItemScore;
 };
 
-function scoreOrder(left: RankedItem, right: RankedItem): number {
+type RankedNews = {
+  development: NewsDevelopment;
+  score: NewsScore;
+};
+
+function researchScoreOrder(
+  left: RankedResearch,
+  right: RankedResearch,
+): number {
   return (
     right.score.total - left.score.total ||
     (right.item.publishedAt ?? "").localeCompare(
       left.item.publishedAt ?? "",
     ) ||
     left.item.id.localeCompare(right.item.id)
+  );
+}
+
+function newsScoreOrder(left: RankedNews, right: RankedNews): number {
+  return (
+    right.score.total - left.score.total ||
+    (right.development.publishedTo ?? "").localeCompare(
+      left.development.publishedTo ?? "",
+    ) ||
+    left.development.id.localeCompare(right.development.id)
   );
 }
 
@@ -121,45 +153,30 @@ function scoreMap(
   return scores;
 }
 
-function materialFactsFingerprint(item: Item): string | null {
-  const value = item.metadata.materialFactsFingerprint;
-  return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function developmentKey(item: Item): string {
-  const value = item.metadata.developmentKey;
-  return typeof value === "string" && value.length > 0
-    ? value
-    : item.canonicalUrl;
-}
-
 function unchangedFromPreviousEdition(
-  item: Item,
+  development: NewsDevelopment,
   previous: ReadonlyMap<string, string>,
 ): boolean {
-  if (item.metadata.materialChange === true) return false;
-  const priorFingerprint = previous.get(developmentKey(item));
+  if (development.materialChange) return false;
+  const priorFingerprint = previous.get(development.developmentKey);
   if (priorFingerprint === undefined) return false;
-  const currentFingerprint = materialFactsFingerprint(item);
-  return (
-    currentFingerprint === null || currentFingerprint === priorFingerprint
-  );
+  return development.materialFactsFingerprint === priorFingerprint;
 }
 
 function diverseResearch(
-  ranked: readonly RankedItem[],
+  ranked: readonly RankedResearch[],
   configuredTopics: readonly string[],
   maximum: number,
-): RankedItem[] {
+): RankedResearch[] {
   if (maximum === 0) return [];
-  const selected = new Map<string, RankedItem>();
+  const selected = new Map<string, RankedResearch>();
   const representatives = configuredTopics.flatMap((topic) => {
     const representative = ranked.find(
       ({ item }) => item.primaryTopic === topic,
     );
     return representative === undefined ? [] : [representative];
   });
-  for (const representative of representatives.sort(scoreOrder)) {
+  for (const representative of representatives.sort(researchScoreOrder)) {
     if (selected.size >= maximum) break;
     selected.set(representative.item.id, representative);
   }
@@ -167,7 +184,7 @@ function diverseResearch(
     if (selected.size >= maximum) break;
     selected.set(candidate.item.id, candidate);
   }
-  return [...selected.values()].sort(scoreOrder);
+  return [...selected.values()].sort(researchScoreOrder);
 }
 
 type NewsSection =
@@ -178,54 +195,49 @@ type NewsSection =
   | "baltimore"
   | "forecast";
 
-const NEWS_SECTION_PRIORITY: readonly NewsSection[] = [
-  "baltimore",
-  "dmv",
-  "ai_policy",
-  "technology",
-  "world",
-  "forecast",
-];
-
-function sectionValues(item: Item): string[] {
-  const values = [
-    typeof item.metadata.section === "string"
-      ? item.metadata.section
-      : null,
-    ...(Array.isArray(item.metadata.sectionEligibility)
-      ? item.metadata.sectionEligibility
-      : []),
-    item.primaryTopic,
-    ...item.tags,
-  ];
-  return values
-    .filter((value): value is string => typeof value === "string")
-    .map((value) => value.toLowerCase().replace(/[\s-]+/g, "_"));
-}
-
-function newsSection(item: Item): NewsSection {
-  if (item.kind === "forecast") return "forecast";
-  const values = new Set(sectionValues(item));
-  return (
-    NEWS_SECTION_PRIORITY.find((section) => values.has(section)) ?? "world"
+function uniqueMorningBrief(
+  research: readonly RankedResearch[],
+  news: readonly RankedNews[],
+): (Item | NewsDevelopment)[] {
+  const candidates = [
+    ...research.map(({ item, score }) => ({
+      id: item.id,
+      publishedAt: item.publishedAt,
+      value: item as Item | NewsDevelopment,
+      total: score.total,
+    })),
+    ...news.map(({ development, score }) => ({
+      id: development.id,
+      publishedAt: development.publishedTo,
+      value: development as Item | NewsDevelopment,
+      total: score.total,
+    })),
+  ].sort(
+    (left, right) =>
+      right.total - left.total ||
+      (right.publishedAt ?? "").localeCompare(left.publishedAt ?? "") ||
+      left.id.localeCompare(right.id),
   );
-}
-
-function uniqueRanked(values: readonly RankedItem[]): RankedItem[] {
-  const items = new Map<string, RankedItem>();
-  for (const value of [...values].sort(scoreOrder)) {
-    if (!items.has(value.item.id)) items.set(value.item.id, value);
+  const selected = new Map<string, Item | NewsDevelopment>();
+  for (const candidate of candidates) {
+    if (!selected.has(candidate.id)) {
+      selected.set(candidate.id, candidate.value);
+    }
   }
-  return [...items.values()];
+  return [...selected.values()];
 }
 
 export function shortlist(
-  itemInput: readonly Item[],
+  candidateInput: readonly (Item | NewsDevelopment)[],
   scoreInput: readonly (ItemScore | NewsScore)[],
   preferenceInput: ShortlistPreferences,
   budgetInput: SectionBudgets,
 ): Shortlist {
-  const items = itemInput.map((item) => ItemSchema.parse(item));
+  const candidates = candidateInput.map((candidate) =>
+    "representativeItem" in candidate
+      ? NewsDevelopmentSchema.parse(candidate)
+      : ItemSchema.parse(candidate),
+  );
   const scores = scoreMap(scoreInput);
   const preferences = PreferencesSchema.parse(preferenceInput);
   const requestedBudgets = BudgetsSchema.parse(budgetInput);
@@ -267,41 +279,79 @@ export function shortlist(
     ]),
   );
   const exclusions: ShortlistExclusion[] = [];
-  const ranked: RankedItem[] = [];
+  const research: RankedResearch[] = [];
+  const news: RankedNews[] = [];
 
-  for (const item of items) {
-    const score = scores.get(item.id);
+  for (const candidate of candidates) {
+    const score = scores.get(candidate.id);
     if (score === undefined) {
-      exclusions.push({ itemId: item.id, reason: "missing_score" });
+      exclusions.push({ itemId: candidate.id, reason: "missing_score" });
       continue;
     }
-    if (unchangedFromPreviousEdition(item, previous)) {
+    if ("representativeItem" in candidate) {
+      if (!("publicImportance" in score)) {
+        throw new TypeError(
+          `News development ${candidate.id} requires a news score.`,
+        );
+      }
+      if (unchangedFromPreviousEdition(candidate, previous)) {
+        exclusions.push({
+          itemId: candidate.id,
+          reason: "unchanged_from_previous_edition",
+        });
+        continue;
+      }
+      if (score.total < (preferences.minimumNewsScore ?? 0)) {
+        exclusions.push({
+          itemId: candidate.id,
+          reason: "below_quality_threshold",
+        });
+        continue;
+      }
+      news.push({ development: candidate, score });
+      continue;
+    }
+    const item = candidate;
+    if (item.kind !== "paper" && item.kind !== "blog") {
+      throw new TypeError(
+        `News item ${item.id} must be clustered before shortlisting.`,
+      );
+    }
+    if ("publicImportance" in score) {
+      throw new TypeError(`Research item ${item.id} requires a research score.`);
+    }
+    if (
+      score.topicalFit <
+      preferences.researchQualityGates.minimumTopicalFit
+    ) {
       exclusions.push({
         itemId: item.id,
-        reason: "unchanged_from_previous_edition",
+        reason: "below_topical_fit_gate",
       });
       continue;
     }
-    const threshold =
-      item.kind === "paper" || item.kind === "blog"
-        ? (preferences.minimumResearchScore ?? 0)
-        : (preferences.minimumNewsScore ?? 0);
-    if (score.total < threshold) {
+    if (
+      score.technicalQuality <
+      preferences.researchQualityGates.minimumTechnicalQuality
+    ) {
+      exclusions.push({
+        itemId: item.id,
+        reason: "below_technical_quality_gate",
+      });
+      continue;
+    }
+    if (score.total < (preferences.minimumResearchScore ?? 0)) {
       exclusions.push({
         itemId: item.id,
         reason: "below_quality_threshold",
       });
       continue;
     }
-    ranked.push({ item, score });
+    research.push({ item, score });
   }
-  ranked.sort(scoreOrder);
+  research.sort(researchScoreOrder);
+  news.sort(newsScoreOrder);
 
-  const research = ranked.filter(
-    ({ item, score }) =>
-      (item.kind === "paper" || item.kind === "blog") &&
-      !("publicImportance" in score),
-  );
   const featuredCandidates = research.filter(
     ({ item }) => item.kind === "paper",
   );
@@ -317,22 +367,16 @@ export function shortlist(
     budgets.researchRadar,
   );
 
-  const news = ranked.filter(
-    ({ item, score }) =>
-      item.kind !== "paper" &&
-      item.kind !== "blog" &&
-      "publicImportance" in score,
-  );
-  const bySection = new Map<NewsSection, RankedItem[]>();
+  const bySection = new Map<NewsSection, RankedNews[]>();
   for (const candidate of news) {
-    const section = newsSection(candidate.item);
+    const section = candidate.development.primarySection;
     bySection.set(section, [...(bySection.get(section) ?? []), candidate]);
   }
   const limited = (
     section: NewsSection,
     maximum: number,
-  ): RankedItem[] =>
-    (bySection.get(section) ?? []).sort(scoreOrder).slice(0, maximum);
+  ): RankedNews[] =>
+    (bySection.get(section) ?? []).sort(newsScoreOrder).slice(0, maximum);
   const world = limited("world", budgets.world);
   const technology = limited("technology", budgets.technology);
   const aiPolicy = limited("ai_policy", budgets.aiPolicy);
@@ -340,37 +384,41 @@ export function shortlist(
     ...(bySection.get("dmv") ?? []),
     ...(bySection.get("baltimore") ?? []),
   ]
-    .sort(scoreOrder)
+    .sort(newsScoreOrder)
     .slice(0, budgets.dmvAndBaltimore);
   const dmv = local.filter(
-    ({ item }) => newsSection(item) === "dmv",
+    ({ development }) => development.primarySection === "dmv",
   );
   const baltimore = local.filter(
-    ({ item }) => newsSection(item) === "baltimore",
+    ({ development }) => development.primarySection === "baltimore",
   );
   const forecastSignals = limited(
     "forecast",
     budgets.forecastSignals,
   );
-  const morningBrief = uniqueRanked([
-    ...featured,
-    ...world,
-    ...technology,
-    ...aiPolicy,
-    ...local,
-    ...forecastSignals,
-  ]).slice(0, budgets.morningBrief);
+  const morningBrief = uniqueMorningBrief(
+    featured,
+    [
+      ...world,
+      ...technology,
+      ...aiPolicy,
+      ...local,
+      ...forecastSignals,
+    ],
+  ).slice(0, budgets.morningBrief);
 
   return {
-    morningBrief: morningBrief.map(({ item }) => item),
+    morningBrief,
     researchFeatured: featured.map(({ item }) => item),
     researchRadar: radar.map(({ item }) => item),
-    world: world.map(({ item }) => item),
-    technology: technology.map(({ item }) => item),
-    aiPolicy: aiPolicy.map(({ item }) => item),
-    dmv: dmv.map(({ item }) => item),
-    baltimore: baltimore.map(({ item }) => item),
-    forecastSignals: forecastSignals.map(({ item }) => item),
+    world: world.map(({ development }) => development),
+    technology: technology.map(({ development }) => development),
+    aiPolicy: aiPolicy.map(({ development }) => development),
+    dmv: dmv.map(({ development }) => development),
+    baltimore: baltimore.map(({ development }) => development),
+    forecastSignals: forecastSignals.map(
+      ({ development }) => development,
+    ),
     exclusions: exclusions.sort((left, right) =>
       left.itemId.localeCompare(right.itemId),
     ),

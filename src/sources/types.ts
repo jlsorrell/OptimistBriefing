@@ -2,6 +2,7 @@ import { z } from "zod";
 
 import {
   AccessLevelSchema,
+  EditionSectionSchema,
   ItemKindSchema,
   SourceRefSchema,
 } from "../contracts/editorial";
@@ -33,6 +34,7 @@ export const ResearchSourceRecordSchema = z.object({
   canonicalUrl: z.string().url(),
   role: SourceRefSchema.shape.role,
   enabled: z.boolean(),
+  sectionEligibility: z.array(EditionSectionSchema).optional(),
   restrictions: ResearchSourceRestrictionsSchema,
 });
 
@@ -67,6 +69,9 @@ export const RawResearchCandidateSchema = RawItemSchema.extend({
 export const RawNewsCandidateSchema = RawItemSchema.extend({
   kind: z.enum(["article", "document", "forecast"]),
   canCorroborateFacts: z.boolean(),
+  sectionEligibility: z.array(EditionSectionSchema).default([]),
+  namedEntities: z.array(z.string().min(1)).default([]),
+  primaryDocumentUrl: z.string().url().nullable().default(null),
 }).superRefine((candidate, context) => {
   if (
     candidate.canCorroborateFacts &&

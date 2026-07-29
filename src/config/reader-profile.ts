@@ -86,6 +86,10 @@ export const READER_PROFILE = deepFreeze({
     dmvAndBaltimore: 5,
     forecastSignals: 3,
   },
+  researchQualityGates: {
+    minimumTopicalFit: 0.5,
+    minimumTechnicalQuality: 0.5,
+  },
 });
 
 export type ReaderProfile = typeof READER_PROFILE;

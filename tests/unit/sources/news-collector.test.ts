@@ -599,7 +599,11 @@ describe("catalog-driven news collection", () => {
       metadata: {
         documentNumber: "2026-12345",
         documentType: "Notice",
+        primarySection: "ai_policy",
       },
+      sectionEligibility: ["ai_policy"],
+      primaryDocumentUrl:
+        "https://www.federalregister.gov/documents/2026/07/29/2026-12345/secure-evaluation-requirements",
     });
   });
 
@@ -620,6 +624,9 @@ describe("catalog-driven news collection", () => {
       expectedTitle: "Agencies publish new AI safety evaluation standards",
       expectedUrl:
         "https://apnews.com/article/ai-safety-evaluation-standards",
+      sectionEligibility: ["technology"] as const,
+      expectedPrimarySection: "technology",
+      expectedEntity: "AI",
     },
     {
       id: "baltimore-banner",
@@ -638,6 +645,9 @@ describe("catalog-driven news collection", () => {
       expectedTitle: "Baltimore expands secure-compute pilot",
       expectedUrl:
         "https://www.thebaltimorebanner.com/community/local-news/city-council-secure-compute-pilot/",
+      sectionEligibility: ["dmv", "baltimore"] as const,
+      expectedPrimarySection: "baltimore",
+      expectedEntity: "Baltimore",
     },
   ])(
     "discovers metadata-only individual candidates from $name listing",
@@ -659,6 +669,7 @@ describe("catalog-driven news collection", () => {
             canonicalUrl: listingCase.canonicalUrl,
             role: "reporting",
             discoveryMechanism: "page",
+            sectionEligibility: listingCase.sectionEligibility,
             restrictions: {
               bodyRetrieval: "forbidden",
               paywall: "none",
@@ -698,7 +709,12 @@ describe("catalog-driven news collection", () => {
             discoveryMechanism: "page",
             listingUrl: listingCase.pageUrl,
             extractionLevel: "metadata-only",
+            primarySection: listingCase.expectedPrimarySection,
           }),
+          sectionEligibility: listingCase.sectionEligibility,
+          namedEntities: expect.arrayContaining([
+            listingCase.expectedEntity,
+          ]),
         }),
       ]);
       expect(items.some((item) => item.originalUrl === listingCase.pageUrl))
@@ -798,6 +814,7 @@ describe("catalog-driven news collection", () => {
           canonicalUrl: "https://dc.gov/",
           role: "primary",
           discoveryMechanism: "page",
+          sectionEligibility: ["dmv"],
           restrictions: {
             bodyRetrieval: "permitted",
             paywall: "none",
@@ -826,6 +843,14 @@ describe("catalog-driven news collection", () => {
     ]);
     expect(items.every((item) => item.accessLevel === "metadata")).toBe(true);
     expect(items.every((item) => item.content === null)).toBe(true);
+    expect(
+      items.every(
+        (item) =>
+          item.metadata.primarySection === "dmv" &&
+          item.sectionEligibility.includes("dmv") &&
+          item.namedEntities.includes("Washington, D.C."),
+      ),
+    ).toBe(true);
     expect(fetch).toHaveBeenCalledTimes(2);
   });
 });

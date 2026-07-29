@@ -15,6 +15,7 @@ import {
   SourceFetchError,
   SourceHttpClient,
 } from "./http-client";
+import { deriveNewsSignals } from "./news-signals";
 import { RssAdapter, type ConfiguredFeed } from "./rss";
 import {
   assertSafeOutboundUrl,
@@ -316,9 +317,29 @@ class DirectPageAdapter implements NewsSourceAdapter {
               }
             }
           }
+          const kind =
+            this.source.role === "primary" ? "document" : "article";
+          const metadata = {
+            extractionLevel: extraction.extractionLevel,
+            contentUse: restriction(
+              this.source,
+              "contentUse",
+              "metadata-only",
+            ),
+            paywall: restriction(
+              this.source,
+              "paywall",
+              "unknown",
+            ),
+            retention:
+              extraction.text === null
+                ? "metadata-only"
+                : "ephemeral-only",
+            discoveryMechanism: "page",
+            listingUrl: response.finalUrl,
+          };
           return RawNewsCandidateSchema.parse({
-            kind:
-              this.source.role === "primary" ? "document" : "article",
+            kind,
             sourceId: this.source.id,
             sourceName: this.source.canonicalName,
             sourceRole: this.source.role,
@@ -336,25 +357,14 @@ class DirectPageAdapter implements NewsSourceAdapter {
             content: extraction.text,
             relatedPaperIds: [],
             canCorroborateFacts: canCorroborateFacts(this.source.role),
-            metadata: {
-              extractionLevel: extraction.extractionLevel,
-              contentUse: restriction(
-                this.source,
-                "contentUse",
-                "metadata-only",
-              ),
-              paywall: restriction(
-                this.source,
-                "paywall",
-                "unknown",
-              ),
-              retention:
-                extraction.text === null
-                  ? "metadata-only"
-                  : "ephemeral-only",
-              discoveryMechanism: "page",
-              listingUrl: response.finalUrl,
-            },
+            ...deriveNewsSignals({
+              kind,
+              title: item.title,
+              originalUrl,
+              sectionEligibility:
+                this.source.sectionEligibility ?? [],
+              metadata,
+            }),
           });
         }),
       )
@@ -423,6 +433,11 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
       } catch {
         return [];
       }
+      const metadata = {
+        documentNumber: item.document_number,
+        documentType: item.type ?? null,
+        discoveryMechanism: "api",
+      };
       return [
         RawNewsCandidateSchema.parse({
           kind: "document",
@@ -445,11 +460,14 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
           content: null,
           relatedPaperIds: [],
           canCorroborateFacts: canCorroborateFacts(this.source.role),
-          metadata: {
-            documentNumber: item.document_number,
-            documentType: item.type ?? null,
-            discoveryMechanism: "api",
-          },
+          ...deriveNewsSignals({
+            kind: "document",
+            title: item.title,
+            originalUrl,
+            sectionEligibility:
+              this.source.sectionEligibility ?? [],
+            metadata,
+          }),
         }),
       ];
     });
@@ -530,19 +548,28 @@ export class NewsCollector {
           }
         }
 
+        const kind =
+          source.role === "primary" ? "document" : "article";
+        const metadata = {
+          ...item.metadata,
+          extractionLevel: extraction.extractionLevel,
+          contentUse,
+          paywall,
+          retention: "ephemeral-only",
+        };
         return RawNewsCandidateSchema.parse({
           ...item,
-          kind: source.role === "primary" ? "document" : "article",
+          kind,
           accessLevel: extractionAccessLevel(extraction),
           content: extraction.text,
           canCorroborateFacts: canCorroborateFacts(source.role),
-          metadata: {
-            ...item.metadata,
-            extractionLevel: extraction.extractionLevel,
-            contentUse,
-            paywall,
-            retention: "ephemeral-only",
-          },
+          ...deriveNewsSignals({
+            kind,
+            title: item.title,
+            originalUrl: item.originalUrl,
+            sectionEligibility: source.sectionEligibility ?? [],
+            metadata,
+          }),
         });
       }),
     );
