@@ -214,6 +214,7 @@ function repairPacket(
 export async function summarizeItem(
   packet: SourcePacket,
   provider: ModelProvider,
+  options: { maxOutputTokens?: number } = {},
 ): Promise<StructuredSummary> {
   const parsedPacket = SourcePacketSchema.parse(packet);
   const sourcePacket = serializeSourcePacket(parsedPacket);
@@ -223,7 +224,7 @@ export async function summarizeItem(
     jsonSchema: STRUCTURED_SUMMARY_JSON_SCHEMA,
     system: GROUNDING_SYSTEM_PROMPT,
     sourcePacket,
-    maxOutputTokens: 1_800,
+    maxOutputTokens: options.maxOutputTokens ?? 1_800,
   };
   const initial = await provider.generateObject(request);
   const initialValidation = validateSummary(initial, parsedPacket);

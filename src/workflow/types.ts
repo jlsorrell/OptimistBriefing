@@ -21,6 +21,7 @@ import {
   RawNewsCandidateSchema,
   RawResearchCandidateSchema,
 } from "../sources/types";
+import type { BudgetPolicy } from "../models/cost-ledger";
 
 export const PIPELINE_STEPS = [
   "collect",
@@ -94,6 +95,11 @@ export type PipelineRun = {
   failureCode?: string | null;
 };
 
+export type PipelineCheckpointExecutor = <T>(
+  step: PipelineStep,
+  execute: () => Promise<T>,
+) => Promise<T>;
+
 export type CheckpointArtifact<T = unknown> = {
   output: T;
   attempts: number;
@@ -162,6 +168,8 @@ export type PipelineContext = {
   ) => Promise<readonly ValidatedSummaryCandidate[]>;
   estimateCostUsd?: (step: PipelineStep, output: unknown) => number;
   sourceFailures?: readonly string[];
+  checkpointExecutor?: PipelineCheckpointExecutor;
+  budgetPolicy?: BudgetPolicy;
 };
 
 export type CompositionResult = {

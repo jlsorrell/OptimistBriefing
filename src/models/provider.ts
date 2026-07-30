@@ -15,9 +15,11 @@ export interface ModelProvider {
 }
 
 export interface ModelUsage {
+  provider: "openai";
   operation: "embedding" | "generation";
   model: string;
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
+  embeddingCount: number;
 }

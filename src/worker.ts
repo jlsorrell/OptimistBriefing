@@ -4,6 +4,9 @@ import { internalErrorResponse } from "./api/errors";
 import { D1BriefingRepository } from "./db/d1-repository";
 import { createD1WorkflowLauncher } from "./workflow/run-editorial-pipeline";
 import { OpenAIModelProvider } from "./models/openai-provider";
+import { shouldRunAt } from "./workflow/schedule";
+import type { RunParams } from "./workflow/daily-briefing-workflow";
+export { DailyBriefingWorkflow } from "./workflow/daily-briefing-workflow";
 
 export interface Env {
   DB: D1Database;
@@ -14,6 +17,11 @@ export interface Env {
   SUMMARY_MODEL: string;
   ASSESSMENT_MODEL: string;
   EMBEDDING_MODEL: string;
+  MONTHLY_BUDGET_USD: string;
+  SUMMARY_UNIT_PRICE_USD: string;
+  ASSESSMENT_UNIT_PRICE_USD: string;
+  EMBEDDING_UNIT_PRICE_USD: string;
+  DAILY_BRIEFING: Workflow<RunParams>;
 }
 
 export default {
@@ -44,6 +52,41 @@ export default {
     } catch {
       return internalErrorResponse();
     }
+  },
+  async scheduled(_controller, env: Env): Promise<void> {
+    const now = new Date();
+    const initial = shouldRunAt(now, "America/New_York", { status: "missing" });
+    if (!initial.run) return;
+    const repository = new D1BriefingRepository(env.DB);
+    const run = (await repository.listWorkflowRuns()).find(
+      (candidate) => candidate.editionDate === initial.editionDate,
+    ) ?? null;
+    const decision = shouldRunAt(now, "America/New_York", {
+      status: run?.status ?? "missing",
+    });
+    if (!decision.run) return;
+    if (run?.retryable) {
+      const instance = await env.DAILY_BRIEFING.get(initial.editionDate);
+      const state = await instance.status();
+      if (state.status === "unknown") {
+        await env.DAILY_BRIEFING.create({
+          id: initial.editionDate,
+          params: { editionDate: initial.editionDate, runId: run.id },
+          retention: { successRetention: "90 days", errorRetention: "90 days" },
+        });
+      } else if (state.status === "paused") {
+        await instance.resume();
+      } else if (state.status !== "running" && state.status !== "queued") {
+        await instance.restart();
+      }
+      return;
+    }
+    if (run !== null) return;
+    await env.DAILY_BRIEFING.create({
+      id: initial.editionDate,
+      params: { editionDate: initial.editionDate, runId: initial.editionDate },
+      retention: { successRetention: "90 days", errorRetention: "90 days" },
+    });
   },
 } satisfies ExportedHandler<Env>;
 

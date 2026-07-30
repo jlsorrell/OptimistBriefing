@@ -161,6 +161,16 @@ export type WorkflowRunDetail = WorkflowRun & {
   estimatedMonthlyCostUsd: number;
 };
 
+export type ModelUsageRecord = {
+  provider: string;
+  model: string;
+  inputTokens: number;
+  outputTokens: number;
+  embeddingCount: number;
+  unitPriceUsd: number;
+  estimatedCostUsd: number;
+};
+
 export class RepositoryValidationError extends Error {
   readonly code = "REPOSITORY_VALIDATION_FAILED";
 
@@ -597,5 +607,8 @@ export interface BriefingRepository {
   listWorkflowRuns(): Promise<readonly WorkflowRun[]>;
   getWorkflowRun(runId: string): Promise<WorkflowRun | null>;
   getWorkflowRunDetail(runId: string): Promise<WorkflowRunDetail | null>;
+  recordModelUsage(runId: string, usage: ModelUsageRecord): Promise<void>;
+  listMonthlyModelUsage(monthStart: string): Promise<readonly ModelUsageRecord[]>;
+  recordRetentionAudit(now: string, report: RetentionReport): Promise<void>;
   pruneExpiredData(now: string): Promise<RetentionReport>;
 }

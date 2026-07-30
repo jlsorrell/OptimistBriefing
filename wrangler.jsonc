@@ -8,5 +8,15 @@
       "database_id": "00000000-0000-0000-0000-000000000000",
       "migrations_dir": "src/db/migrations"
     }
-  ]
+  ],
+  "workflows": [
+    {
+      "binding": "DAILY_BRIEFING",
+      "name": "daily-briefing",
+      "class_name": "DailyBriefingWorkflow"
+    }
+  ],
+  "triggers": {
+    "crons": ["30 8 * * *", "30 9 * * *", "30 10 * * *"]
+  }
 }

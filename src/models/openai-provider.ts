@@ -15,7 +15,7 @@ export interface OpenAIModelProviderOptions {
   generationModel: string;
   embeddingModel: string;
   maxTransportRetries?: number;
-  onUsage?: (usage: ModelUsage) => void;
+  onUsage?: (usage: ModelUsage) => void | Promise<void>;
   fetch?: typeof fetch;
   sleep?: (milliseconds: number) => Promise<void>;
 }
@@ -30,7 +30,7 @@ export class OpenAIModelProvider implements ModelProvider {
   readonly #generationModel: string;
   readonly #embeddingModel: string;
   readonly #maxTransportRetries: number;
-  readonly #onUsage: ((usage: ModelUsage) => void) | undefined;
+  readonly #onUsage: ((usage: ModelUsage) => void | Promise<void>) | undefined;
   readonly #sleep: (milliseconds: number) => Promise<void>;
 
   constructor(options: OpenAIModelProviderOptions) {
@@ -71,12 +71,14 @@ export class OpenAIModelProvider implements ModelProvider {
         encoding_format: "float",
       }),
     );
-    this.#recordUsage({
+    await this.#recordUsage({
+      provider: "openai",
       operation: "embedding",
-      model: response.model,
+      model: this.#embeddingModel,
       inputTokens: response.usage.prompt_tokens,
       outputTokens: 0,
       totalTokens: response.usage.total_tokens,
+      embeddingCount: texts.length,
     });
     return [...response.data]
       .sort((left, right) => left.index - right.index)
@@ -105,12 +107,14 @@ export class OpenAIModelProvider implements ModelProvider {
     );
     const usage = response.usage;
     if (usage !== undefined) {
-      this.#recordUsage({
+      await this.#recordUsage({
+        provider: "openai",
         operation: "generation",
-        model: response.model,
+        model: this.#generationModel,
         inputTokens: usage.input_tokens,
         outputTokens: usage.output_tokens,
         totalTokens: usage.total_tokens,
+        embeddingCount: 0,
       });
     }
     try {
@@ -170,9 +174,9 @@ export class OpenAIModelProvider implements ModelProvider {
     return Math.min(MAX_RETRY_DELAY_MS, 250 * 2 ** attempt);
   }
 
-  #recordUsage(usage: ModelUsage): void {
+  async #recordUsage(usage: ModelUsage): Promise<void> {
     const record = Object.freeze({ ...usage });
     this.usage.push(record);
-    this.#onUsage?.(record);
+    await this.#onUsage?.(record);
   }
 }

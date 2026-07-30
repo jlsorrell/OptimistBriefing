@@ -71,6 +71,7 @@ import {
   type PipelineStatus,
   type WorkflowItemPayload,
 } from "./types";
+import type { BudgetPolicy } from "../models/cost-ledger";
 
 export { PIPELINE_STEPS } from "./types";
 export type { PipelineContext, PipelineRun, PipelineStore } from "./types";
@@ -319,7 +320,7 @@ function parseCheckpointArtifact(
   };
 }
 
-class D1PipelineStore implements PipelineStore {
+export class D1PipelineStore implements PipelineStore {
   readonly repository: D1BriefingRepository;
 
   constructor(private readonly db: D1Database) {
@@ -527,6 +528,8 @@ export type ProductionPipelineContextOptions = {
   collectCandidates: () => Promise<readonly CollectedCandidate[]>;
   persistItems?: (items: readonly Item[]) => Promise<void>;
   sourceFailures?: readonly string[];
+  checkpointExecutor?: PipelineContext["checkpointExecutor"];
+  budgetPolicy?: BudgetPolicy;
 };
 
 function workflowPayload(item: Item): WorkflowItemPayload {
@@ -902,6 +905,11 @@ export function createProductionPipelineContext(
       };
       const budgets: SectionBudgets = {
         ...READER_PROFILE.sectionBudgets,
+        researchRadar: options.budgetPolicy?.state === "hard_stop"
+          ? 0
+          : options.budgetPolicy?.state === "degraded"
+            ? Math.min(1, READER_PROFILE.sectionBudgets.researchRadar)
+            : READER_PROFILE.sectionBudgets.researchRadar,
       };
       const selected = selectShortlist(
         candidates,
@@ -935,6 +943,9 @@ export function createProductionPipelineContext(
             summary: await summarizeItem(
               packet(item),
               options.providers.summary,
+              options.budgetPolicy === undefined
+                ? {}
+                : { maxOutputTokens: options.budgetPolicy.featuredSummaryTokens },
             ),
           };
         } catch (error) {
@@ -975,6 +986,12 @@ export function createProductionPipelineContext(
     ...(options.sourceFailures === undefined
       ? {}
       : { sourceFailures: options.sourceFailures }),
+    ...(options.checkpointExecutor === undefined
+      ? {}
+      : { checkpointExecutor: options.checkpointExecutor }),
+    ...(options.budgetPolicy === undefined
+      ? {}
+      : { budgetPolicy: options.budgetPolicy }),
   };
 }
 
@@ -992,11 +1009,12 @@ function catalogSourceInput(
   };
 }
 
-function configuredPipelineContext(
+export function createD1ProductionPipelineContext(
   store: D1PipelineStore,
   editionDate: string,
   runId: string,
   providers: PipelineProviders,
+  options: Pick<ProductionPipelineContextOptions, "checkpointExecutor" | "budgetPolicy"> = {},
 ): PipelineContext {
   const now = () => new Date().toISOString();
   return createProductionPipelineContext({
@@ -1005,6 +1023,7 @@ function configuredPipelineContext(
     store,
     now,
     providers,
+    ...options,
     persistItems: async (items) => store.repository.upsertItems(items),
     collectCandidates: async () => {
       const sources = await store.repository.listSources();
@@ -1051,7 +1070,7 @@ export function createD1WorkflowLauncher(db: D1Database, providers: PipelineProv
     async start(input) {
       const runId = crypto.randomUUID();
       try {
-        await runEditorialPipeline(configuredPipelineContext(store, input.editionDate, runId, providers));
+        await runEditorialPipeline(createD1ProductionPipelineContext(store, input.editionDate, runId, providers));
       } catch (error) {
         await store.audit(
           error instanceof WorkflowRunAlreadyExistsError ? null : runId,
@@ -1074,7 +1093,7 @@ export function createD1WorkflowLauncher(db: D1Database, providers: PipelineProv
         throw new WorkflowResumeUnavailableError();
       }
       await store.audit(run.id, "manual_run_resumed", input.actorEmail);
-      await runEditorialPipeline(configuredPipelineContext(store, run.editionDate, run.id, providers));
+      await runEditorialPipeline(createD1ProductionPipelineContext(store, run.editionDate, run.id, providers));
     },
   };
 }
@@ -1129,36 +1148,41 @@ async function checkpoint<T>(
     return outputSchema.parse(artifact.output);
   }
 
-  const attempt = await context.store.beginAttempt(context.runId, step);
-  const startedAt = Date.parse(context.now());
-  let output: T;
-  try {
-    output = outputSchema.parse(await execute());
-    await beforeSave?.(output);
-  } catch (error) {
-    await context.store.failAttempt(context.runId, step, attempt, error instanceof Error ? error.message : "PIPELINE_FAILED");
-    throw error;
-  }
-  const estimatedCostUsd = context.estimateCostUsd?.(step, output) ?? 0;
-  const artifact: CheckpointArtifact<T> = {
-    output,
-    attempts: attempt,
-    durationMs: Math.max(0, Date.parse(context.now()) - startedAt),
-    itemCount: countOutput(output),
-    estimatedCostUsd,
+  const executeCheckpoint = async (): Promise<T> => {
+    const attempt = await context.store.beginAttempt(context.runId, step);
+    const startedAt = Date.parse(context.now());
+    let output: T;
+    try {
+      output = outputSchema.parse(await execute());
+      await beforeSave?.(output);
+    } catch (error) {
+      await context.store.failAttempt(context.runId, step, attempt, error instanceof Error ? error.message : "PIPELINE_FAILED");
+      throw error;
+    }
+    const estimatedCostUsd = context.estimateCostUsd?.(step, output) ?? 0;
+    const artifact: CheckpointArtifact<T> = {
+      output,
+      attempts: attempt,
+      durationMs: Math.max(0, Date.parse(context.now()) - startedAt),
+      itemCount: countOutput(output),
+      estimatedCostUsd,
+    };
+    await context.store.saveCheckpoint(context.runId, step, artifact);
+    const storedRun = await context.store.getRun(context.runId) ?? run;
+    await context.store.saveRun({
+      ...storedRun,
+      status: "running",
+      currentStep: step,
+      retryable: false,
+      estimatedCostUsd: storedRun.estimatedCostUsd + estimatedCostUsd,
+      updatedAt: context.now(),
+      failureCode: null,
+    });
+    return output;
   };
-  await context.store.saveCheckpoint(context.runId, step, artifact);
-  const storedRun = await context.store.getRun(context.runId) ?? run;
-  await context.store.saveRun({
-    ...storedRun,
-    status: "running",
-    currentStep: step,
-    retryable: false,
-    estimatedCostUsd: storedRun.estimatedCostUsd + estimatedCostUsd,
-    updatedAt: context.now(),
-    failureCode: null,
-  });
-  return output;
+  return context.checkpointExecutor === undefined
+    ? executeCheckpoint()
+    : context.checkpointExecutor(step, executeCheckpoint);
 }
 
 export async function runEditorialPipeline(

@@ -48,6 +48,7 @@ import {
   type FeedbackAdjustment,
   type PreferenceUpdateInput,
   type ReaderPreferences,
+  type ModelUsageRecord,
   type SourceRecord,
   type UpdateSourceInput,
   type WorkflowRun,
@@ -60,6 +61,15 @@ import {
 import { PIPELINE_STEPS } from "../workflow/types";
 
 const DateTimeSchema = z.string().datetime();
+const ModelUsageRecordSchema = z.object({
+  provider: z.string().min(1).max(100),
+  model: z.string().min(1).max(200),
+  inputTokens: z.number().int().nonnegative().max(10_000_000),
+  outputTokens: z.number().int().nonnegative().max(10_000_000),
+  embeddingCount: z.number().int().nonnegative().max(10_000_000),
+  unitPriceUsd: z.number().finite().nonnegative().max(1_000_000),
+  estimatedCostUsd: z.number().finite().nonnegative().max(1_000_000),
+}).strict();
 const EditionDateSchema = EditionSchema.shape.editionDate;
 const NonemptyIdSchema = z.string().min(1);
 const PageInputSchema = z.object({
@@ -1834,6 +1844,8 @@ export class D1BriefingRepository implements BriefingRepository {
       now,
       "Invalid retention timestamp",
     );
+    const runCutoff = new Date(Date.parse(validNow) - 90 * 24 * 60 * 60 * 1_000).toISOString();
+    const diagnosticCutoff = new Date(Date.parse(validNow) - 30 * 24 * 60 * 60 * 1_000).toISOString();
     const [candidateCount, runCount, eventCount] = await this.db.batch([
       this.db
         .prepare(
@@ -1845,6 +1857,12 @@ export class D1BriefingRepository implements BriefingRepository {
               SELECT 1
               FROM edition_entries ee
               WHERE ee.item_id = items.id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM feedback f WHERE f.item_id = items.id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM summaries s WHERE s.item_id = items.id
             )`,
         )
         .bind(validNow),
@@ -1852,16 +1870,16 @@ export class D1BriefingRepository implements BriefingRepository {
         .prepare(
           `SELECT COUNT(*) AS count
           FROM workflow_runs
-          WHERE expires_at IS NOT NULL AND expires_at <= ?`,
+          WHERE created_at <= ?`,
         )
-        .bind(validNow),
+        .bind(runCutoff),
       this.db
         .prepare(
           `SELECT COUNT(*) AS count
           FROM audit_events
-          WHERE expires_at IS NOT NULL AND expires_at <= ?`,
+          WHERE created_at <= ?`,
         )
-        .bind(validNow),
+        .bind(diagnosticCutoff),
       this.db
         .prepare(
           `DELETE FROM items
@@ -1871,21 +1889,27 @@ export class D1BriefingRepository implements BriefingRepository {
               SELECT 1
               FROM edition_entries ee
               WHERE ee.item_id = items.id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM feedback f WHERE f.item_id = items.id
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM summaries s WHERE s.item_id = items.id
             )`,
         )
         .bind(validNow),
       this.db
         .prepare(
           `DELETE FROM workflow_runs
-          WHERE expires_at IS NOT NULL AND expires_at <= ?`,
+          WHERE created_at <= ?`,
         )
-        .bind(validNow),
+        .bind(runCutoff),
       this.db
         .prepare(
           `DELETE FROM audit_events
-          WHERE expires_at IS NOT NULL AND expires_at <= ?`,
+          WHERE created_at <= ?`,
         )
-        .bind(validNow),
+        .bind(diagnosticCutoff),
     ]);
     return validated(
       RetentionReportSchema,
@@ -1911,6 +1935,51 @@ export class D1BriefingRepository implements BriefingRepository {
       },
       "Invalid retention report",
     );
+  }
+
+  async recordModelUsage(runId: string, usage: ModelUsageRecord): Promise<void> {
+    const validRunId = validated(NonemptyIdSchema, runId, "Invalid model usage run ID");
+    const validUsage = validated(ModelUsageRecordSchema, usage, "Invalid model usage");
+    const createdAt = new Date().toISOString();
+    const expiresAt = new Date(Date.parse(createdAt) + 30 * 24 * 60 * 60 * 1_000).toISOString();
+    await this.db.batch([
+      this.db.prepare(
+        `INSERT INTO audit_events (id, run_id, event_type, event_json, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        crypto.randomUUID(), validRunId, "model_usage", JSON.stringify(validUsage), createdAt, expiresAt,
+      ),
+      this.db.prepare(
+        `UPDATE workflow_runs
+         SET estimated_cost_usd = estimated_cost_usd + ?, updated_at = ?
+         WHERE id = ?`,
+      ).bind(validUsage.estimatedCostUsd, createdAt, validRunId),
+    ]);
+  }
+
+  async listMonthlyModelUsage(monthStart: string): Promise<readonly ModelUsageRecord[]> {
+    const validMonthStart = validated(DateTimeSchema, monthStart, "Invalid model usage month start");
+    const records = await this.db.prepare(
+      `SELECT event_json FROM audit_events
+       WHERE event_type = ? AND created_at >= ? ORDER BY created_at, id`,
+    ).bind("model_usage", validMonthStart).all<{ event_json: string }>();
+    return records.results.map((record) => validated(
+      ModelUsageRecordSchema,
+      parsedJson(record.event_json, "Invalid model usage record"),
+      "Invalid model usage record",
+    ));
+  }
+
+  async recordRetentionAudit(now: string, report: RetentionReport): Promise<void> {
+    const createdAt = validated(DateTimeSchema, now, "Invalid retention audit timestamp");
+    const validReport = validated(RetentionReportSchema, report, "Invalid retention audit report");
+    const expiresAt = new Date(Date.parse(createdAt) + 30 * 24 * 60 * 60 * 1_000).toISOString();
+    await this.db.prepare(
+      `INSERT INTO audit_events (id, run_id, event_type, event_json, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      crypto.randomUUID(), null, "retention_pruned", JSON.stringify(validReport), createdAt, expiresAt,
+    ).run();
   }
 
   private async sourceById(id: string): Promise<SourceRecord | null> {

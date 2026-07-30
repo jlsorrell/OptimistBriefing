@@ -654,11 +654,13 @@ describe("OpenAIModelProvider", () => {
     expect(waits).toEqual([2_000]);
     expect(usage).toEqual([
       {
+        provider: "openai",
         operation: "generation",
         model: "test-generation-model",
         inputTokens: 10,
         outputTokens: 4,
         totalTokens: 14,
+        embeddingCount: 0,
       },
     ]);
   });

@@ -792,6 +792,33 @@ describe("D1BriefingRepository", () => {
     expect(persisted.results).toEqual([{ id: "retained" }]);
   });
 
+  it("preserves expired saved and summarized items and records a retention audit", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const saved = fixtureItem("saved-retention", {
+      expiresAt: "2026-07-28T00:00:00.000Z",
+    });
+    const summarized = fixtureItem("summary-retention", {
+      expiresAt: "2026-07-28T00:00:00.000Z",
+    });
+    const discarded = fixtureItem("discard-retention", {
+      expiresAt: "2026-07-28T00:00:00.000Z",
+    });
+    await repo.upsertItems([saved, summarized, discarded]);
+    await repo.recordFeedback({ itemId: saved.id, action: "save", reason: null });
+    await repo.saveSummary(summarized.id, fixtureSummary());
+
+    const report = await repo.pruneExpiredData("2026-07-29T10:00:00.000Z");
+    await repo.recordRetentionAudit("2026-07-29T10:00:00.000Z", report);
+    expect(report.deletedUnselectedCandidates).toBe(1);
+    expect((await env.DB.prepare("SELECT id FROM items ORDER BY id").all<{ id: string }>()).results)
+      .toEqual([{ id: saved.id }, { id: summarized.id }]);
+    expect(await env.DB.prepare(
+      "SELECT event_json FROM audit_events WHERE event_type = ?",
+    ).bind("retention_pruned").first<{ event_json: string }>()).toEqual({
+      event_json: JSON.stringify(report),
+    });
+  });
+
   it("persists item scores and summaries and searches the archive through FTS", async () => {
     const repo = new D1BriefingRepository(env.DB);
     const item = fixtureItem("searchable");

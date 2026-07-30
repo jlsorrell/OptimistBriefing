@@ -456,6 +456,21 @@ describe("manual editorial run", () => {
     );
   });
 
+  it("delegates every durable checkpoint through an optional executor while the manual path remains direct", async () => {
+    const delegated: string[] = [];
+    const context = fixturePipelineContext({
+      checkpointExecutor: async (checkpoint, execute) => {
+        delegated.push(checkpoint);
+        return execute();
+      },
+    });
+
+    await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+      status: "published",
+    });
+    expect(delegated).toEqual(PIPELINE_STEPS);
+  });
+
   it("publishes a source-partial edition only when research, nonlocal news, and DMV coverage remain", async () => {
     const context = fixturePipelineContext({
       runId: "run-partial",
