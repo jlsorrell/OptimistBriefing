@@ -15,6 +15,7 @@ Every factual claim must cite one or more supplied source IDs.
 State uncertainty and disagreement.
 Do not imply full-paper access when access_level is abstract or metadata.
 Copy concise supported wording exactly from cited source titles or excerpts for every factual claim and prominent field.
+Copy uncertainty exactly from cited source titles or excerpts.
 Return only data matching the supplied JSON schema.`;
 
 const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
@@ -48,7 +49,12 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
       description:
         "Copy concise supported wording exactly from a cited source excerpt.",
     },
-    uncertainty: { type: "string", minLength: 1 },
+    uncertainty: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Copy uncertainty exactly from a cited source title or excerpt.",
+    },
     claims: {
       type: "array",
       minItems: 1,
@@ -83,7 +89,12 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
     provenance: {
       type: "object",
       additionalProperties: false,
-      required: ["title", "oneSentence", "whyItMatters"],
+      required: [
+        "title",
+        "oneSentence",
+        "whyItMatters",
+        "uncertainty",
+      ],
       properties: {
         title: {
           type: "object",
@@ -145,6 +156,29 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
               type: "string",
               minLength: 1,
               maxLength: 800,
+            },
+          },
+        },
+        uncertainty: {
+          type: "object",
+          additionalProperties: false,
+          required: ["sourceIds", "evidenceExcerpt"],
+          properties: {
+            sourceIds: {
+              type: "array",
+              minItems: 1,
+              items: {
+                type: "string",
+                minLength: 1,
+                maxLength: 200,
+              },
+            },
+            evidenceExcerpt: {
+              type: "string",
+              minLength: 1,
+              maxLength: 800,
+              description:
+                "Provide non-whitespace evidence copied from the cited source.",
             },
           },
         },

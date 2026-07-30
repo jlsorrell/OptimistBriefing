@@ -48,6 +48,7 @@ function summaryFixture(
       title: { sourceIds: string[]; evidenceExcerpt: string };
       oneSentence: { sourceIds: string[]; evidenceExcerpt: string };
       whyItMatters: { sourceIds: string[]; evidenceExcerpt: string };
+      uncertainty: { sourceIds: string[]; evidenceExcerpt: string };
     };
   } = {},
 ) {
@@ -78,6 +79,11 @@ function summaryFixture(
         sourceIds: ["source-1"],
         evidenceExcerpt:
           "The result may improve an important outcome.",
+      },
+      uncertainty: {
+        sourceIds: ["source-1"],
+        evidenceExcerpt:
+          "The durability of the result remains uncertain.",
       },
     },
     ...overrides,
@@ -436,6 +442,11 @@ describe("validateSummary", () => {
         evidenceExcerpt:
           "The result may improve an important outcome.",
       },
+      uncertainty: {
+        sourceIds: ["report"],
+        evidenceExcerpt:
+          "The durability of the result remains uncertain.",
+      },
     };
     const result = validateSummary(
       summaryFixture({
@@ -501,6 +512,65 @@ describe("validateSummary", () => {
       expect(result.errors).toContain(`UNGROUNDED_PROSE:${field}`);
     },
   );
+
+  it("requires generation-only provenance for uncertainty", () => {
+    const fixture = summaryFixture();
+    const result = validateSummary(
+      {
+        ...fixture,
+        provenance: {
+          title: fixture.provenance.title,
+          oneSentence: fixture.provenance.oneSentence,
+          whyItMatters: fixture.provenance.whyItMatters,
+        },
+      },
+      sourcePacketFixture(),
+    );
+
+    expect(result.errors).toContain(
+      "SCHEMA_INVALID:provenance.uncertainty",
+    );
+  });
+
+  it("rejects unsupported uncertainty despite cited provenance", () => {
+    const result = validateSummary(
+      summaryFixture({
+        uncertainty: "The result will remain durable for a decade.",
+        provenance: {
+          ...summaryFixture().provenance,
+          uncertainty: {
+            sourceIds: ["source-1"],
+            evidenceExcerpt:
+              "The durability of the result remains uncertain.",
+          },
+        },
+      }),
+      sourcePacketFixture(),
+    );
+
+    expect(result.errors).toContain(
+      "UNGROUNDED_PROSE:uncertainty",
+    );
+  });
+
+  it("rejects whitespace-only prominent provenance evidence", () => {
+    const result = validateSummary(
+      summaryFixture({
+        provenance: {
+          ...summaryFixture().provenance,
+          title: {
+            sourceIds: ["source-1"],
+            evidenceExcerpt: " \t ",
+          },
+        },
+      }),
+      sourcePacketFixture(),
+    );
+
+    expect(result.errors).toContain(
+      "SCHEMA_INVALID:provenance.title.evidenceExcerpt",
+    );
+  });
 
   it("requires each evidence excerpt to occur in its cited source", () => {
     const result = validateSummary(
@@ -769,6 +839,49 @@ describe("SourcePacketSchema", () => {
       },
     ],
     [
+      "camel-case session ID query",
+      {
+        ...source,
+        url: "https://example.com/report?sessionId=opaque-value",
+      },
+    ],
+    [
+      "camel-case JWT token query",
+      {
+        ...source,
+        url: "https://example.com/report?jwtToken=opaque-value",
+      },
+    ],
+    [
+      "compact access token query",
+      {
+        ...source,
+        url: "https://example.com/report?accessToken=opaque-value",
+      },
+    ],
+    [
+      "compact ID token query",
+      {
+        ...source,
+        url: "https://example.com/report?idToken=opaque-value",
+      },
+    ],
+    [
+      "compact API key query",
+      {
+        ...source,
+        url: "https://example.com/report?apiKey=opaque-value",
+      },
+    ],
+    [
+      "authorization token query",
+      {
+        ...source,
+        url:
+          "https://example.com/report?authorizationToken=opaque-value",
+      },
+    ],
+    [
       "credential-bearing query value",
       {
         ...source,
@@ -830,7 +943,8 @@ describe("SourcePacketSchema", () => {
         sources: [
           {
             ...source,
-            url: "https://example.com/report?page=2&lang=en",
+            url:
+              "https://example.com/report?page=2&lang=en&monkey=banana&sessionized=false",
           },
         ],
       }).success,

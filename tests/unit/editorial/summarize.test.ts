@@ -79,6 +79,11 @@ function generatedSummary(
         evidenceExcerpt:
           "The result may improve an important outcome.",
       },
+      uncertainty: {
+        sourceIds: ["source-1"],
+        evidenceExcerpt:
+          "The durability of the result remains uncertain.",
+      },
     },
   };
 }
@@ -159,6 +164,36 @@ describe("summarizeItem", () => {
     expect(request?.sourcePacket).toContain(
       "The measured outcome improved during the trial.",
     );
+  });
+
+  it("requires exact cited provenance for generated uncertainty", async () => {
+    const provider = new FakeModelProvider({
+      generatedObjects: [generatedSummary()],
+    });
+
+    await summarizeItem(packet, provider);
+
+    const request = provider.generateRequests[0];
+    expect(request?.system).toContain(
+      "Copy uncertainty exactly from cited source titles or excerpts.",
+    );
+    expect(request?.jsonSchema).toMatchObject({
+      properties: {
+        uncertainty: {
+          description: expect.stringContaining(
+            "exactly from a cited source",
+          ),
+        },
+        provenance: {
+          required: expect.arrayContaining(["uncertainty"]),
+          properties: {
+            uncertainty: {
+              required: ["sourceIds", "evidenceExcerpt"],
+            },
+          },
+        },
+      },
+    });
   });
 
   it("makes one controlled repair and returns the repaired summary", async () => {
@@ -266,7 +301,7 @@ describe("summarizeItem", () => {
     );
   });
 
-  it("requires generation-only prominent provenance and strips it from the return value", async () => {
+  it("requires generation-only prose provenance and strips it from the return value", async () => {
     const provider = new FakeModelProvider({
       generatedObjects: [validSummary(), generatedSummary()],
     });

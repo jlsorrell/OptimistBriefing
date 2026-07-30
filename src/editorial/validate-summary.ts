@@ -91,11 +91,58 @@ const SafeUrlSchema = z
     }
   });
 
-const CREDENTIAL_MARKER =
+const CREDENTIAL_VALUE_MARKER =
   /(?:^|[^a-z0-9])(?:api[-_.]?key|key|token|session|jwt|id[-_.]?token|access[-_.]?token|auth(?:orization)?|auth[-_.]?token|password|passwd|pwd|secret|credential(?:s)?|signature|signed|sig)(?:$|[^a-z0-9])/iu;
 
-function credentialMarker(value: string): boolean {
-  return CREDENTIAL_MARKER.test(value);
+const CREDENTIAL_NAME_TOKENS = new Set([
+  "auth",
+  "authorization",
+  "credential",
+  "credentials",
+  "jwt",
+  "key",
+  "passwd",
+  "password",
+  "pwd",
+  "secret",
+  "session",
+  "sig",
+  "signature",
+  "signed",
+  "token",
+]);
+
+const COMPACT_CREDENTIAL_NAMES = new Set([
+  "accesstoken",
+  "apikey",
+  "authorizationtoken",
+  "authtoken",
+  "idtoken",
+  "jwttoken",
+  "sessionid",
+]);
+
+function credentialBearingParameterName(value: string): boolean {
+  if (value.length > 256) return true;
+  const normalized = value.normalize("NFKC");
+  const tokens = normalized
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .toLocaleLowerCase("en-US")
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length > 0);
+  if (
+    tokens.some((token) => CREDENTIAL_NAME_TOKENS.has(token))
+  ) {
+    return true;
+  }
+  const compact = normalized
+    .toLocaleLowerCase("en-US")
+    .replace(/[^a-z0-9]/g, "");
+  return COMPACT_CREDENTIAL_NAMES.has(compact);
+}
+
+function credentialMarkerInValue(value: string): boolean {
+  return CREDENTIAL_VALUE_MARKER.test(value);
 }
 
 function decodedOrOriginal(value: string): string {
@@ -110,8 +157,8 @@ function credentialBearingUrl(url: URL): boolean {
   if (url.hash.length > 0) return true;
   for (const [key, value] of url.searchParams) {
     if (
-      credentialMarker(key) ||
-      credentialMarker(decodedOrOriginal(value))
+      credentialBearingParameterName(key) ||
+      credentialMarkerInValue(decodedOrOriginal(value))
     ) {
       return true;
     }
@@ -228,7 +275,13 @@ const StrictSummaryClaimSchema = StructuredSummarySchema.shape.claims.element
 const ProminentProvenanceEntrySchema = z
   .object({
     sourceIds: z.array(SafeSourceIdSchema).min(1),
-    evidenceExcerpt: z.string().min(1).max(800),
+    evidenceExcerpt: z
+      .string()
+      .min(1)
+      .max(800)
+      .refine((value) => normalizedText(value).length > 0, {
+        message: "Evidence excerpt must contain non-whitespace text.",
+      }),
   })
   .strict();
 
@@ -237,6 +290,7 @@ const ProminentProvenanceSchema = z
     title: ProminentProvenanceEntrySchema,
     oneSentence: ProminentProvenanceEntrySchema,
     whyItMatters: ProminentProvenanceEntrySchema,
+    uncertainty: ProminentProvenanceEntrySchema,
   })
   .strict();
 
@@ -364,9 +418,15 @@ function extractivelySupports(
   citedSources: readonly PacketSource[],
 ): boolean {
   const normalizedAssertion = normalizedText(assertion);
-  if (normalizedAssertion.length === 0) return false;
+  const normalizedEvidence = normalizedText(evidenceExcerpt);
   if (
-    normalizedText(evidenceExcerpt).includes(normalizedAssertion)
+    normalizedAssertion.length === 0 ||
+    normalizedEvidence.length === 0
+  ) {
+    return false;
+  }
+  if (
+    normalizedEvidence.includes(normalizedAssertion)
   ) {
     return true;
   }
@@ -463,6 +523,7 @@ export function validateSummary(
       ["title", parsed.data.title],
       ["oneSentence", parsed.data.oneSentence],
       ["whyItMatters", parsed.data.whyItMatters],
+      ["uncertainty", parsed.data.uncertainty],
     ] as const
   ).forEach(([field, prose]) => {
     const provenance = parsed.data.provenance[field];
@@ -476,13 +537,19 @@ export function validateSummary(
       }
       return [source];
     });
-    const evidenceSources = citedSources.filter((source) =>
-      source.excerpts.some((excerpt) =>
-        normalizedText(excerpt.text).includes(
-          normalizedText(provenance.evidenceExcerpt),
-        ),
-      ),
+    const normalizedEvidence = normalizedText(
+      provenance.evidenceExcerpt,
     );
+    const evidenceSources =
+      normalizedEvidence.length === 0
+        ? []
+        : citedSources.filter((source) =>
+            source.excerpts.some((excerpt) =>
+              normalizedText(excerpt.text).includes(
+                normalizedEvidence,
+              ),
+            ),
+          );
     if (
       evidenceSources.length === 0 ||
       !extractivelySupports(
@@ -503,16 +570,6 @@ export function validateSummary(
       errors.push("ACCESS_LEVEL_OVERCLAIM");
     }
   });
-
-  if (
-    impliesFullTextAccess(parsed.data.uncertainty) &&
-    !allRelevantSourcesHaveAccess(
-      proseAccessSources(packet, [], allCitedSources),
-      "full_text",
-    )
-  ) {
-    errors.push("ACCESS_LEVEL_OVERCLAIM");
-  }
 
   if (normalizedText(parsed.data.uncertainty).length === 0) {
     errors.push("EMPTY_UNCERTAINTY");
