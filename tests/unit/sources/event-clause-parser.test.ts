@@ -18,6 +18,7 @@ const semantics: EventClauseSemantics = {
     const candidates = [
       ["frontier-evaluation-standard", "governance-event", /Frontier Evaluation Standard/i],
       ["community-research-program", "funding-event", /Community Research Program/i],
+      ["unblocked-safety-rule", "governance-event", /Unblocked Safety Rule/i],
     ] as const;
     return candidates.flatMap(([object, domain, pattern]) =>
       pattern.test(objectText) ? [{ object, domain }] : [],
@@ -38,9 +39,10 @@ const materialStatusSemantics: EventClauseSemantics = {
   ...semantics,
   materialFacts(clauseText) {
     const status =
-      /\b(adopted|delayed|postponed|blocked|rejected|withdrawn|repealed)\b/i
+      /\b(adopted|announced|delayed|issued|postponed|blocked|rejected|updated|withdrawn|repealed)\b/i
         .exec(clauseText)?.[1]
         ?.toLocaleLowerCase("en-US");
+    const byDate = /\bby July 1, 2027\b/i.test(clauseText);
 
     return [
       ...(status
@@ -50,10 +52,10 @@ const materialStatusSemantics: EventClauseSemantics = {
             value: status,
           }]
         : []),
-      ...(/takes effect July 1, 2027/i.test(clauseText)
+      ...(/takes effect July 1, 2027/i.test(clauseText) || byDate
         ? [{
             kind: "date" as const,
-            key: "effective-date",
+            key: byDate ? "deadline-date" : "effective-date",
             value: "2027-07-01",
           }]
         : []),
@@ -252,6 +254,102 @@ describe("parseEventClauses", () => {
       kind: "status",
       key: "event-status",
       value: "adopted",
+    }]);
+  });
+
+  it("does not manufacture a blocked predicate from an object name", () => {
+    const parsed = parseEventClauses({
+      text: {
+        title:
+          "Model Institute reviewed Unblocked Safety Rule and " +
+          "Evaluation Agency adopted Frontier Evaluation Standard",
+      },
+      eventFamilies: ["evaluation-standards", "guidance-rule"],
+      semantics,
+    });
+
+    expect(parsed).toEqual([]);
+  });
+
+  it.each(["issued", "announced", "updated"])(
+    "isolates an unrelated %s action from an exact-object date",
+    (action) => {
+      const parsed = parseEventFactClauses({
+        text: {
+          title:
+            `Another policy was ${action}, and ` +
+            "Frontier Evaluation Standard takes effect July 1, 2027",
+        },
+        eventFamilies: ["evaluation-standards"],
+        eventInstance: {
+          subject: "model-institute",
+          domain: "governance-event",
+          object: "frontier-evaluation-standard",
+        },
+        semantics: materialStatusSemantics,
+      });
+
+      expect(parsed.flatMap(({ facts }) => facts)).toEqual([{
+        kind: "date",
+        key: "effective-date",
+        value: "2027-07-01",
+      }]);
+    },
+  );
+
+  it.each([
+    [
+      "forward",
+      "Another policy was delayed, and " +
+        "Frontier Evaluation Standard must comply by July 1, 2027",
+    ],
+    [
+      "reverse",
+      "Frontier Evaluation Standard must comply by July 1, 2027, and " +
+        "another policy was blocked",
+    ],
+  ])(
+    "isolates a %s exact-object by-date deadline",
+    (_order, title) => {
+      const parsed = parseEventFactClauses({
+        text: { title },
+        eventFamilies: ["evaluation-standards"],
+        eventInstance: {
+          subject: "model-institute",
+          domain: "governance-event",
+          object: "frontier-evaluation-standard",
+        },
+        semantics: materialStatusSemantics,
+      });
+
+      expect(parsed.flatMap(({ facts }) => facts)).toEqual([{
+        kind: "date",
+        key: "deadline-date",
+        value: "2027-07-01",
+      }]);
+    },
+  );
+
+  it("recognizes sentence-internal lowercase the for an organization owner", () => {
+    const parsed = parseEventFactClauses({
+      text: {
+        title:
+          "Frontier Evaluation Standard takes effect July 1, 2027, and " +
+          "the Evaluation Agency delayed implementation",
+      },
+      eventFamilies: ["evaluation-standards"],
+      eventInstance: {
+        subject: "model-institute",
+        domain: "governance-event",
+        object: "frontier-evaluation-standard",
+      },
+      semantics: materialStatusSemantics,
+    });
+
+    expect(parsed.flatMap(({ facts }) => facts)).toEqual([{
+      kind: "date",
+      key: "effective-date",
+      value: "2027-07-01",
     }]);
   });
 

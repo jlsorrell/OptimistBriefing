@@ -267,6 +267,95 @@ describe("news event clause integration", () => {
     );
   });
 
+  it("fails open when an object name contains a predicate substring", () => {
+    const result = signals({
+      title:
+        "Model Institute reviewed Unblocked Safety Rule and " +
+        "Evaluation Agency adopted Frontier Evaluation Standard",
+    });
+
+    expect(result.eventInstances).toEqual([]);
+    expect(result.scopedMaterialFacts).toEqual([]);
+  });
+
+  it.each(["issued", "announced", "updated"])(
+    "preserves ambiguity across an unrelated %s action and exact-object date",
+    (action) => {
+      const result = signals({
+        title:
+          "Evaluation Agency proposes Frontier Evaluation Standard",
+        abstract:
+          `Model Institute ${action} Model Transparency Rule, and ` +
+          "Frontier Evaluation Standard takes effect July 1, 2027",
+      });
+
+      expect(result.eventInstances).toEqual([]);
+      expect(result.scopedMaterialFacts).toEqual([]);
+    },
+  );
+
+  it.each([
+    [
+      "forward",
+      "Another policy was delayed, and " +
+        "Frontier Evaluation Standard must comply by July 1, 2027",
+      "delayed",
+    ],
+    [
+      "reverse",
+      "Frontier Evaluation Standard must comply by July 1, 2027, and " +
+        "another policy was blocked",
+      "blocked",
+    ],
+  ])(
+    "does not leak a status across a %s exact-object by-date deadline",
+    (_order, abstract, status) => {
+      const result = signals({
+        title:
+          "Evaluation Agency proposes Frontier Evaluation Standard",
+        abstract,
+      });
+
+      expect(result.scopedMaterialFacts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ value: "proposed" }),
+          expect.objectContaining({
+            kind: "date",
+            key: "deadline-date",
+            value: "2027-07-01",
+          }),
+        ]),
+      );
+      expect(result.scopedMaterialFacts).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ value: status }),
+        ]),
+      );
+    },
+  );
+
+  it("does not leak a status from lowercase the organization owner", () => {
+    const result = signals({
+      title:
+        "Evaluation Agency proposes Frontier Evaluation Standard",
+      abstract:
+        "Frontier Evaluation Standard takes effect July 1, 2027, and " +
+        "the Evaluation Agency delayed implementation",
+    });
+
+    expect(result.scopedMaterialFacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "proposed" }),
+        expect.objectContaining({ value: "2027-07-01" }),
+      ]),
+    );
+    expect(result.scopedMaterialFacts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "delayed" }),
+      ]),
+    );
+  });
+
   it("fails open for a trailing event after an organization-led headline", () => {
     const result = signals({
       title:

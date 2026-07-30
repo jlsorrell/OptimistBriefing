@@ -95,10 +95,14 @@ const UNSAFE_COORDINATED_EVENT =
   /\band\b(?=[^.!?]*\b(?:proposes?|proposed|introduces?|introduced|adopts?|adopted|approves?|approved|launches?|launched|releases?|released|unveils?|unveiled|publishes?|published|issues?|issued|announces?|announced|updates?|updated)\b)/i;
 
 const MATERIAL_COORDINATION_BOUNDARY = /,?\s+and\s+/gi;
-const MATERIAL_PREDICATE =
-  /(?:propos(?:e|es|ed)|introduc(?:e|es|ed)|adopt(?:s|ed)?|approv(?:e|es|ed)|pass(?:es|ed)?|launch(?:es|ed)?|releas(?:e|es|ed)|publish(?:es|ed)|unveil(?:s|ed)?|delay(?:s|ed)?|postpon(?:e|es|ed)|reject(?:s|ed)?|block(?:s|ed)?|withdraw(?:s|n)?|repeal(?:s|ed)?|effective|takes?\s+effect|deadline(?:\s+is|\s+of)?)/i;
+const MATERIAL_DATE =
+  "(?:20\\d{2}-\\d{2}-\\d{2}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\s+\\d{1,2}(?:,\\s+20\\d{2})?)";
+const MATERIAL_PREDICATE = new RegExp(
+  `\\b(?:propos(?:e|es|ed)|introduc(?:e|es|ed)|adopt(?:s|ed)?|approv(?:e|es|ed)|pass(?:es|ed)?|launch(?:es|ed)?|releas(?:e|es|ed)|publish(?:es|ed)|unveil(?:s|ed)?|issu(?:e|es|ed)|announc(?:e|es|ed)|updat(?:e|es|ed)|delay(?:s|ed)?|postpon(?:e|es|ed)|reject(?:s|ed)?|block(?:s|ed)?|withdraw(?:s|n)?|repeal(?:s|ed)?|effective|takes?\\s+effect|deadline(?:\\s+is|\\s+of)?|by\\s+${MATERIAL_DATE})\\b`,
+  "i",
+);
 const EXPLICIT_ORGANIZATION_OWNER =
-  /^(?:(?:The\s+)?(?:[A-Z][A-Za-z0-9&.'’-]*\s+){0,5}(?:Agency|Institute|University|Department|Commission|Administration|Company|Laboratory|Lab))\b/;
+  /^(?:(?:[Tt]he\s+)?(?:[A-Z][A-Za-z0-9&.'’-]*\s+){0,5}(?:Agency|Institute|University|Department|Commission|Administration|Company|Laboratory|Lab))\b/;
 const EXPLICIT_EVENT_OBJECT_OWNER =
   /^(?:(?:(?:[Tt]he|[Aa]n?|[Aa]nother)\s+)(?:[A-Za-z0-9&.'’-]+\s+){0,5}(?:act|bill|policy|rule|standard|framework|guidance|order|program|initiative|fund|round|assistant|app|tool|service|product|model|benchmark)|(?:[A-Z][A-Za-z0-9&.'’-]*\s+){0,5}(?:Act|Bill|Policy|Rule|Standard|Framework|Guidance|Order|Program|Initiative|Fund|Round|Assistant|App|Tool|Service|Product|Model|Benchmark))\b/;
 
