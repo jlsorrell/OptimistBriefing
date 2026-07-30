@@ -35,6 +35,7 @@ import {
   RepositoryValidationError,
   serializeJsonMutation,
   SourceAlreadyExistsError,
+  SourceIdAlreadyExistsError,
   SourceRecordSchema,
   UpdateSourceInputSchema,
   WorkflowRunDetailSchema,
@@ -56,6 +57,7 @@ import {
   decodeEditionCursor,
   encodeEditionCursor,
 } from "../pagination/edition-cursor";
+import { PIPELINE_STEPS } from "../workflow/types";
 
 const DateTimeSchema = z.string().datetime();
 const EditionDateSchema = EditionSchema.shape.editionDate;
@@ -280,12 +282,22 @@ function storedBoolean(value: unknown, context: string): boolean {
 }
 
 function publicDiagnostic(
-  value: string,
+  _value: string,
   fallback: string,
 ): string {
-  return /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value)
-    ? value
-    : fallback;
+  return fallback;
+}
+
+function publicLabel(value: string, fallback: string): string {
+  if (
+    !/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value) ||
+    /(api[-_]?key|authorization|bearer|password|secret|sk_(?:live|test)|token)/i.test(
+      value,
+    )
+  ) {
+    return fallback;
+  }
+  return value;
 }
 
 function sourceFromRow(row: SourceRow): SourceRecord {
@@ -344,7 +356,7 @@ function workflowRunFromRow(row: WorkflowRunRow): WorkflowRun {
       failureCode:
         row.failure_code === null
           ? null
-          : publicDiagnostic(row.failure_code, "REDACTED_FAILURE"),
+          : publicLabel(row.failure_code, "REDACTED_FAILURE"),
       estimatedCostUsd: row.estimated_cost_usd,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -400,13 +412,19 @@ function uniqueStrings(values: readonly string[]): string[] {
   );
 }
 
-function isUniqueConstraint(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    /UNIQUE constraint failed: sources\.(canonical_url|id)/i.test(
-      error.message,
-    )
-  );
+function sourceConflict(
+  error: unknown,
+): "canonical_url" | "id" | null {
+  if (!(error instanceof Error)) {
+    return null;
+  }
+  if (/UNIQUE constraint failed: sources\.canonical_url/i.test(error.message)) {
+    return "canonical_url";
+  }
+  if (/UNIQUE constraint failed: sources\.id/i.test(error.message)) {
+    return "id";
+  }
+  return null;
 }
 
 function canonicalSourceUrl(value: unknown): unknown {
@@ -418,6 +436,14 @@ function canonicalSourceUrl(value: unknown): unknown {
   } catch {
     return value;
   }
+}
+
+function likeContains(value: string): string {
+  return `%${value
+    .toLocaleLowerCase("en-US")
+    .replaceAll("\\", "\\\\")
+    .replaceAll("%", "\\%")
+    .replaceAll("_", "\\_")}%`;
 }
 
 function summaryStatements(
@@ -1031,8 +1057,46 @@ export class D1BriefingRepository implements BriefingRepository {
     const values: unknown[] = ["published", "partial"];
 
     if (validInput.query !== null) {
-      clauses.push("items_fts MATCH ?");
-      values.push(validInput.query);
+      clauses.push(
+        `(LOWER(i.title) LIKE ? ESCAPE '\\'
+          OR LOWER(json_extract(i.normalized_json, '$.primaryTopic'))
+            LIKE ? ESCAPE '\\'
+          OR LOWER(json_extract(i.normalized_json, '$.normalizedText'))
+            LIKE ? ESCAPE '\\'
+          OR LOWER(pm.author_search) LIKE ? ESCAPE '\\'
+          OR LOWER(pm.institution_search) LIKE ? ESCAPE '\\'
+          OR EXISTS (
+            SELECT 1
+            FROM item_sources query_item_source
+            WHERE query_item_source.item_id = i.id
+              AND (
+                LOWER(query_item_source.source_name) LIKE ? ESCAPE '\\'
+                OR LOWER(query_item_source.source_url) LIKE ? ESCAPE '\\'
+              )
+          )
+          OR LOWER(json_extract(s.structured_json, '$.title'))
+            LIKE ? ESCAPE '\\'
+          OR LOWER(json_extract(s.structured_json, '$.oneSentence'))
+            LIKE ? ESCAPE '\\'
+          OR LOWER(json_extract(s.structured_json, '$.whyItMatters'))
+            LIKE ? ESCAPE '\\'
+          OR LOWER(json_extract(s.structured_json, '$.claims'))
+            LIKE ? ESCAPE '\\')`,
+      );
+      const queryPattern = likeContains(validInput.query);
+      values.push(
+        queryPattern,
+        queryPattern,
+        queryPattern,
+        queryPattern,
+        queryPattern,
+        queryPattern,
+        queryPattern,
+        queryPattern,
+        queryPattern,
+        queryPattern,
+        queryPattern,
+      );
     }
     if (validInput.topic !== null) {
       clauses.push(
@@ -1041,12 +1105,12 @@ export class D1BriefingRepository implements BriefingRepository {
       values.push(validInput.topic);
     }
     if (validInput.author !== null) {
-      clauses.push("pm.author_search LIKE ?");
-      values.push(`%${validInput.author}%`);
+      clauses.push("LOWER(pm.author_search) LIKE ? ESCAPE '\\'");
+      values.push(likeContains(validInput.author));
     }
     if (validInput.institution !== null) {
-      clauses.push("pm.institution_search LIKE ?");
-      values.push(`%${validInput.institution}%`);
+      clauses.push("LOWER(pm.institution_search) LIKE ? ESCAPE '\\'");
+      values.push(likeContains(validInput.institution));
     }
     if (validInput.source !== null) {
       clauses.push(
@@ -1056,10 +1120,10 @@ export class D1BriefingRepository implements BriefingRepository {
           JOIN sources search_source
             ON search_source.id = search_item_source.source_id
           WHERE search_item_source.item_id = i.id
-            AND search_source.canonical_name LIKE ?
+            AND LOWER(search_source.canonical_name) LIKE ? ESCAPE '\\'
         )`,
       );
-      values.push(`%${validInput.source}%`);
+      values.push(likeContains(validInput.source));
     }
     if (validInput.section !== null) {
       clauses.push("ee.section = ?");
@@ -1077,10 +1141,6 @@ export class D1BriefingRepository implements BriefingRepository {
     }
 
     values.push(validInput.limit + 1, offset);
-    const ftsJoin =
-      validInput.query === null
-        ? "LEFT JOIN items_fts ON items_fts.item_id = i.id"
-        : "JOIN items_fts ON items_fts.item_id = i.id";
     const result = await this.db
       .prepare(
         `SELECT
@@ -1095,7 +1155,6 @@ export class D1BriefingRepository implements BriefingRepository {
         FROM edition_entries ee
         JOIN editions e ON e.id = ee.edition_id
         LEFT JOIN items i ON i.id = ee.item_id
-        ${ftsJoin}
         LEFT JOIN paper_metadata pm ON pm.item_id = i.id
         JOIN summaries s ON s.id = ee.summary_id
         WHERE ${clauses.join(" AND ")}
@@ -1135,12 +1194,10 @@ export class D1BriefingRepository implements BriefingRepository {
       throw new RepositoryValidationError("Feedback item not found");
     }
 
-    const adjustments: FeedbackAdjustment[] = [];
     if (
       validInput.action === "more_like_this" ||
       validInput.action === "less_like_this"
     ) {
-      const preferences = await this.preferenceRow();
       const delta = validInput.action === "more_like_this" ? 0.1 : -0.1;
       const baseline = approvedBaselinePreferences();
       const dimension =
@@ -1175,48 +1232,86 @@ export class D1BriefingRepository implements BriefingRepository {
         dimension === "source"
           ? "source_weights_json"
           : "topic_weights_json";
-      const current = validated(
-        z.record(z.string(), z.number().finite()),
-        parsedJson(preferences[field], "Invalid preference weights"),
-        "Invalid preference weights",
-      );
       const baselineMap =
         dimension === "source"
           ? baseline.sourceWeights
           : baseline.topicWeights;
-      const priorFeedback = await this.db
+      const createdAt = new Date().toISOString();
+      const result = await this.db
         .prepare(
-          `SELECT id, item_id, action, reason, created_at
-          FROM feedback
-          ORDER BY created_at, rowid`,
+          `INSERT INTO feedback (id, item_id, action, reason, created_at)
+          SELECT
+            ?, ?, ?,
+            json_object(
+              'reason', ?,
+              'adjustments', json_array(
+                json_object(
+                  'dimension', ?,
+                  'key', ?,
+                  'delta', ?,
+                  'resultingWeight', ROUND(
+                    COALESCE(
+                      json_extract(
+                        preferences.${field},
+                        '$.' || json_quote(?)
+                      ),
+                      ?
+                    )
+                    + COALESCE((
+                      SELECT SUM(
+                        CAST(
+                          json_extract(
+                            existing.reason,
+                            '$.adjustments[0].delta'
+                          ) AS REAL
+                        )
+                      )
+                      FROM feedback existing
+                      WHERE existing.action IN (
+                        'more_like_this',
+                        'less_like_this'
+                      )
+                        AND json_extract(
+                          existing.reason,
+                          '$.adjustments[0].dimension'
+                        ) = ?
+                        AND json_extract(
+                          existing.reason,
+                          '$.adjustments[0].key'
+                        ) = ?
+                    ), 0)
+                    + ?,
+                    1
+                  )
+                )
+              )
+            ),
+            ?
+          FROM preferences
+          WHERE id = 'reader'`,
         )
-        .all<FeedbackRow>();
-      const lastMatchingAdjustment = priorFeedback.results
-        .flatMap((record) => feedbackMetadata(record).adjustments)
-        .filter(
-          (adjustment) =>
-            adjustment.dimension === dimension &&
-            adjustment.key === key,
+        .bind(
+          crypto.randomUUID(),
+          validInput.itemId,
+          validInput.action,
+          validInput.reason,
+          dimension,
+          key,
+          delta,
+          key,
+          baselineMap[key] ?? 0,
+          dimension,
+          key,
+          delta,
+          createdAt,
         )
-        .at(-1);
-      const resultingWeight =
-        Math.round(
-          (
-            (
-              lastMatchingAdjustment?.resultingWeight ??
-              current[key] ??
-              baselineMap[key] ??
-              0
-            ) + delta
-          ) * 10,
-        ) /
-        10;
-      adjustments.push({
-        dimension,
-        key,
-        delta,
-        resultingWeight,
-      });
+        .run();
+      if ((result.meta.changes ?? 0) !== 1) {
+        throw new RepositoryValidationError(
+          "Reader preference row is missing",
+        );
+      }
+      return;
     }
 
     await this.db
@@ -1230,7 +1325,7 @@ export class D1BriefingRepository implements BriefingRepository {
         validInput.action,
         JSON.stringify({
           reason: validInput.reason,
-          adjustments,
+          adjustments: [],
         }),
         new Date().toISOString(),
       )
@@ -1246,18 +1341,47 @@ export class D1BriefingRepository implements BriefingRepository {
         ORDER BY created_at, rowid`,
       )
       .all<FeedbackRow>();
+    const baseline = approvedBaselinePreferences();
+    const topicWeights = validated(
+      z.record(z.string(), z.number().finite()),
+      parsedJson(row.topic_weights_json, "Invalid topic weights"),
+      "Invalid topic weights",
+    );
+    const sourceWeights = validated(
+      z.record(z.string(), z.number().finite()),
+      parsedJson(row.source_weights_json, "Invalid source weights"),
+      "Invalid source weights",
+    );
+    const running = {
+      topic: { ...baseline.topicWeights, ...topicWeights },
+      source: { ...baseline.sourceWeights, ...sourceWeights },
+    };
+    const feedbackHistory = feedback.results.map((record) => {
+      const metadata = feedbackMetadata(record);
+      const adjustments = metadata.adjustments.map((adjustment) => {
+        const weights = running[adjustment.dimension];
+        const resultingWeight =
+          Math.round(
+            ((weights[adjustment.key] ?? 0) + adjustment.delta) * 10,
+          ) / 10;
+        weights[adjustment.key] = resultingWeight;
+        return { ...adjustment, resultingWeight };
+      });
+      return {
+        id: record.id,
+        itemId: record.item_id,
+        action: record.action,
+        reason: metadata.reason,
+        adjustments,
+        createdAt: record.created_at,
+      };
+    });
 
     return validated(
       ReaderPreferencesSchema,
       {
-        topicWeights: parsedJson(
-          row.topic_weights_json,
-          "Invalid topic weights",
-        ),
-        sourceWeights: parsedJson(
-          row.source_weights_json,
-          "Invalid source weights",
-        ),
+        topicWeights,
+        sourceWeights,
         institutionWeights: parsedJson(
           row.institution_weights_json,
           "Invalid institution weights",
@@ -1266,18 +1390,8 @@ export class D1BriefingRepository implements BriefingRepository {
           row.section_budgets_json,
           "Invalid section budgets",
         ),
-        baseline: approvedBaselinePreferences(),
-        feedbackHistory: feedback.results.map((record) => {
-          const metadata = feedbackMetadata(record);
-          return {
-            id: record.id,
-            itemId: record.item_id,
-            action: record.action,
-            reason: metadata.reason,
-            adjustments: metadata.adjustments,
-            createdAt: record.created_at,
-          };
-        }),
+        baseline,
+        feedbackHistory,
       },
       "Invalid reader preferences",
     );
@@ -1388,7 +1502,10 @@ export class D1BriefingRepository implements BriefingRepository {
           new Date().toISOString(),
           "reader",
         ),
-      this.db.prepare("DELETE FROM feedback"),
+      this.db.prepare(
+        `DELETE FROM feedback
+        WHERE action IN ('more_like_this', 'less_like_this')`,
+      ),
     ]);
     return this.getPreferences();
   }
@@ -1428,8 +1545,12 @@ export class D1BriefingRepository implements BriefingRepository {
         )
         .run();
     } catch (error) {
-      if (isUniqueConstraint(error)) {
+      const conflict = sourceConflict(error);
+      if (conflict === "canonical_url") {
         throw new SourceAlreadyExistsError();
+      }
+      if (conflict === "id") {
+        throw new SourceIdAlreadyExistsError();
       }
       throw error;
     }
@@ -1445,7 +1566,7 @@ export class D1BriefingRepository implements BriefingRepository {
   async updateSource(
     sourceId: string,
     input: UpdateSourceInput,
-    actorEmail?: string,
+    actorEmail = "system",
   ): Promise<SourceRecord> {
     serializeJsonMutation(input, "Invalid source update mutation");
     const validId = validated(
@@ -1495,41 +1616,41 @@ export class D1BriefingRepository implements BriefingRepository {
         validId,
       );
     try {
-      if (actorEmail === undefined) {
-        await updateStatement.run();
-      } else {
-        const validActor = validated(
-          z.string().email(),
-          actorEmail,
-          "Invalid audit actor",
-        );
-        await this.db.batch([
-          updateStatement,
-          this.db
-            .prepare(
-              `INSERT INTO audit_events (
-                id, run_id, event_type, event_json, created_at
-              ) VALUES (?, ?, ?, ?, ?)`,
-            )
-            .bind(
-              crypto.randomUUID(),
-              null,
-              "source_updated",
-              serializeJsonMutation(
-                {
-                  sourceId: validId,
-                  actorEmail: validActor,
-                  changes: validInput,
-                },
-                "Invalid source audit event",
-              ),
-              new Date().toISOString(),
+      const validActor = validated(
+        z.union([z.literal("system"), z.string().email()]),
+        actorEmail,
+        "Invalid audit actor",
+      );
+      await this.db.batch([
+        updateStatement,
+        this.db
+          .prepare(
+            `INSERT INTO audit_events (
+              id, run_id, event_type, event_json, created_at
+            ) VALUES (?, ?, ?, ?, ?)`,
+          )
+          .bind(
+            crypto.randomUUID(),
+            null,
+            "source_updated",
+            serializeJsonMutation(
+              {
+                sourceId: validId,
+                actorEmail: validActor,
+                changes: validInput,
+              },
+              "Invalid source audit event",
             ),
-        ]);
-      }
+            new Date().toISOString(),
+          ),
+      ]);
     } catch (error) {
-      if (isUniqueConstraint(error)) {
+      const conflict = sourceConflict(error);
+      if (conflict === "canonical_url") {
         throw new SourceAlreadyExistsError();
+      }
+      if (conflict === "id") {
+        throw new SourceIdAlreadyExistsError();
       }
       throw error;
     }
@@ -1607,16 +1728,13 @@ export class D1BriefingRepository implements BriefingRepository {
       }
       if (event.event_type === "workflow_attempt_failed") {
         const failure = z.object({
-          step: z.string().min(1),
+          step: z.enum(PIPELINE_STEPS),
           attempt: z.number().int().positive(),
           error: z.string().min(1),
         }).passthrough().safeParse(parsed);
         if (failure.success) {
           failures.push({
-            step: publicDiagnostic(
-              failure.data.step,
-              "REDACTED_STEP",
-            ),
+            step: failure.data.step,
             attempt: failure.data.attempt,
             reason: publicDiagnostic(
               failure.data.error,
@@ -1695,12 +1813,12 @@ export class D1BriefingRepository implements BriefingRepository {
         failures,
         sourceFailures: uniqueStrings(
           sourceFailures.map((failure) =>
-            publicDiagnostic(failure, "REDACTED_SOURCE"),
+            publicLabel(failure, "REDACTED_SOURCE"),
           ),
         ),
         rejectedSummaryReasons: uniqueStrings(
           rejectedSummaryReasons.map((reason) =>
-            publicDiagnostic(reason, "REDACTED_REJECTION"),
+            publicLabel(reason, "REDACTED_REJECTION"),
           ),
         ),
         publishedAt: edition?.published_at ?? null,

@@ -79,7 +79,7 @@ export function NewsClusterCard({ entry }: NewsClusterCardProps) {
           </a>
         ))}
       </div>
-      <FeedbackActions entryId={entry.id} />
+      <FeedbackActions itemId={entry.itemId} />
     </article>
   );
 }

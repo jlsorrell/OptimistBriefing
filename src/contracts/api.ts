@@ -26,6 +26,8 @@ export const ApiErrorSchema = z.object({
       "AUTH_FORBIDDEN",
       "NOT_FOUND",
       "VALIDATION_FAILED",
+      "SOURCE_ALREADY_EXISTS",
+      "SOURCE_ID_ALREADY_EXISTS",
       "INTERNAL_ERROR",
     ]),
     message: z.string().min(1),

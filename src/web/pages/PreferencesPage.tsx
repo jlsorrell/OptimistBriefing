@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import type {
   FeedbackRecord,
+  PreferenceUpdateInput,
   ReaderPreferences,
 } from "../../db/repository";
 
@@ -9,6 +10,9 @@ type PreferencesPageProps = {
   initialPreferences?: ReaderPreferences;
   onRemoveAdjustment?: (feedbackId: string) => Promise<void>;
   onReset?: () => Promise<ReaderPreferences>;
+  onUpdate?: (
+    preferences: PreferenceUpdateInput,
+  ) => Promise<ReaderPreferences>;
 };
 
 const reasonLabels: Readonly<Record<string, string>> = {
@@ -38,12 +42,14 @@ export function PreferencesPage({
   initialPreferences,
   onRemoveAdjustment,
   onReset,
+  onUpdate,
 }: PreferencesPageProps) {
   const [preferences, setPreferences] = useState<ReaderPreferences | null>(
     initialPreferences ?? null,
   );
   const [message, setMessage] = useState("");
   const [failed, setFailed] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (initialPreferences !== undefined) {
@@ -67,41 +73,107 @@ export function PreferencesPage({
   );
 
   async function removeAdjustment(feedbackId: string) {
-    if (onRemoveAdjustment === undefined) {
-      const response = await fetch("/api/preferences", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ removeFeedbackId: feedbackId }),
-      });
-      setPreferences(await readPreferences(response));
-    } else {
-      await onRemoveAdjustment(feedbackId);
-      setPreferences((current) =>
-        current === null
-          ? current
-          : {
-              ...current,
-              feedbackHistory: current.feedbackHistory.filter(
-                (record) => record.id !== feedbackId,
-              ),
-            },
-      );
+    setBusy(true);
+    setFailed(false);
+    try {
+      if (onRemoveAdjustment === undefined) {
+        const response = await fetch("/api/preferences", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ removeFeedbackId: feedbackId }),
+        });
+        setPreferences(await readPreferences(response));
+      } else {
+        await onRemoveAdjustment(feedbackId);
+        setPreferences((current) =>
+          current === null
+            ? current
+            : {
+                ...current,
+                feedbackHistory: current.feedbackHistory.filter(
+                  (record) => record.id !== feedbackId,
+                ),
+              },
+        );
+      }
+      setMessage("Adjustment removed.");
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(false);
     }
-    setMessage("Adjustment removed.");
   }
 
   async function reset() {
-    const next =
-      onReset === undefined
-        ? await readPreferences(
-            await fetch("/api/preferences/reset", { method: "POST" }),
-          )
-        : await onReset();
-    setPreferences(next);
-    setMessage("Preferences reset.");
+    setBusy(true);
+    setFailed(false);
+    try {
+      const next =
+        onReset === undefined
+          ? await readPreferences(
+              await fetch("/api/preferences/reset", { method: "POST" }),
+            )
+          : await onReset();
+      setPreferences(next);
+      setMessage("Preferences reset.");
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
   }
 
-  if (failed) {
+  async function updateExplicitPreferences() {
+    if (preferences === null) {
+      return;
+    }
+    const input: PreferenceUpdateInput = {
+      topicWeights: preferences.topicWeights,
+      sourceWeights: preferences.sourceWeights,
+      institutionWeights: preferences.institutionWeights,
+      sectionBudgets: preferences.sectionBudgets,
+    };
+    setBusy(true);
+    setFailed(false);
+    try {
+      const next =
+        onUpdate === undefined
+          ? await readPreferences(
+              await fetch("/api/preferences", {
+                method: "PUT",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify(input),
+              }),
+            )
+          : await onUpdate(input);
+      setPreferences(next);
+      setMessage("Explicit preferences saved.");
+    } catch {
+      setFailed(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function updateWeight(
+    dimension: "topicWeights" | "sourceWeights",
+    key: string,
+    value: number,
+  ) {
+    if (!Number.isFinite(value)) {
+      return;
+    }
+    setPreferences((current) =>
+      current === null
+        ? current
+        : {
+            ...current,
+            [dimension]: { ...current[dimension], [key]: value },
+          },
+    );
+  }
+
+  if (failed && preferences === null) {
     return (
       <main className="state-page">
         <h1>Preferences are unavailable.</h1>
@@ -127,6 +199,7 @@ export function PreferencesPage({
 
       <section aria-labelledby="baseline-heading">
         <h2 id="baseline-heading">Approved baseline</h2>
+        <h3>Baseline topics</h3>
         <dl>
           {Object.entries(preferences.baseline.topicWeights).map(
             ([topic, weight]) => (
@@ -137,6 +210,82 @@ export function PreferencesPage({
             ),
           )}
         </dl>
+        <h3>Baseline sources</h3>
+        <dl>
+          {Object.entries(preferences.baseline.sourceWeights).map(
+            ([source, weight]) => (
+              <div key={source}>
+                <dt>{source}</dt>
+                <dd>{weight}</dd>
+              </div>
+            ),
+          )}
+        </dl>
+        <h3>Baseline institutions</h3>
+        <dl>
+          {Object.entries(preferences.baseline.institutionWeights).map(
+            ([institution, weight]) => (
+              <div key={institution}>
+                <dt>{institution}</dt>
+                <dd>{weight}</dd>
+              </div>
+            ),
+          )}
+        </dl>
+        <h3>Baseline section budgets</h3>
+        <dl>
+          {Object.entries(preferences.baseline.sectionBudgets).map(
+            ([section, budget]) => (
+              <div key={section}>
+                <dt>{section.replaceAll("_", " ")}</dt>
+                <dd>{budget}</dd>
+              </div>
+            ),
+          )}
+        </dl>
+      </section>
+
+      <section aria-labelledby="explicit-heading">
+        <h2 id="explicit-heading">Explicit preferences</h2>
+        <fieldset disabled={busy}>
+          <legend>Topic weights</legend>
+          {Object.entries(preferences.topicWeights).map(([topic, weight]) => (
+            <label key={topic}>
+              Topic weight {topic}
+              <input
+                type="number"
+                step="0.1"
+                value={weight}
+                onChange={(event) =>
+                  updateWeight("topicWeights", topic, event.target.valueAsNumber)
+                }
+              />
+            </label>
+          ))}
+        </fieldset>
+        <fieldset disabled={busy}>
+          <legend>Source weights</legend>
+          {Object.entries(preferences.sourceWeights).map(([source, weight]) => (
+            <label key={source}>
+              Source weight {source}
+              <input
+                type="number"
+                step="0.1"
+                value={weight}
+                onChange={(event) =>
+                  updateWeight("sourceWeights", source, event.target.valueAsNumber)
+                }
+              />
+            </label>
+          ))}
+        </fieldset>
+        <button
+          type="button"
+          disabled={busy}
+          onClick={() => void updateExplicitPreferences()}
+        >
+          Save explicit preferences
+        </button>
       </section>
 
       <section aria-labelledby="adjustments-heading">
@@ -156,6 +305,7 @@ export function PreferencesPage({
                 <span>{reasonLabels[record.reason ?? ""] ?? "No reason"}</span>
                 <button
                   type="button"
+                  disabled={busy}
                   aria-label={`Remove ${adjustment.key} feedback adjustment`}
                   onClick={() => void removeAdjustment(record.id)}
                 >
@@ -167,9 +317,10 @@ export function PreferencesPage({
         )}
       </section>
 
-      <button type="button" onClick={() => void reset()}>
+      <button type="button" disabled={busy} onClick={() => void reset()}>
         Reset to approved baseline
       </button>
+      {failed ? <p role="alert">Preferences could not be updated.</p> : null}
       <p role="status" aria-live="polite">{message}</p>
       <p><a href="/">Return to today’s edition</a></p>
     </main>

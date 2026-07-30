@@ -179,6 +179,15 @@ export class SourceAlreadyExistsError extends Error {
   }
 }
 
+export class SourceIdAlreadyExistsError extends Error {
+  readonly code = "SOURCE_ID_ALREADY_EXISTS";
+
+  constructor() {
+    super("A source with that identifier already exists.");
+    this.name = "SourceIdAlreadyExistsError";
+  }
+}
+
 export type JsonValue =
   | string
   | number
@@ -474,9 +483,9 @@ export const DiscoveryMechanismSchema = z.enum([
 ]);
 
 export const SourceRecordSchema = z.object({
-  id: z.string().min(1),
-  canonicalName: z.string().min(1),
-  canonicalUrl: z.string().url().refine((value) => {
+  id: z.string().trim().min(1),
+  canonicalName: z.string().trim().min(1),
+  canonicalUrl: z.string().trim().url().refine((value) => {
     const url = new URL(value);
     return (
       url.protocol === "https:" &&
@@ -583,7 +592,7 @@ export interface BriefingRepository {
   updateSource(
     sourceId: string,
     input: UpdateSourceInput,
-    actorEmail?: string,
+    actorEmail: string,
   ): Promise<SourceRecord>;
   listWorkflowRuns(): Promise<readonly WorkflowRun[]>;
   getWorkflowRun(runId: string): Promise<WorkflowRun | null>;

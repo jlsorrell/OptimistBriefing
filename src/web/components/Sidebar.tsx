@@ -47,6 +47,10 @@ export function Sidebar({ sections, open, onNavigate }: SidebarProps) {
           <span aria-hidden="true">◌</span>
           Preferences
         </a>
+        <a href="/run-status">
+          <span aria-hidden="true">↻</span>
+          Run status
+        </a>
       </nav>
     </aside>
   );

@@ -2,6 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 
 import { createApp } from "../../../src/api/app";
+import { ApiErrorSchema } from "../../../src/contracts/api";
 import type { EditionEntry, Item } from "../../../src/contracts/editorial";
 import { READER_PROFILE } from "../../../src/config/reader-profile";
 import { D1BriefingRepository } from "../../../src/db/d1-repository";
@@ -242,6 +243,15 @@ describe("reader controls API", () => {
       }),
     });
     const adjustmentId = (await repository.getPreferences()).feedbackHistory.at(-1)!.id;
+    await app().request("/api/feedback", {
+      method: "POST",
+      headers: authenticated,
+      body: JSON.stringify({
+        itemId: item.id,
+        action: "save",
+        reason: null,
+      }),
+    });
 
     const updated = await app().request("/api/preferences", {
       method: "PUT",
@@ -293,8 +303,62 @@ describe("reader controls API", () => {
           forecast: READER_PROFILE.sectionBudgets.forecastSignals,
         },
       },
-      feedbackHistory: [],
+      feedbackHistory: [
+        expect.objectContaining({
+          itemId: item.id,
+          action: "save",
+        }),
+      ],
     });
+    const persistedSave = await env.DB.prepare(
+      `SELECT action
+      FROM feedback
+      WHERE item_id = ? AND action = 'save'`,
+    )
+      .bind(item.id)
+      .first<{ action: string }>();
+    expect(persistedSave).toEqual({ action: "save" });
+  });
+
+  it("recomputes remaining feedback snapshots and serializes concurrent deltas", async () => {
+    const repository = new D1BriefingRepository(env.DB);
+    await repository.resetPreferences();
+    const item = fixtureItem("feedback-consistency");
+    await repository.upsertItems([item]);
+    for (let index = 0; index < 3; index += 1) {
+      await repository.recordFeedback({
+        itemId: item.id,
+        action: "more_like_this",
+        reason: "topic",
+      });
+    }
+    const before = (await repository.getPreferences()).feedbackHistory.filter(
+      (record) => record.itemId === item.id,
+    );
+    await repository.removeFeedbackAdjustment(before[0]!.id);
+    expect(
+      (await repository.getPreferences()).feedbackHistory
+        .filter((record) => record.itemId === item.id)
+        .map((record) => record.adjustments[0]?.resultingWeight),
+    ).toEqual([1.1, 1.2]);
+
+    await repository.resetPreferences();
+    const concurrent = fixtureItem("feedback-concurrent");
+    await repository.upsertItems([concurrent]);
+    await Promise.all(
+      Array.from({ length: 5 }, () =>
+        repository.recordFeedback({
+          itemId: concurrent.id,
+          action: "less_like_this",
+          reason: "topic",
+        }),
+      ),
+    );
+    expect(
+      (await repository.getPreferences()).feedbackHistory
+        .filter((record) => record.itemId === concurrent.id)
+        .map((record) => record.adjustments[0]?.resultingWeight),
+    ).toEqual([0.9, 0.8, 0.7, 0.6, 0.5]);
   });
 
   it("validates all archive filters and advances an opaque cursor", async () => {
@@ -331,9 +395,21 @@ describe("reader controls API", () => {
       const invalid = await app().request(`/api/archive?${query}`, {
         headers: authenticated,
       });
-      expect(invalid.status).toBe(422);
+      expect(invalid.status).toBe(400);
     }
 
+    const unknown = await app().request("/api/archive?unexpected=value", {
+      headers: authenticated,
+    });
+    expect(unknown.status).toBe(400);
+
+    for (const literal of ['"', "%", "_"]) {
+      const response = await app().request(
+        `/api/archive?q=${encodeURIComponent(literal)}`,
+        { headers: authenticated },
+      );
+      expect(response.status).toBe(200);
+    }
   });
 
   it("requires strict canonical HTTPS source input, reports duplicate URLs, and audits updates", async () => {
@@ -375,9 +451,27 @@ describe("reader controls API", () => {
       body: JSON.stringify({ ...source, id: "task-10-source-duplicate" }),
     });
     expect(duplicate.status).toBe(409);
-    await expect(duplicate.json()).resolves.toMatchObject({
+    const duplicateBody = await duplicate.json();
+    expect(duplicateBody).toMatchObject({
       error: { code: "SOURCE_ALREADY_EXISTS" },
     });
+    expect(() => ApiErrorSchema.parse(duplicateBody)).not.toThrow();
+
+    const duplicateId = await app().request("/api/sources", {
+      method: "POST",
+      headers: authenticated,
+      body: JSON.stringify({
+        ...source,
+        canonicalName: "Different source",
+        canonicalUrl: "https://different-task-10.example/",
+      }),
+    });
+    expect(duplicateId.status).toBe(409);
+    const duplicateIdBody = await duplicateId.json();
+    expect(duplicateIdBody).toMatchObject({
+      error: { code: "SOURCE_ID_ALREADY_EXISTS" },
+    });
+    expect(() => ApiErrorSchema.parse(duplicateIdBody)).not.toThrow();
 
     const updated = await app().request(`/api/sources/${source.id}`, {
       method: "PUT",
@@ -393,6 +487,17 @@ describe("reader controls API", () => {
       sourceId: source.id,
       actorEmail: "reader@example.com",
       changes: { enabled: false },
+    });
+
+    const repository = new D1BriefingRepository(env.DB);
+    await repository.updateSource(source.id, { enabled: true });
+    const systemAudit = await env.DB.prepare(
+      "SELECT event_json FROM audit_events WHERE event_type = ? ORDER BY created_at DESC LIMIT 1",
+    ).bind("source_updated").first<{ event_json: string }>();
+    expect(JSON.parse(systemAudit!.event_json)).toMatchObject({
+      sourceId: source.id,
+      actorEmail: "system",
+      changes: { enabled: true },
     });
   });
 
@@ -451,7 +556,7 @@ describe("reader controls API", () => {
       "publish",
       0,
       2,
-      "apiKey=must-not-leak",
+      "sk_live_must_not_leak",
       1.25,
       "2034-02-01T08:00:00.000Z",
       "2034-02-01T09:45:00.000Z",
@@ -469,7 +574,10 @@ describe("reader controls API", () => {
             output: [
               {
                 valid: false,
-                validationErrors: ["unsupported_claim"],
+                validationErrors: [
+                  "unsupported_claim",
+                  "secret-must-not-leak",
+                ],
                 privatePacket: "must-not-leak",
                 secret: "must-not-leak",
               },
@@ -491,7 +599,7 @@ describe("reader controls API", () => {
         JSON.stringify({
           step: "validate",
           attempt: 1,
-          error: "MODEL_TIMEOUT apiKey=must-not-leak",
+          error: "BearerToken_must_not_leak",
           apiKey: "must-not-leak",
         }),
         "2034-02-01T08:59:00.000Z",
@@ -511,7 +619,7 @@ describe("reader controls API", () => {
         "2034-02-01T08:00:00.000Z",
         JSON.stringify({
           missingSections: [],
-          sourceFailures: ["reuters"],
+          sourceFailures: ["reuters", "api-key-must-not-leak"],
         }),
       ),
     ]);
@@ -530,6 +638,9 @@ describe("reader controls API", () => {
     expect(text).not.toContain("must-not-leak");
     expect(text).not.toContain("privatePacket");
     expect(text).not.toContain("secret");
+    expect(text).not.toContain("sk_live");
+    expect(text).not.toContain("Bearer");
+    expect(text).not.toContain("api-key");
     expect(JSON.parse(text)).toMatchObject({
       id: runId,
       checkpoints: [
@@ -544,8 +655,11 @@ describe("reader controls API", () => {
         { step: "validate", attempt: 1, reason: "REDACTED_FAILURE" },
       ],
       failureCode: "REDACTED_FAILURE",
-      sourceFailures: ["reuters"],
-      rejectedSummaryReasons: ["unsupported_claim"],
+      sourceFailures: ["REDACTED_SOURCE", "reuters"],
+      rejectedSummaryReasons: [
+        "REDACTED_REJECTION",
+        "unsupported_claim",
+      ],
       publishedAt: "2034-02-01T09:45:00.000Z",
       estimatedMonthlyCostUsd: 1.25,
     });

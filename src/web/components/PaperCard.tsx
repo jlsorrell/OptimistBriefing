@@ -86,7 +86,7 @@ export function PaperCard({ entry, compact = false }: PaperCardProps) {
           </a>
         ))}
       </div>
-      <FeedbackActions entryId={entry.id} />
+      <FeedbackActions itemId={entry.itemId} />
     </article>
   );
 }

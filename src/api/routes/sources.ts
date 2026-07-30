@@ -4,25 +4,29 @@ import {
   CreateSourceInputSchema,
   RepositoryValidationError,
   SourceAlreadyExistsError,
+  SourceIdAlreadyExistsError,
   UpdateSourceInputSchema,
   type UpdateSourceInput,
 } from "../../db/repository";
 import type { AppDependencies, AppEnv } from "../app";
 import { ValidationError } from "../errors";
 
-function duplicateSourceResponse(context: {
+function sourceConflictResponse(context: {
   json: (
     body: {
-      error: { code: "SOURCE_ALREADY_EXISTS"; message: string };
+      error: {
+        code: "SOURCE_ALREADY_EXISTS" | "SOURCE_ID_ALREADY_EXISTS";
+        message: string;
+      };
     },
     status: 409,
   ) => Response;
-}): Response {
+}, error: SourceAlreadyExistsError | SourceIdAlreadyExistsError): Response {
   return context.json(
     {
       error: {
-        code: "SOURCE_ALREADY_EXISTS",
-        message: "A source with that canonical URL already exists.",
+        code: error.code,
+        message: error.message,
       },
     },
     409,
@@ -49,7 +53,10 @@ export function registerSourceRoutes(
       );
     } catch (error) {
       if (error instanceof SourceAlreadyExistsError) {
-        return duplicateSourceResponse(context);
+        return sourceConflictResponse(context, error);
+      }
+      if (error instanceof SourceIdAlreadyExistsError) {
+        return sourceConflictResponse(context, error);
       }
       if (error instanceof RepositoryValidationError) {
         throw new ValidationError();
@@ -77,7 +84,10 @@ export function registerSourceRoutes(
       return context.json(updated);
     } catch (error) {
       if (error instanceof SourceAlreadyExistsError) {
-        return duplicateSourceResponse(context);
+        return sourceConflictResponse(context, error);
+      }
+      if (error instanceof SourceIdAlreadyExistsError) {
+        return sourceConflictResponse(context, error);
       }
       if (error instanceof RepositoryValidationError) {
         throw new ValidationError();
