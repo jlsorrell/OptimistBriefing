@@ -4,7 +4,7 @@ import type {
 } from "../contracts/editorial";
 import {
   CanonicalEventInstanceSchema,
-  NewsMaterialFactSchema,
+  ScopedNewsMaterialFactSchema,
   type CanonicalEventDomain,
   type CanonicalEventInstance,
   type NewsMaterialFact,
@@ -93,6 +93,11 @@ function withoutDiscourseMarker(value: string): string {
     "",
   );
 }
+
+const ACTIVE_EVENT_PREDICATE =
+  "propos(?:e|es|ed)|introduc(?:e|es|ed)|adopt(?:s|ed)?|approv(?:e|es|ed)|launch(?:es|ed)?|releas(?:e|es|ed)|unveil(?:s|ed)?|publish(?:es|ed)|issu(?:e|es|ed)|announc(?:e|es|ed)|updat(?:e|es|ed)";
+const PASSIVE_EVENT_PREDICATE =
+  "proposed|introduced|adopted|approved|launched|released|unveiled|published|issued|announced|updated";
 
 function normalizedEventObject(
   value: string,
@@ -454,88 +459,78 @@ function canonicalInstanceSubject(
   return candidates.length === 1 ? candidates[0] ?? null : null;
 }
 
-export function deriveCanonicalEventInstances(
-  input: MaterialTextInput,
-  metadata: Readonly<Record<string, unknown>>,
-  namedEntities: readonly string[],
+function eventTuplesForSentence(
+  sentence: string,
   eventFamilies: readonly string[],
 ): CanonicalEventInstance[] {
-  const explicit = Array.isArray(metadata.eventInstances)
-    ? metadata.eventInstances.flatMap(
-        (entry): CanonicalEventInstance[] => {
-          const parsed = CanonicalEventInstanceSchema.safeParse(entry);
-          return parsed.success ? [parsed.data] : [];
-        },
-      )
-    : [];
-  if (explicit.length > 0) {
-    return [...new Map(
-      explicit.map((instance) => [
-        `${instance.subject}\u0000${instance.domain}\u0000${instance.object}`,
-        instance,
-      ]),
-    ).values()];
-  }
-
-  const parts = materialParts(input);
-  let subject: string | null = null;
-  for (const part of parts) {
-    const candidates = canonicalSubjectCandidates(
-      deriveNamedEntities(part, {}),
-    );
-    if (candidates.length > 1) return [];
-    if (candidates.length === 1) {
-      subject = candidates[0] ?? null;
-      break;
-    }
-  }
-  subject ??= canonicalInstanceSubject(namedEntities);
-  if (subject === null) return [];
-  let selected:
-    | { object: string; domain: CanonicalEventDomain }
-    | undefined;
-  candidateSearch: for (const part of parts) {
-    for (const sentence of sentences(part)) {
-      const candidates = eventObjectCandidates(
-        sentence,
-        eventFamilies,
-      );
-      if (candidates.length === 0) continue;
-      if (candidates.length !== 1) return [];
-      const candidate = candidates[0];
-      if (candidate !== undefined) {
-        selected = {
-          ...candidate,
-          object: normalizedEventObject(candidate.object, subject),
-        };
+  const candidateText = withoutDiscourseMarker(sentence.trim());
+  const active = new RegExp(
+    `^(?<subject>.+?)\\s+(?:${ACTIVE_EVENT_PREDICATE})\\b(?<objectText>.+)$`,
+    "i",
+  ).exec(candidateText);
+  const passive = new RegExp(
+    `^(?<objectText>.+?)\\s+(?:(?:was|is|has been|had been)\\s+)?(?:${PASSIVE_EVENT_PREDICATE})\\s+by\\s+(?<subject>[^.!?]+)`,
+    "i",
+  ).exec(candidateText);
+  const headline = new RegExp(
+    `^(?<subject>.+?(?:Agency|Institute|University|Department|Commission|Administration|Company|Laboratory|Lab))\\s+(?<objectText>.+?)\\s+(?:${PASSIVE_EVENT_PREDICATE})\\b`,
+    "i",
+  ).exec(candidateText);
+  return [active?.groups, passive?.groups, headline?.groups].flatMap(
+    (construction): CanonicalEventInstance[] => {
+      const subjectText = construction?.subject;
+      const objectText = construction?.objectText;
+      if (subjectText === undefined || objectText === undefined) {
+        return [];
       }
-      break candidateSearch;
-    }
-  }
-  if (
-    selected === undefined ||
-    selected.object === "generic-governance-instrument"
-  ) {
-    return [];
-  }
-  return [
-    CanonicalEventInstanceSchema.parse({
-      subject,
-      domain: selected.domain,
-      object: selected.object,
-    }),
-  ];
+      const subject = canonicalInstanceSubject(
+        deriveNamedEntities(subjectText, {}),
+      );
+      if (subject === null) return [];
+      const objects = eventObjectCandidates(
+        objectText,
+        eventFamilies,
+      ).map((candidate) => ({
+        ...candidate,
+        object: normalizedEventObject(candidate.object, subject),
+      }));
+      if (objects.length !== 1) return [];
+      const object = objects[0];
+      if (
+        object === undefined ||
+        object.object === "generic-governance-instrument"
+      ) {
+        return [];
+      }
+      return [
+        CanonicalEventInstanceSchema.parse({
+          subject,
+          domain: object.domain,
+          object: object.object,
+        }),
+      ];
+    },
+  );
 }
 
-function explicitMaterialFacts(
-  metadata: Readonly<Record<string, unknown>>,
-): NewsMaterialFact[] {
-  const value = metadata.materialFacts;
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry): NewsMaterialFact[] => {
-    const parsed = NewsMaterialFactSchema.safeParse(entry);
-    return parsed.success ? [parsed.data] : [];
-  });
+export function deriveCanonicalEventInstances(
+  input: MaterialTextInput,
+  _metadata: Readonly<Record<string, unknown>>,
+  _namedEntities: readonly string[],
+  eventFamilies: readonly string[],
+): CanonicalEventInstance[] {
+  const tuples = sentences(input).flatMap((sentence) =>
+    eventTuplesForSentence(sentence, eventFamilies),
+  );
+  const uniqueTuples = new Map(
+    tuples.map((instance) => [
+      `${instance.subject}\u0000${instance.domain}\u0000${instance.object}`,
+      instance,
+    ]),
+  );
+  return uniqueTuples.size === 1
+    ? [...uniqueTuples.values()]
+    : [];
 }
 
 function regexPhrase(value: string): RegExp {
@@ -548,25 +543,36 @@ function regexPhrase(value: string): RegExp {
   );
 }
 
-function referencesEventInstance(
+function referencesExactEventInstance(
   sentence: string,
   eventInstance: CanonicalEventInstance,
+  eventFamilies: readonly string[],
 ): boolean {
-  if (regexPhrase(eventInstance.subject).test(sentence)) return true;
   if (regexPhrase(eventInstance.object).test(sentence)) return true;
-  const aliases: Record<CanonicalEventDomain, RegExp> = {
-    "governance-event":
-      eventInstance.object.endsWith("rule")
-        ? /\b(?:rule|regulation|policy)\b/i
-        : /\b(?:standard|framework|requirements?|measure)\b/i,
-    "evaluation-event":
-      /\b(?:benchmark|evaluation|test)\b/i,
-    "product-event":
-      /\b(?:product|assistant|app|tool|service|model|release)\b/i,
-    "funding-event":
-      /\b(?:funding|budget|appropriation|program|initiative|fund|round|grant)\b/i,
-  };
-  return aliases[eventInstance.domain].test(sentence);
+  return eventObjectCandidates(sentence, eventFamilies)
+    .map((candidate) => ({
+      ...candidate,
+      object: normalizedEventObject(
+        candidate.object,
+        eventInstance.subject,
+      ),
+    }))
+    .some(
+      (candidate) =>
+        candidate.object === eventInstance.object &&
+        candidate.domain === eventInstance.domain,
+    );
+}
+
+function materialFactClauses(sentence: string): string[] {
+  return sentence
+    .split(
+      /;\s*|,\s*(?=(?:while|whereas|but)\b)|\s+(?=(?:while|whereas)\b)/i,
+    )
+    .map((clause) =>
+      clause.replace(/^(?:while|whereas|but)\s+/i, "").trim(),
+    )
+    .filter(Boolean);
 }
 
 export function deriveEventFamilies(
@@ -592,6 +598,7 @@ export function deriveMaterialFacts(
     eventInstance === null
       ? combinedText(text)
       : sentences(text)
+          .flatMap(materialFactClauses)
           .filter((sentence) => {
             const candidates = eventObjectCandidates(
               sentence,
@@ -631,10 +638,14 @@ export function deriveMaterialFacts(
             ) {
               return false;
             }
-            return referencesEventInstance(sentence, eventInstance);
+            return referencesExactEventInstance(
+              sentence,
+              eventInstance,
+              eventFamilies,
+            );
           })
           .join(". ");
-  const facts = [...explicitMaterialFacts(metadata)];
+  const facts: NewsMaterialFact[] = [];
   const materialContext =
     /\b(?:standard|framework|requirements?|policy|rule|bill|law|measure|guidance|document|order|program|system|model|funding|budget|appropriation|initiative|fund|round|grant|product|assistant|app|tool|service)\b/i;
   const statusPatterns: readonly [string, RegExp][] = [
@@ -818,9 +829,37 @@ export function deriveScopedMaterialFacts(
   if (eventInstances.length !== 1) return [];
   const eventInstance = eventInstances[0];
   if (eventInstance === undefined) return [];
-  return deriveMaterialFacts(text, metadata, eventInstance).map(
-    (fact) => ({ ...fact, eventInstance }),
-  );
+  const explicitScopedFacts = Array.isArray(
+    metadata.scopedMaterialFacts,
+  )
+    ? metadata.scopedMaterialFacts.flatMap(
+        (entry): ScopedNewsMaterialFact[] => {
+          const parsed = ScopedNewsMaterialFactSchema.safeParse(entry);
+          return parsed.success &&
+            parsed.data.eventInstance.subject ===
+              eventInstance.subject &&
+            parsed.data.eventInstance.domain ===
+              eventInstance.domain &&
+            parsed.data.eventInstance.object === eventInstance.object
+            ? [parsed.data]
+            : [];
+        },
+      )
+    : [];
+  const facts = [
+    ...explicitScopedFacts,
+    ...deriveMaterialFacts(text, metadata, eventInstance).map(
+      (fact) => ({ ...fact, eventInstance }),
+    ),
+  ];
+  return [
+    ...new Map(
+      facts.map((fact) => [
+        `${fact.kind}\u0000${fact.key}\u0000${fact.value}`,
+        fact,
+      ]),
+    ).values(),
+  ];
 }
 
 export function deriveNamedEntities(

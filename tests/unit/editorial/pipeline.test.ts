@@ -259,7 +259,7 @@ describe("editorial production path", () => {
         title: "Evaluation Agency provides its morning update",
         primaryDocumentUrl: null,
         abstract:
-          "Its evaluation standard was adopted and covers 100 models.",
+          "Evaluation Agency adopts the AI evaluation standard covering 100 models.",
       }),
     );
     const original = clusterNews([originalItem], {})[0];
@@ -326,7 +326,7 @@ describe("editorial production path", () => {
           "Evaluation Agency offers July 29 briefing on 3 earlier reports",
         primaryDocumentUrl: null,
         abstract:
-          "The evaluation standard was adopted for 100 models. It cites an earlier benchmark covering 50 models.",
+          "Evaluation Agency adopts the AI evaluation standard for 100 models. It cites an earlier benchmark covering 50 models.",
       }),
     );
     const original = clusterNews([originalItem], {})[0];
@@ -506,14 +506,14 @@ describe("editorial production path", () => {
         title: "Evaluation Agency adopts evaluation standard",
         primaryDocumentUrl: null,
         abstract:
-          "The standard covers 100 models across 10 states.",
+          "The evaluation standard covers 100 models across 10 states.",
       }),
     );
     const partialItem = normalizeCandidate(
       rawNews("partial-facts", {
-        title: "Evaluation Agency confirms evaluation standard",
+        title: "Evaluation Agency adopts evaluation standard",
         primaryDocumentUrl: null,
-        abstract: "The standard covers 100 models.",
+        abstract: "The evaluation standard covers 100 models.",
       }),
     );
     const baseline = clusterNews([baselineItem], {})[0];
@@ -550,7 +550,7 @@ describe("editorial production path", () => {
         primaryDocumentUrl: "https://agency.gov/ai-standard",
         namedEntities: ["AI", "Evaluation Agency"],
         abstract:
-          "The Evaluation Agency standard covers 100 models.",
+          "The Evaluation Agency AI evaluation standard covers 100 models.",
       }),
     );
     const reporting = normalizeCandidate(
@@ -572,7 +572,7 @@ describe("editorial production path", () => {
         primaryDocumentUrl: "https://agency.gov/ai-standard",
         namedEntities: ["AI", "Evaluation Agency"],
         abstract:
-          "The Evaluation Agency adopted standard covers 200 models.",
+          "The Evaluation Agency AI evaluation standard covers 200 models.",
       }),
     );
     const original = clusterNews([official], {})[0];
@@ -613,7 +613,7 @@ describe("editorial production path", () => {
         primaryDocumentUrl: null,
         abstract: "The proposal covered 100 models.",
         content:
-          "The Evaluation Agency later adopted the standard for 100 models.",
+          "The Evaluation Agency later adopted the AI evaluation standard for 100 models.",
       }),
     );
     const development = clusterNews([item], {})[0];
@@ -725,7 +725,8 @@ describe("editorial production path", () => {
         [
           normalizeCandidate(
             rawNews(sourceId, {
-              title: "Evaluation Agency evaluation standard update",
+              title:
+                "Evaluation Agency updates AI evaluation standard",
               primaryDocumentUrl: null,
               abstract,
               content,
@@ -736,17 +737,17 @@ describe("editorial production path", () => {
       )[0];
     const proposed = development(
       "proposed",
-      "The requirements were proposed for 100 models.",
+      "The AI evaluation standard requirements were proposed for 100 models.",
     );
     const statusChanged = development(
       "status-changed",
       "Background on the evaluation program.",
-      "The requirements were adopted for 100 models.",
+      "The AI evaluation standard requirements were adopted for 100 models.",
     );
     const numericChanged = development(
       "numeric-changed",
       "Background on the evaluation program.",
-      "The requirements were proposed for 200 models.",
+      "The AI evaluation standard requirements were proposed for 200 models.",
     );
     expect(proposed).toBeDefined();
     expect(statusChanged).toBeDefined();
@@ -1105,6 +1106,86 @@ describe("editorial production path", () => {
     expect(conflicting?.eventInstance).toBeNull();
   });
 
+  it("binds event identity to the subject, predicate, and object in one sentence", () => {
+    const variants = [
+      {
+        sourceId: "analysis-first",
+        title:
+          "Model Institute analysis of Frontier Evaluation Standard",
+        abstract:
+          "Evaluation Agency proposed the Frontier Evaluation Standard.",
+      },
+      {
+        sourceId: "event-first",
+        title:
+          "Evaluation Agency proposes the Frontier Evaluation Standard",
+        abstract:
+          "Model Institute analysis of Frontier Evaluation Standard.",
+      },
+      {
+        sourceId: "passive-paraphrase",
+        title:
+          "Model Institute analysis of Frontier Evaluation Standard",
+        abstract:
+          "The Frontier Evaluation Standard was proposed by Evaluation Agency.",
+      },
+      {
+        sourceId: "commentary-first",
+        title:
+          "Model Institute said the Frontier Evaluation Standard needs revision",
+        abstract:
+          "Evaluation Agency proposed the Frontier Evaluation Standard.",
+      },
+    ];
+    const developments = variants.map(({ sourceId, title, abstract }) =>
+      clusterNews(
+        [
+          normalizeCandidate(
+            rawNews(sourceId, {
+              title,
+              abstract,
+              primaryDocumentUrl: null,
+              namedEntities: [],
+            }),
+          ),
+        ],
+        {},
+      )[0],
+    );
+
+    expect(
+      developments.map((development) => development?.eventInstance),
+    ).toEqual([
+      {
+        subject: "evaluation-agency",
+        domain: "governance-event",
+        object: "frontier-evaluation-standard",
+      },
+      {
+        subject: "evaluation-agency",
+        domain: "governance-event",
+        object: "frontier-evaluation-standard",
+      },
+      {
+        subject: "evaluation-agency",
+        domain: "governance-event",
+        object: "frontier-evaluation-standard",
+      },
+      {
+        subject: "evaluation-agency",
+        domain: "governance-event",
+        object: "frontier-evaluation-standard",
+      },
+    ]);
+    expect(
+      new Set(
+        developments.map(
+          (development) => development?.developmentKey,
+        ),
+      ).size,
+    ).toBe(1);
+  });
+
   it("scopes terminal status and dates to the current event instance", () => {
     const title =
       "Evaluation Agency proposes Frontier Evaluation Standard";
@@ -1184,6 +1265,237 @@ describe("editorial production path", () => {
         },
       ]),
     );
+  });
+
+  it("requires facts to name the exact current event object", () => {
+    const currentProposal = clusterNews(
+      [
+        normalizeCandidate(
+          rawNews("exact-object-proposal", {
+            title:
+              "Evaluation Agency proposes Frontier Evaluation Standard",
+            abstract:
+              "Evaluation Agency proposed the Frontier Evaluation Standard with a deadline of December 1, 2026.",
+            content:
+              "Evaluation Agency adopted another policy, which takes effect July 1, 2026.",
+            primaryDocumentUrl: null,
+            namedEntities: [],
+          }),
+        ),
+      ],
+      {},
+    )[0];
+
+    expect(currentProposal?.materialFacts).toEqual(
+      expect.arrayContaining([
+        {
+          kind: "status",
+          key: "event-status",
+          value: "proposed",
+        },
+        {
+          kind: "date",
+          key: "deadline-date",
+          value: "2026-12-01",
+        },
+      ]),
+    );
+    expect(currentProposal?.materialFacts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "adopted" }),
+        expect.objectContaining({ value: "2026-07-01" }),
+      ]),
+    );
+
+    const sameSentence = clusterNews(
+      [
+        normalizeCandidate(
+          rawNews("same-sentence-other-object", {
+            title:
+              "Evaluation Agency proposes Frontier Evaluation Standard",
+            abstract:
+              "The Frontier Evaluation Standard remains proposed, while another policy was adopted and takes effect July 1, 2026.",
+            content: null,
+            primaryDocumentUrl: null,
+            namedEntities: [],
+          }),
+        ),
+      ],
+      {},
+    )[0];
+    expect(sameSentence?.materialFacts).toEqual([
+      {
+        kind: "status",
+        key: "event-status",
+        value: "proposed",
+      },
+    ]);
+
+    const explicitCurrentChange = clusterNews(
+      [
+        normalizeCandidate(
+          rawNews("exact-object-adopted", {
+            title:
+              "Evaluation Agency adopts Frontier Evaluation Standard",
+            abstract:
+              "Evaluation Agency adopted the Frontier Evaluation Standard, which takes effect July 1, 2027.",
+            content: null,
+            primaryDocumentUrl: null,
+            namedEntities: [],
+          }),
+        ),
+      ],
+      {},
+    )[0];
+
+    expect(explicitCurrentChange?.materialFacts).toEqual(
+      expect.arrayContaining([
+        {
+          kind: "status",
+          key: "event-status",
+          value: "adopted",
+        },
+        {
+          kind: "date",
+          key: "effective-date",
+          value: "2027-07-01",
+        },
+      ]),
+    );
+  });
+
+  it("scopes amounts and dates to an explicitly named funding program", () => {
+    const development = clusterNews(
+      [
+        normalizeCandidate(
+          rawNews("exact-funding-object", {
+            title:
+              "Funding Agency launches Community Research Program",
+            abstract:
+              "Funding Agency launched the Community Research Program with $100 million in funding, effective December 1, 2026.",
+            content:
+              "Funding Agency discussed another program with $125m in funding, effective July 1, 2027.",
+            primaryDocumentUrl: null,
+            namedEntities: [],
+          }),
+        ),
+      ],
+      {},
+    )[0];
+
+    expect(development?.materialFacts).toEqual(
+      expect.arrayContaining([
+        {
+          kind: "amount",
+          key: "funding-amount:usd",
+          value: "100000000",
+        },
+        {
+          kind: "date",
+          key: "effective-date",
+          value: "2026-12-01",
+        },
+      ]),
+    );
+    expect(development?.materialFacts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "125000000" }),
+        expect.objectContaining({ value: "2027-07-01" }),
+      ]),
+    );
+  });
+
+  it("drops legacy unscoped metadata facts before normalization", () => {
+    const title =
+      "Evaluation Agency proposes Frontier Evaluation Standard";
+    const abstract =
+      "Evaluation Agency proposed the Frontier Evaluation Standard.";
+    const upstreamSignals = deriveNewsSignals({
+      kind: "article",
+      title,
+      abstract,
+      content: null,
+      originalUrl: "https://legacy-facts.example.com/frontier",
+      sectionEligibility: ["ai_policy"],
+      metadata: {
+        primarySection: "ai_policy",
+        eventInstances: [
+          {
+            subject: "model-institute",
+            domain: "governance-event",
+            object: "frontier-evaluation-standard",
+          },
+        ],
+        materialFacts: [
+          {
+            kind: "status",
+            key: "event-status",
+            value: "adopted",
+          },
+          {
+            kind: "date",
+            key: "effective-date",
+            value: "2026-08-01",
+          },
+        ],
+        scopedMaterialFacts: [
+          {
+            kind: "status",
+            key: "event-status",
+            value: "adopted",
+            eventInstance: {
+              subject: "model-institute",
+              domain: "governance-event",
+              object: "frontier-evaluation-standard",
+            },
+          },
+        ],
+      },
+      preferredSection: "ai_policy",
+    });
+
+    expect(upstreamSignals.materialFacts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "adopted" }),
+        expect.objectContaining({ value: "2026-08-01" }),
+      ]),
+    );
+    expect(upstreamSignals.eventInstances).toEqual([
+      {
+        subject: "evaluation-agency",
+        domain: "governance-event",
+        object: "frontier-evaluation-standard",
+      },
+    ]);
+    expect(upstreamSignals.scopedMaterialFacts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "adopted" }),
+        expect.objectContaining({ value: "2026-08-01" }),
+      ]),
+    );
+
+    const development = clusterNews(
+      [
+        normalizeCandidate(
+          rawNews("legacy-facts", {
+            ...upstreamSignals,
+            title,
+            abstract,
+            content: null,
+            primaryDocumentUrl: null,
+            namedEntities: [],
+          }),
+        ),
+      ],
+      {},
+    )[0];
+    expect(development?.materialFacts).toEqual([
+      {
+        kind: "status",
+        key: "event-status",
+        value: "proposed",
+      },
+    ]);
   });
 
   it("normalizes and fingerprints funding amount changes", () => {

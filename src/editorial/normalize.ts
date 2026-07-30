@@ -4,10 +4,8 @@ import {
   normalizeDoi,
 } from "../sources/identifiers";
 import {
-  CanonicalEventInstanceSchema,
   EditorialSignalRecordSchema,
   ScopedNewsMaterialFactSchema,
-  type CanonicalEventInstance,
   RawItemSchema,
   type ScopedNewsMaterialFact,
 } from "../sources/types";
@@ -89,14 +87,6 @@ function stringArray(value: unknown): string[] {
         .map(normalizedWhitespace)
         .filter((entry) => entry.length > 0)
     : [];
-}
-
-function eventInstances(value: unknown): CanonicalEventInstance[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry): CanonicalEventInstance[] => {
-    const parsed = CanonicalEventInstanceSchema.safeParse(entry);
-    return parsed.success ? [parsed.data] : [];
-  });
 }
 
 function scopedMaterialFacts(
@@ -227,19 +217,12 @@ export function normalizeCandidate(raw: unknown): Item {
       ),
     ],
   );
-  const explicitEventInstances = eventInstances(
-    input.eventInstances ??
-      candidate.metadata.eventInstances,
+  const derivedEventInstances = deriveCanonicalEventInstances(
+    materialText,
+    candidate.metadata,
+    namedEntities,
+    eventFamilies,
   );
-  const derivedEventInstances =
-    explicitEventInstances.length > 0
-      ? explicitEventInstances
-      : deriveCanonicalEventInstances(
-          materialText,
-          candidate.metadata,
-          namedEntities,
-          eventFamilies,
-        );
   const canonicalEventInstances = [
     ...new Map(
       derivedEventInstances.map((instance) => [
@@ -256,6 +239,13 @@ export function normalizeCandidate(raw: unknown): Item {
   const explicitScopedFacts = scopedMaterialFacts(
     input.scopedMaterialFacts ??
       candidate.metadata.scopedMaterialFacts,
+  ).filter((fact) =>
+    canonicalEventInstances.some(
+      (instance) =>
+        instance.subject === fact.eventInstance.subject &&
+        instance.domain === fact.eventInstance.domain &&
+        instance.object === fact.eventInstance.object,
+    ),
   );
   const {
     materialFacts: _unscopedMaterialFacts,
