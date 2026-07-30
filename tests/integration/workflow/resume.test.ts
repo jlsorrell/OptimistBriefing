@@ -12,6 +12,7 @@ import {
   RunParamsSchema,
   ScheduledModelConfigSchema,
 } from "../../../src/workflow/daily-briefing-workflow";
+import { D1BriefingRepository } from "../../../src/db/d1-repository";
 import {
   PIPELINE_STEPS,
   runEditorialPipeline,
@@ -23,7 +24,7 @@ import type {
   PipelineStep,
   PipelineStore,
 } from "../../../src/workflow/types";
-import { coordinateScheduledBriefing } from "../../../src/worker";
+import { coordinateScheduledBriefing } from "../../../src/workflow/schedule";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv {
@@ -242,7 +243,10 @@ describe("durable workflow checkpoint execution", () => {
       get: async () => { throw new Error("get must not be called"); },
     };
     await coordinateScheduledBriefing(
-      { DB: env.DB, DAILY_BRIEFING: binding as never },
+      {
+        listRuns: () => new D1BriefingRepository(env.DB).listWorkflowRuns(),
+        workflow: binding as never,
+      },
       new Date("2026-07-29T08:30:00.000Z"),
     );
     expect(created).toEqual([{
@@ -261,7 +265,10 @@ describe("durable workflow checkpoint execution", () => {
       null, 0, now, now,
     ).run();
     await coordinateScheduledBriefing(
-      { DB: env.DB, DAILY_BRIEFING: binding as never },
+      {
+        listRuns: () => new D1BriefingRepository(env.DB).listWorkflowRuns(),
+        workflow: binding as never,
+      },
       new Date("2026-07-30T08:30:00.000Z"),
     );
     expect(created).toHaveLength(1);
@@ -289,7 +296,10 @@ describe("durable workflow checkpoint execution", () => {
       },
     };
     await coordinateScheduledBriefing(
-      { DB: env.DB, DAILY_BRIEFING: binding as never },
+      {
+        listRuns: () => new D1BriefingRepository(env.DB).listWorkflowRuns(),
+        workflow: binding as never,
+      },
       new Date("2026-07-29T08:30:00.000Z"),
     );
     expect(restarts).toBe(1);

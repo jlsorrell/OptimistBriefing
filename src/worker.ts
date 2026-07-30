@@ -3,12 +3,13 @@ import { createApp } from "./api/app";
 import { internalErrorResponse } from "./api/errors";
 import { D1BriefingRepository } from "./db/d1-repository";
 import { createD1WorkflowLauncher } from "./workflow/run-editorial-pipeline";
-import { shouldRunAt } from "./workflow/schedule";
+import { coordinateScheduledBriefing } from "./workflow/schedule";
 import {
   createBudgetedPipelineRuntimeFactory,
   type RunParams,
 } from "./workflow/daily-briefing-workflow";
 export { DailyBriefingWorkflow } from "./workflow/daily-briefing-workflow";
+export { coordinateScheduledBriefing };
 
 export interface Env {
   DB: D1Database;
@@ -48,47 +49,13 @@ export default {
     }
   },
   async scheduled(_controller, env: Env): Promise<void> {
-    await coordinateScheduledBriefing(env, new Date());
+    const repository = new D1BriefingRepository(env.DB);
+    await coordinateScheduledBriefing({
+      listRuns: () => repository.listWorkflowRuns(),
+      workflow: env.DAILY_BRIEFING,
+    }, new Date());
   },
 } satisfies ExportedHandler<Env>;
-
-export async function coordinateScheduledBriefing(
-  env: Pick<Env, "DB" | "DAILY_BRIEFING">,
-  now: Date,
-): Promise<void> {
-    const initial = shouldRunAt(now, "America/New_York", { status: "missing" });
-    if (!initial.run) return;
-    const repository = new D1BriefingRepository(env.DB);
-    const run = (await repository.listWorkflowRuns()).find(
-      (candidate) => candidate.editionDate === initial.editionDate,
-    ) ?? null;
-    const decision = shouldRunAt(now, "America/New_York", {
-      status: run?.status ?? "missing",
-    });
-    if (!decision.run) return;
-    if (run?.retryable) {
-      const instance = await env.DAILY_BRIEFING.get(initial.editionDate);
-      const state = await instance.status();
-      if (state.status === "unknown") {
-        await env.DAILY_BRIEFING.create({
-          id: initial.editionDate,
-          params: { editionDate: initial.editionDate, runId: run.id },
-          retention: { successRetention: "90 days", errorRetention: "90 days" },
-        });
-      } else if (state.status === "paused") {
-        await instance.resume();
-      } else if (state.status !== "running" && state.status !== "queued") {
-        await instance.restart();
-      }
-      return;
-    }
-    if (run !== null) return;
-    await env.DAILY_BRIEFING.create({
-      id: initial.editionDate,
-      params: { editionDate: initial.editionDate, runId: initial.editionDate },
-      retention: { successRetention: "90 days", errorRetention: "90 days" },
-    });
-}
 
 function requiredBinding(value: string, name: string): string {
   if (value.trim().length === 0) throw new Error(`${name} is required`);

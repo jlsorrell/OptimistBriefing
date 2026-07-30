@@ -753,6 +753,21 @@ function applyResearchBudget(
   });
 }
 
+function isOptionalRadar(item: Item): boolean {
+  if (item.metadata.section === "research_radar") return true;
+  const workflow = WorkflowItemPayloadSchema.safeParse(item.metadata.workflow);
+  return workflow.success && workflow.data.researchTier === "radar";
+}
+
+function providerEligibleItems(
+  items: readonly Item[],
+  policy: BudgetPolicy | undefined,
+): readonly Item[] {
+  return policy?.state === "hard_stop"
+    ? items.filter((item) => !isOptionalRadar(item))
+    : items;
+}
+
 export function createProductionPipelineContext(
   options: ProductionPipelineContextOptions,
 ): PipelineContext {
@@ -824,7 +839,8 @@ export function createProductionPipelineContext(
             READER_PROFILE.researchQualityGates.minimumTopicalFit
         );
       }),
-    assess: async (items) => Promise.all(items.map(async (candidate) => {
+    assess: async (items) => Promise.all(
+      providerEligibleItems(items, options.budgetPolicy).map(async (candidate) => {
       const item = WorkflowItemSchema.parse(candidate);
       if (item.kind !== "paper" && item.kind !== "blog") return item;
       const rawResearch = workflowPayload(item).rawResearch;
@@ -976,7 +992,8 @@ export function createProductionPipelineContext(
       });
     },
     synthesize: async (items) => {
-      const summaries = await Promise.all(items.map(async (candidate) => {
+      const summaries = await Promise.all(
+        providerEligibleItems(items, options.budgetPolicy).map(async (candidate) => {
         const item = WorkflowItemSchema.parse(candidate);
         try {
           return {
@@ -988,7 +1005,7 @@ export function createProductionPipelineContext(
                 ? {}
                 : {
                     maxOutputTokens:
-                      item.metadata.section === "research_radar"
+                      isOptionalRadar(item)
                         ? options.budgetPolicy.radarSummaryTokens
                         : options.budgetPolicy.featuredSummaryTokens,
                   },
