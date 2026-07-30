@@ -4,6 +4,10 @@ import type { BriefingRepository } from "../db/repository";
 import { EditionSchema } from "../contracts/editorial";
 import { decodeEditionCursor } from "../pagination/edition-cursor";
 import {
+  WorkflowResumeUnavailableError,
+  WorkflowRunAlreadyExistsError,
+} from "../workflow/run-editorial-pipeline";
+import {
   ApiError,
   AuthenticationRequiredError,
   ForbiddenError,
@@ -20,8 +24,11 @@ export type AuthenticatedUser = {
 export type AuthVerifier = (token: string) => Promise<AuthenticatedUser>;
 
 export interface WorkflowLauncher {
-  start(input: { editionDate: string }): Promise<{ runId: string }>;
-  resume(input: { runId: string }): Promise<void>;
+  start(input: {
+    editionDate: string;
+    actorEmail?: string;
+  }): Promise<{ runId: string }>;
+  resume(input: { runId: string; actorEmail?: string }): Promise<void>;
 }
 
 export type AppDependencies = {
@@ -116,6 +123,50 @@ export function createApp(dependencies: AppDependencies): Hono<AppEnv> {
       throw new NotFoundError();
     }
     return context.json(edition);
+  });
+
+  app.post("/api/admin/runs", async (context) => {
+    if (dependencies.workflow === null) throw new NotFoundError();
+    const body: unknown = await context.req.json().catch(() => null);
+    const editionDate =
+      typeof body === "object" && body !== null && "editionDate" in body
+        ? (body as { editionDate?: unknown }).editionDate
+        : undefined;
+    const parsedDate = EditionSchema.shape.editionDate.safeParse(editionDate);
+    if (!parsedDate.success) throw new ValidationError();
+    try {
+      const result = await dependencies.workflow.start({
+        editionDate: parsedDate.data,
+        actorEmail: context.var.user.email,
+      });
+      return context.json(result, 202);
+    } catch (error) {
+      if (error instanceof WorkflowRunAlreadyExistsError) {
+        return context.json(
+          { error: { code: "RUN_ALREADY_EXISTS", message: "A run already exists for this edition date." } },
+          409,
+        );
+      }
+      throw error;
+    }
+  });
+
+  app.post("/api/admin/runs/:runId/resume", async (context) => {
+    if (dependencies.workflow === null) throw new NotFoundError();
+    const runId = context.req.param("runId");
+    if (runId.length === 0) throw new ValidationError();
+    try {
+      await dependencies.workflow.resume({
+        runId,
+        actorEmail: context.var.user.email,
+      });
+      return context.body(null, 202);
+    } catch (error) {
+      if (error instanceof WorkflowResumeUnavailableError) {
+        throw new ValidationError();
+      }
+      throw error;
+    }
   });
 
   return app;

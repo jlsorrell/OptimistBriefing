@@ -2,6 +2,7 @@ import { createAccessVerifier, parseAllowedEmails } from "./auth/access";
 import { createApp } from "./api/app";
 import { internalErrorResponse } from "./api/errors";
 import { D1BriefingRepository } from "./db/d1-repository";
+import { createD1WorkflowLauncher } from "./workflow/run-editorial-pipeline";
 
 export interface Env {
   DB: D1Database;
@@ -20,7 +21,7 @@ export default {
           audience: env.CLOUDFLARE_ACCESS_AUDIENCE,
           allowedEmails: parseAllowedEmails(env.ALLOWED_EMAILS),
         }),
-        workflow: null,
+        workflow: createD1WorkflowLauncher(env.DB),
       });
       return app.fetch(request);
     } catch {
