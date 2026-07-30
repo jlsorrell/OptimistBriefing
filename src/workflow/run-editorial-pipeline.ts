@@ -9,6 +9,7 @@ import { deduplicateItems } from "../editorial/deduplicate";
 import { summarizeItem } from "../editorial/summarize";
 import { validateSummary, type SourcePacket } from "../editorial/validate-summary";
 import type { ModelProvider } from "../models/provider";
+import { ItemSchema, StructuredSummarySchema } from "../contracts/editorial";
 import type {
   Edition,
   EditionEntry,
@@ -65,6 +66,20 @@ const PersistedArtifactSchema = z.object({
   output: z.unknown(), attempts: z.number().int().positive(), durationMs: z.number().finite().nonnegative(),
   itemCount: z.number().int().nonnegative(), estimatedCostUsd: z.number().finite().nonnegative(),
 }).strict();
+const SummaryCandidateSchema = z.object({ item: ItemSchema, summary: StructuredSummarySchema }).strict();
+const ValidatedSummaryCandidateSchema = SummaryCandidateSchema.extend({ valid: z.boolean(), validationErrors: z.array(z.string()).optional() }).strict();
+const CompositionSchema = z.object({
+  edition: z.object({ id: z.string().min(1), editionDate: z.string(), runId: z.string(), status: z.literal("draft"), readingMinutes: z.number().int().positive().nullable(), publishedAt: z.null(), createdAt: z.string(), metadata: z.object({ missingSections: z.array(z.string()), sourceFailures: z.array(z.string()) }) }),
+  entries: z.array(z.unknown()), status: z.enum(["published", "partial", "failed"]), missingSections: z.array(z.string()), sourceFailures: z.array(z.string()),
+}).strict();
+
+function validateCheckpointOutput(step: (typeof PIPELINE_STEPS)[number], output: unknown): unknown {
+  if (["collect", "normalize", "enrich", "prefilter", "assess", "score", "cluster", "shortlist"].includes(step)) return z.array(ItemSchema).parse(output);
+  if (step === "synthesize") return z.array(SummaryCandidateSchema).parse(output);
+  if (step === "validate") return z.array(ValidatedSummaryCandidateSchema).parse(output);
+  if (step === "compose" || step === "publish") return CompositionSchema.parse(output);
+  return z.never().parse(step);
+}
 
 class D1PipelineStore implements PipelineStore {
   readonly repository: D1BriefingRepository;
@@ -126,6 +141,7 @@ class D1PipelineStore implements PipelineStore {
     artifact: CheckpointArtifact,
   ): Promise<void> {
     const validArtifact = PersistedArtifactSchema.parse(artifact);
+    validateCheckpointOutput(step, validArtifact.output);
     await this.db.prepare(
       `INSERT INTO audit_events (id, run_id, event_type, event_json, created_at)
        VALUES (?, ?, ?, ?, ?)`,
@@ -177,7 +193,9 @@ class D1PipelineStore implements PipelineStore {
       try {
         const parsed = JSON.parse(record.event_json) as { step?: unknown; artifact?: unknown };
         if (parsed.step !== step) continue;
-        return PersistedArtifactSchema.parse(parsed.artifact) as CheckpointArtifact<T>;
+        const artifact = PersistedArtifactSchema.parse(parsed.artifact);
+        validateCheckpointOutput(step, artifact.output);
+        return artifact as CheckpointArtifact<T>;
       } catch {
         // Corrupt diagnostic data is not a completed checkpoint.
       }
@@ -383,7 +401,7 @@ async function checkpoint<T>(
   }
   const estimatedCostUsd = context.estimateCostUsd?.(step, output) ?? 0;
   const artifact: CheckpointArtifact<T> = {
-    output,
+    output: validateCheckpointOutput(step, output) as T,
     attempts: attempt,
     durationMs: Math.max(0, Date.parse(context.now()) - startedAt),
     itemCount: countOutput(output),

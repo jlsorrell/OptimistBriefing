@@ -94,14 +94,19 @@ export const EditionStatusSchema = z.enum([
 ]);
 
 export type EditionMetadata = {
-  missingSections: string[];
-  sourceFailures: string[];
+  missingSections?: string[];
+  sourceFailures?: string[];
 };
 
-export const EditionMetadataSchema: z.ZodType<EditionMetadata> = z.object({
-  missingSections: z.array(z.string().min(1).max(200)).max(32),
-  sourceFailures: z.array(z.string().min(1).max(200)).max(64),
+const EditionMetadataBaseSchema = z.object({
+  missingSections: z.array(z.string().min(1).max(200)).max(32).default([]),
+  sourceFailures: z.array(z.string().min(1).max(200)).max(64).default([]),
 }).strict();
+export const EditionMetadataSchema = EditionMetadataBaseSchema as unknown as z.ZodType<
+  EditionMetadata,
+  z.ZodTypeDef,
+  EditionMetadata
+>;
 
 export const EditionSchema = z.object({
   id: z.string().min(1),

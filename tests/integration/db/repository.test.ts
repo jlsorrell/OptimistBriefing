@@ -131,6 +131,18 @@ describe("D1BriefingRepository", () => {
       },
     });
   });
+
+  it("reads the migration's legacy empty metadata default as a complete safe shape", async () => {
+    await env.DB.prepare(
+      `INSERT INTO editions (id, edition_date, run_id, status, reading_minutes, published_at, created_at, metadata_json)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind("legacy-metadata", "2032-01-02", "legacy-run", "published", null,
+      "2032-01-02T09:00:00.000Z", "2032-01-02T08:00:00.000Z", "{}").run();
+    const repo = new D1BriefingRepository(env.DB);
+    await expect(repo.getEditionByDate("2032-01-02")).resolves.toMatchObject({
+      metadata: { missingSections: [], sourceFailures: [] },
+    });
+  });
   it("seeds an editable source catalog without overwriting local customization", async () => {
     const repo = new D1BriefingRepository(env.DB);
     const catalog = await repo.listSources();
