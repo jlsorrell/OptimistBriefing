@@ -589,6 +589,134 @@ describe("D1BriefingRepository", () => {
     );
   });
 
+  it("persists complete provenance without rewriting catalog source URLs", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const cases = [
+      {
+        name: "one article discovered through multiple catalog sources",
+        item: fixtureItem("multi-catalog-source", {
+          canonicalUrl:
+            "https://www.reuters.com/world/shared-development",
+          sourceRefs: [
+            {
+              id: "reuters",
+              name: "Reuters",
+              url: "https://www.reuters.com/world/shared-development",
+              role: "reporting" as const,
+              retrievedAt: "2026-07-29T09:00:00.000Z",
+            },
+            {
+              id: "gdelt",
+              name: "GDELT",
+              url: "https://www.reuters.com/world/shared-development",
+              role: "analysis" as const,
+              retrievedAt: "2026-07-29T09:01:00.000Z",
+            },
+          ],
+        }),
+        expectedItemSources: [
+          {
+            source_id: "gdelt",
+            source_name: "GDELT",
+            source_url:
+              "https://www.reuters.com/world/shared-development",
+            role: "analysis",
+            retrieved_at: "2026-07-29T09:01:00.000Z",
+          },
+          {
+            source_id: "reuters",
+            source_name: "Reuters",
+            source_url:
+              "https://www.reuters.com/world/shared-development",
+            role: "reporting",
+            retrieved_at: "2026-07-29T09:00:00.000Z",
+          },
+        ],
+      },
+      {
+        name: "repeated source ID with multiple retained URLs",
+        item: fixtureItem("repeated-source-id", {
+          canonicalUrl:
+            "https://www.reuters.com/world/repeated-discovery",
+          sourceRefs: [
+            {
+              id: "reuters",
+              name: "Reuters",
+              url:
+                "https://www.reuters.com/world/repeated-discovery?view=z",
+              role: "reporting" as const,
+              retrievedAt: "2026-07-29T09:05:00.000Z",
+            },
+            {
+              id: "reuters",
+              name: "Reuters",
+              url:
+                "https://www.reuters.com/world/repeated-discovery?view=a",
+              role: "reporting" as const,
+              retrievedAt: "2026-07-29T09:00:00.000Z",
+            },
+          ],
+        }),
+        expectedItemSources: [
+          {
+            source_id: "reuters",
+            source_name: "Reuters",
+            source_url:
+              "https://www.reuters.com/world/repeated-discovery?view=a",
+            role: "reporting",
+            retrieved_at: "2026-07-29T09:00:00.000Z",
+          },
+        ],
+      },
+    ] as const;
+
+    for (const testCase of cases) {
+      await expect(
+        repo.upsertItems([testCase.item]),
+        testCase.name,
+      ).resolves.toBeUndefined();
+
+      const itemSources = await env.DB.prepare(
+        `SELECT source_id, source_name, source_url, role, retrieved_at
+         FROM item_sources
+         WHERE item_id = ?
+         ORDER BY source_id`,
+      )
+        .bind(testCase.item.id)
+        .all();
+      expect(itemSources.results, testCase.name).toEqual(
+        testCase.expectedItemSources,
+      );
+
+      const itemRow = await env.DB.prepare(
+        "SELECT normalized_json FROM items WHERE id = ?",
+      )
+        .bind(testCase.item.id)
+        .first<{ normalized_json: string }>();
+      expect(
+        JSON.parse(itemRow?.normalized_json ?? "null").sourceRefs,
+        testCase.name,
+      ).toEqual(testCase.item.sourceRefs);
+    }
+
+    const catalogUrls = await env.DB.prepare(
+      `SELECT id, canonical_url
+       FROM sources
+       WHERE id IN ('gdelt', 'reuters')
+       ORDER BY id`,
+    ).all();
+    expect(catalogUrls.results).toEqual([
+      {
+        id: "gdelt",
+        canonical_url: "https://www.gdeltproject.org/",
+      },
+      {
+        id: "reuters",
+        canonical_url: "https://www.reuters.com/",
+      },
+    ]);
+  });
+
   it("persists feedback history without inferring preference weights", async () => {
     const repo = new D1BriefingRepository(env.DB);
     await repo.upsertItems([fixtureItem("feedback-item")]);

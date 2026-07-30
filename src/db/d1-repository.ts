@@ -415,7 +415,20 @@ export class D1BriefingRepository implements BriefingRepository {
         item,
         "Invalid item JSON",
       );
-      for (const source of item.sourceRefs) {
+      const itemSources = [...item.sourceRefs]
+        .sort(
+          (left, right) =>
+            left.id.localeCompare(right.id) ||
+            left.url.localeCompare(right.url) ||
+            left.name.localeCompare(right.name) ||
+            left.role.localeCompare(right.role) ||
+            left.retrievedAt.localeCompare(right.retrievedAt),
+        )
+        .filter(
+          (source, index, sources) =>
+            index === 0 || sources[index - 1]?.id !== source.id,
+        );
+      for (const source of itemSources) {
         statements.push(
           this.db
             .prepare(
@@ -425,7 +438,6 @@ export class D1BriefingRepository implements BriefingRepository {
               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
               ON CONFLICT(id) DO UPDATE SET
                 canonical_name = excluded.canonical_name,
-                canonical_url = excluded.canonical_url,
                 role = excluded.role`,
             )
             .bind(
@@ -478,7 +490,7 @@ export class D1BriefingRepository implements BriefingRepository {
         ),
       );
 
-      for (const source of item.sourceRefs) {
+      for (const source of itemSources) {
         statements.push(
           this.db
             .prepare(
