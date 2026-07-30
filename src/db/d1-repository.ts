@@ -26,23 +26,31 @@ import {
   type StructuredSummary,
 } from "../contracts/editorial";
 import {
+  approvedBaselinePreferences,
   CreateSourceInputSchema,
+  FeedbackAdjustmentSchema,
   FeedbackInputSchema,
+  PreferenceUpdateInputSchema,
   ReaderPreferencesSchema,
   RepositoryValidationError,
   serializeJsonMutation,
+  SourceAlreadyExistsError,
   SourceRecordSchema,
   UpdateSourceInputSchema,
+  WorkflowRunDetailSchema,
   WorkflowRunSchema,
   type ArchiveSearchInput,
   type BriefingRepository,
   type CreateSourceInput,
   type EditionListInput,
   type FeedbackInput,
+  type FeedbackAdjustment,
+  type PreferenceUpdateInput,
   type ReaderPreferences,
   type SourceRecord,
   type UpdateSourceInput,
   type WorkflowRun,
+  type WorkflowRunDetail,
 } from "./repository";
 import {
   decodeEditionCursor,
@@ -63,6 +71,7 @@ const ArchiveInputSchema = PageInputSchema.extend({
   institution: z.string().trim().min(1).nullable(),
   source: z.string().trim().min(1).nullable(),
   section: EditionSectionSchema.nullable(),
+  saved: z.boolean().optional().default(false),
 });
 const OffsetCursorSchema = z.object({
   offset: z.number().int().nonnegative(),
@@ -128,6 +137,17 @@ type WorkflowRunRow = {
   estimated_cost_usd: number;
   created_at: string;
   updated_at: string;
+};
+
+type AuditEventRow = {
+  event_type: string;
+  event_json: string;
+  created_at: string;
+};
+
+type PublishedRunRow = {
+  published_at: string | null;
+  metadata_json: string;
 };
 
 function validated<T>(
@@ -259,6 +279,15 @@ function storedBoolean(value: unknown, context: string): boolean {
   throw new RepositoryValidationError(`${context}: expected 0 or 1`);
 }
 
+function publicDiagnostic(
+  value: string,
+  fallback: string,
+): string {
+  return /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(value)
+    ? value
+    : fallback;
+}
+
 function sourceFromRow(row: SourceRow): SourceRecord {
   const stored = parsedJson(
     row.restrictions_json,
@@ -312,7 +341,10 @@ function workflowRunFromRow(row: WorkflowRunRow): WorkflowRun {
         "Invalid workflow retryable value",
       ),
       attemptCount: row.attempt_count,
-      failureCode: row.failure_code,
+      failureCode:
+        row.failure_code === null
+          ? null
+          : publicDiagnostic(row.failure_code, "REDACTED_FAILURE"),
       estimatedCostUsd: row.estimated_cost_usd,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
@@ -334,6 +366,58 @@ function restrictionsJson(source: {
     },
     "Invalid source restrictions",
   );
+}
+
+function feedbackMetadata(row: FeedbackRow): {
+  reason: FeedbackInput["reason"];
+  adjustments: FeedbackAdjustment[];
+} {
+  if (row.reason === null) {
+    return { reason: null, adjustments: [] };
+  }
+  try {
+    const parsed = parsedJson(row.reason, "Invalid feedback metadata");
+    const result = z.object({
+      reason: FeedbackInputSchema.shape.reason,
+      adjustments: z.array(FeedbackAdjustmentSchema),
+    }).strict().safeParse(parsed);
+    if (result.success) {
+      return result.data;
+    }
+  } catch {
+    // Legacy rows stored the reason directly.
+  }
+  const legacyReason = FeedbackInputSchema.shape.reason.safeParse(row.reason);
+  if (!legacyReason.success) {
+    throw new RepositoryValidationError("Invalid feedback reason");
+  }
+  return { reason: legacyReason.data, adjustments: [] };
+}
+
+function uniqueStrings(values: readonly string[]): string[] {
+  return [...new Set(values)].sort((left, right) =>
+    left.localeCompare(right),
+  );
+}
+
+function isUniqueConstraint(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    /UNIQUE constraint failed: sources\.(canonical_url|id)/i.test(
+      error.message,
+    )
+  );
+}
+
+function canonicalSourceUrl(value: unknown): unknown {
+  if (typeof value !== "string") {
+    return value;
+  }
+  try {
+    return new URL(value).href;
+  } catch {
+    return value;
+  }
 }
 
 function summaryStatements(
@@ -981,6 +1065,16 @@ export class D1BriefingRepository implements BriefingRepository {
       clauses.push("ee.section = ?");
       values.push(validInput.section);
     }
+    if (validInput.saved) {
+      clauses.push(
+        `(SELECT saved_feedback.action
+          FROM feedback saved_feedback
+          WHERE saved_feedback.item_id = i.id
+            AND saved_feedback.action IN ('save', 'unsave')
+          ORDER BY saved_feedback.created_at DESC, saved_feedback.rowid DESC
+          LIMIT 1) = 'save'`,
+      );
+    }
 
     values.push(validInput.limit + 1, offset);
     const ftsJoin =
@@ -1033,6 +1127,98 @@ export class D1BriefingRepository implements BriefingRepository {
       input,
       "Invalid feedback",
     );
+    const item = await this.db
+      .prepare("SELECT normalized_json FROM items WHERE id = ?")
+      .bind(validInput.itemId)
+      .first<{ normalized_json: string }>();
+    if (item === null) {
+      throw new RepositoryValidationError("Feedback item not found");
+    }
+
+    const adjustments: FeedbackAdjustment[] = [];
+    if (
+      validInput.action === "more_like_this" ||
+      validInput.action === "less_like_this"
+    ) {
+      const preferences = await this.preferenceRow();
+      const delta = validInput.action === "more_like_this" ? 0.1 : -0.1;
+      const baseline = approvedBaselinePreferences();
+      const dimension =
+        validInput.reason === "source" ? "source" : "topic";
+      let key: string;
+      if (dimension === "source") {
+        const source = await this.db
+          .prepare(
+            `SELECT source_id
+            FROM item_sources
+            WHERE item_id = ?
+            ORDER BY source_id
+            LIMIT 1`,
+          )
+          .bind(validInput.itemId)
+          .first<{ source_id: string }>();
+        if (source === null) {
+          throw new RepositoryValidationError(
+            "Feedback item has no source",
+          );
+        }
+        key = source.source_id;
+      } else {
+        const storedItem = validated(
+          ItemSchema,
+          parsedJson(item.normalized_json, "Invalid feedback item"),
+          "Invalid feedback item",
+        );
+        key = storedItem.primaryTopic;
+      }
+      const field =
+        dimension === "source"
+          ? "source_weights_json"
+          : "topic_weights_json";
+      const current = validated(
+        z.record(z.string(), z.number().finite()),
+        parsedJson(preferences[field], "Invalid preference weights"),
+        "Invalid preference weights",
+      );
+      const baselineMap =
+        dimension === "source"
+          ? baseline.sourceWeights
+          : baseline.topicWeights;
+      const priorFeedback = await this.db
+        .prepare(
+          `SELECT id, item_id, action, reason, created_at
+          FROM feedback
+          ORDER BY created_at, rowid`,
+        )
+        .all<FeedbackRow>();
+      const lastMatchingAdjustment = priorFeedback.results
+        .flatMap((record) => feedbackMetadata(record).adjustments)
+        .filter(
+          (adjustment) =>
+            adjustment.dimension === dimension &&
+            adjustment.key === key,
+        )
+        .at(-1);
+      const resultingWeight =
+        Math.round(
+          (
+            (
+              lastMatchingAdjustment?.resultingWeight ??
+              current[key] ??
+              baselineMap[key] ??
+              0
+            ) + delta
+          ) * 10,
+        ) /
+        10;
+      adjustments.push({
+        dimension,
+        key,
+        delta,
+        resultingWeight,
+      });
+    }
+
     await this.db
       .prepare(
         `INSERT INTO feedback (id, item_id, action, reason, created_at)
@@ -1042,30 +1228,17 @@ export class D1BriefingRepository implements BriefingRepository {
         crypto.randomUUID(),
         validInput.itemId,
         validInput.action,
-        validInput.reason,
+        JSON.stringify({
+          reason: validInput.reason,
+          adjustments,
+        }),
         new Date().toISOString(),
       )
       .run();
   }
 
   async getPreferences(): Promise<ReaderPreferences> {
-    const row = await this.db
-      .prepare(
-        `SELECT
-          topic_weights_json,
-          source_weights_json,
-          institution_weights_json,
-          section_budgets_json
-        FROM preferences
-        WHERE id = ?`,
-      )
-      .bind("reader")
-      .first<PreferencesRow>();
-    if (row === null) {
-      throw new RepositoryValidationError(
-        "Reader preference row is missing",
-      );
-    }
+    const row = await this.preferenceRow();
     const feedback = await this.db
       .prepare(
         `SELECT id, item_id, action, reason, created_at
@@ -1093,16 +1266,131 @@ export class D1BriefingRepository implements BriefingRepository {
           row.section_budgets_json,
           "Invalid section budgets",
         ),
-        feedbackHistory: feedback.results.map((record) => ({
-          id: record.id,
-          itemId: record.item_id,
-          action: record.action,
-          reason: record.reason,
-          createdAt: record.created_at,
-        })),
+        baseline: approvedBaselinePreferences(),
+        feedbackHistory: feedback.results.map((record) => {
+          const metadata = feedbackMetadata(record);
+          return {
+            id: record.id,
+            itemId: record.item_id,
+            action: record.action,
+            reason: metadata.reason,
+            adjustments: metadata.adjustments,
+            createdAt: record.created_at,
+          };
+        }),
       },
       "Invalid reader preferences",
     );
+  }
+
+  async updatePreferences(
+    input: PreferenceUpdateInput,
+  ): Promise<ReaderPreferences> {
+    serializeJsonMutation(input, "Invalid preference mutation");
+    const validInput = validated(
+      PreferenceUpdateInputSchema,
+      input,
+      "Invalid preference update",
+    );
+    await this.db
+      .prepare(
+        `UPDATE preferences SET
+          topic_weights_json = ?,
+          source_weights_json = ?,
+          institution_weights_json = ?,
+          section_budgets_json = ?,
+          updated_at = ?
+        WHERE id = ?`,
+      )
+      .bind(
+        serializeJsonMutation(
+          validInput.topicWeights,
+          "Invalid topic weights",
+        ),
+        serializeJsonMutation(
+          validInput.sourceWeights,
+          "Invalid source weights",
+        ),
+        serializeJsonMutation(
+          validInput.institutionWeights,
+          "Invalid institution weights",
+        ),
+        serializeJsonMutation(
+          validInput.sectionBudgets,
+          "Invalid section budgets",
+        ),
+        new Date().toISOString(),
+        "reader",
+      )
+      .run();
+    return this.getPreferences();
+  }
+
+  async removeFeedbackAdjustment(
+    feedbackId: string,
+  ): Promise<ReaderPreferences> {
+    const validId = validated(
+      NonemptyIdSchema,
+      feedbackId,
+      "Invalid feedback ID",
+    );
+    const feedback = await this.db
+      .prepare(
+        `SELECT id, item_id, action, reason, created_at
+        FROM feedback
+        WHERE id = ?`,
+      )
+      .bind(validId)
+      .first<FeedbackRow>();
+    if (feedback === null) {
+      throw new RepositoryValidationError("Feedback adjustment not found");
+    }
+    const metadata = feedbackMetadata(feedback);
+    if (metadata.adjustments.length === 0) {
+      throw new RepositoryValidationError(
+        "Feedback record has no preference adjustment",
+      );
+    }
+    await this.db.prepare("DELETE FROM feedback WHERE id = ?").bind(validId).run();
+    return this.getPreferences();
+  }
+
+  async resetPreferences(): Promise<ReaderPreferences> {
+    const baseline = approvedBaselinePreferences();
+    await this.db.batch([
+      this.db
+        .prepare(
+          `UPDATE preferences SET
+            topic_weights_json = ?,
+            source_weights_json = ?,
+            institution_weights_json = ?,
+            section_budgets_json = ?,
+            updated_at = ?
+          WHERE id = ?`,
+        )
+        .bind(
+          serializeJsonMutation(
+            baseline.topicWeights,
+            "Invalid baseline topic weights",
+          ),
+          serializeJsonMutation(
+            baseline.sourceWeights,
+            "Invalid baseline source weights",
+          ),
+          serializeJsonMutation(
+            baseline.institutionWeights,
+            "Invalid baseline institution weights",
+          ),
+          serializeJsonMutation(
+            baseline.sectionBudgets,
+            "Invalid baseline section budgets",
+          ),
+          new Date().toISOString(),
+          "reader",
+        ),
+      this.db.prepare("DELETE FROM feedback"),
+    ]);
+    return this.getPreferences();
   }
 
   async listSources(): Promise<readonly SourceRecord[]> {
@@ -1116,28 +1404,35 @@ export class D1BriefingRepository implements BriefingRepository {
     serializeJsonMutation(input, "Invalid source mutation");
     const validInput = validated(
       CreateSourceInputSchema,
-      input,
+      { ...input, canonicalUrl: canonicalSourceUrl(input.canonicalUrl) },
       "Invalid source",
     );
-    await this.db
-      .prepare(
-        `INSERT INTO sources (
-          id, canonical_name, canonical_url, role, trust_prior, enabled,
-          restrictions_json, last_success_at, health_status
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .bind(
-        validInput.id,
-        validInput.canonicalName,
-        validInput.canonicalUrl,
-        validInput.role,
-        validInput.trustPrior,
-        validInput.enabled ? 1 : 0,
-        restrictionsJson(validInput),
-        null,
-        "unknown",
-      )
-      .run();
+    try {
+      await this.db
+        .prepare(
+          `INSERT INTO sources (
+            id, canonical_name, canonical_url, role, trust_prior, enabled,
+            restrictions_json, last_success_at, health_status
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .bind(
+          validInput.id,
+          validInput.canonicalName,
+          validInput.canonicalUrl,
+          validInput.role,
+          validInput.trustPrior,
+          validInput.enabled ? 1 : 0,
+          restrictionsJson(validInput),
+          null,
+          "unknown",
+        )
+        .run();
+    } catch (error) {
+      if (isUniqueConstraint(error)) {
+        throw new SourceAlreadyExistsError();
+      }
+      throw error;
+    }
     const created = await this.sourceById(validInput.id);
     if (created === null) {
       throw new RepositoryValidationError(
@@ -1150,6 +1445,7 @@ export class D1BriefingRepository implements BriefingRepository {
   async updateSource(
     sourceId: string,
     input: UpdateSourceInput,
+    actorEmail?: string,
   ): Promise<SourceRecord> {
     serializeJsonMutation(input, "Invalid source update mutation");
     const validId = validated(
@@ -1159,7 +1455,14 @@ export class D1BriefingRepository implements BriefingRepository {
     );
     const validInput = validated(
       UpdateSourceInputSchema,
-      input,
+      {
+        ...input,
+        ...(
+          input.canonicalUrl === undefined
+            ? {}
+            : { canonicalUrl: canonicalSourceUrl(input.canonicalUrl) }
+        ),
+      },
       "Invalid source update",
     );
     const current = await this.sourceById(validId);
@@ -1171,7 +1474,7 @@ export class D1BriefingRepository implements BriefingRepository {
       { ...current, ...validInput },
       "Invalid updated source",
     );
-    await this.db
+    const updateStatement = this.db
       .prepare(
         `UPDATE sources SET
           canonical_name = ?,
@@ -1190,8 +1493,46 @@ export class D1BriefingRepository implements BriefingRepository {
         merged.enabled ? 1 : 0,
         restrictionsJson(merged),
         validId,
-      )
-      .run();
+      );
+    try {
+      if (actorEmail === undefined) {
+        await updateStatement.run();
+      } else {
+        const validActor = validated(
+          z.string().email(),
+          actorEmail,
+          "Invalid audit actor",
+        );
+        await this.db.batch([
+          updateStatement,
+          this.db
+            .prepare(
+              `INSERT INTO audit_events (
+                id, run_id, event_type, event_json, created_at
+              ) VALUES (?, ?, ?, ?, ?)`,
+            )
+            .bind(
+              crypto.randomUUID(),
+              null,
+              "source_updated",
+              serializeJsonMutation(
+                {
+                  sourceId: validId,
+                  actorEmail: validActor,
+                  changes: validInput,
+                },
+                "Invalid source audit event",
+              ),
+              new Date().toISOString(),
+            ),
+        ]);
+      }
+    } catch (error) {
+      if (isUniqueConstraint(error)) {
+        throw new SourceAlreadyExistsError();
+      }
+      throw error;
+    }
     const updated = await this.sourceById(validId);
     if (updated === null) {
       throw new RepositoryValidationError(
@@ -1199,6 +1540,17 @@ export class D1BriefingRepository implements BriefingRepository {
       );
     }
     return updated;
+  }
+
+  async listWorkflowRuns(): Promise<readonly WorkflowRun[]> {
+    const result = await this.db
+      .prepare(
+        `SELECT *
+        FROM workflow_runs
+        ORDER BY created_at DESC, id DESC`,
+      )
+      .all<WorkflowRunRow>();
+    return result.results.map(workflowRunFromRow);
   }
 
   async getWorkflowRun(runId: string): Promise<WorkflowRun | null> {
@@ -1212,6 +1564,150 @@ export class D1BriefingRepository implements BriefingRepository {
       .bind(validId)
       .first<WorkflowRunRow>();
     return row === null ? null : workflowRunFromRow(row);
+  }
+
+  async getWorkflowRunDetail(
+    runId: string,
+  ): Promise<WorkflowRunDetail | null> {
+    const run = await this.getWorkflowRun(runId);
+    if (run === null) {
+      return null;
+    }
+    const events = await this.db
+      .prepare(
+        `SELECT event_type, event_json, created_at
+        FROM audit_events
+        WHERE run_id = ?
+          AND event_type IN ('workflow_checkpoint', 'workflow_attempt_failed')
+        ORDER BY created_at, id`,
+      )
+      .bind(run.id)
+      .all<AuditEventRow>();
+    const checkpointByStep = new Map<
+      string,
+      {
+        step: string;
+        state: "completed";
+        attempts: number;
+        itemCount: number;
+      }
+    >();
+    const failures: Array<{
+      step: string;
+      attempt: number;
+      reason: string;
+    }> = [];
+    const rejectedSummaryReasons: string[] = [];
+    for (const event of events.results) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(event.event_json);
+      } catch {
+        continue;
+      }
+      if (event.event_type === "workflow_attempt_failed") {
+        const failure = z.object({
+          step: z.string().min(1),
+          attempt: z.number().int().positive(),
+          error: z.string().min(1),
+        }).passthrough().safeParse(parsed);
+        if (failure.success) {
+          failures.push({
+            step: publicDiagnostic(
+              failure.data.step,
+              "REDACTED_STEP",
+            ),
+            attempt: failure.data.attempt,
+            reason: publicDiagnostic(
+              failure.data.error,
+              "REDACTED_FAILURE",
+            ),
+          });
+        }
+        continue;
+      }
+      const checkpoint = z.object({
+        step: z.string().min(1),
+        artifact: z.object({
+          attempts: z.number().int().nonnegative(),
+          itemCount: z.number().int().nonnegative(),
+          output: z.unknown(),
+        }).passthrough(),
+      }).passthrough().safeParse(parsed);
+      if (!checkpoint.success) {
+        continue;
+      }
+      checkpointByStep.set(checkpoint.data.step, {
+        step: checkpoint.data.step,
+        state: "completed",
+        attempts: checkpoint.data.artifact.attempts,
+        itemCount: checkpoint.data.artifact.itemCount,
+      });
+      if (
+        checkpoint.data.step === "validate" &&
+        Array.isArray(checkpoint.data.artifact.output)
+      ) {
+        for (const output of checkpoint.data.artifact.output) {
+          const validation = z.object({
+            valid: z.boolean(),
+            validationErrors: z.array(z.string().min(1)).optional(),
+          }).passthrough().safeParse(output);
+          if (validation.success && !validation.data.valid) {
+            rejectedSummaryReasons.push(
+              ...(validation.data.validationErrors ?? ["rejected"]),
+            );
+          }
+        }
+      }
+    }
+    const edition = await this.db
+      .prepare(
+        `SELECT published_at, metadata_json
+        FROM editions
+        WHERE run_id = ?
+        ORDER BY edition_date DESC
+        LIMIT 1`,
+      )
+      .bind(run.id)
+      .first<PublishedRunRow>();
+    let sourceFailures: string[] = [];
+    if (edition !== null) {
+      const metadata = EditionMetadataSchema.safeParse(
+        parsedJson(edition.metadata_json, "Invalid run edition metadata"),
+      );
+      if (metadata.success) {
+        sourceFailures = [...metadata.data.sourceFailures];
+      }
+    }
+    const monthlyCost = await this.db
+      .prepare(
+        `SELECT COALESCE(SUM(estimated_cost_usd), 0) AS total
+        FROM workflow_runs
+        WHERE substr(created_at, 1, 7) = substr(?, 1, 7)`,
+      )
+      .bind(run.createdAt)
+      .first<{ total: number }>();
+    return validated(
+      WorkflowRunDetailSchema,
+      {
+        ...run,
+        checkpoints: [...checkpointByStep.values()],
+        failures,
+        sourceFailures: uniqueStrings(
+          sourceFailures.map((failure) =>
+            publicDiagnostic(failure, "REDACTED_SOURCE"),
+          ),
+        ),
+        rejectedSummaryReasons: uniqueStrings(
+          rejectedSummaryReasons.map((reason) =>
+            publicDiagnostic(reason, "REDACTED_REJECTION"),
+          ),
+        ),
+        publishedAt: edition?.published_at ?? null,
+        estimatedMonthlyCostUsd: monthlyCost?.total ?? 0,
+      },
+      "Invalid workflow run detail",
+    );
   }
 
   async pruneExpiredData(now: string): Promise<RetentionReport> {
@@ -1305,6 +1801,27 @@ export class D1BriefingRepository implements BriefingRepository {
       .bind(id)
       .first<SourceRow>();
     return row === null ? null : sourceFromRow(row);
+  }
+
+  private async preferenceRow(): Promise<PreferencesRow> {
+    const row = await this.db
+      .prepare(
+        `SELECT
+          topic_weights_json,
+          source_weights_json,
+          institution_weights_json,
+          section_budgets_json
+        FROM preferences
+        WHERE id = ?`,
+      )
+      .bind("reader")
+      .first<PreferencesRow>();
+    if (row === null) {
+      throw new RepositoryValidationError(
+        "Reader preference row is missing",
+      );
+    }
+    return row;
   }
 
   private async editionWithEntries(

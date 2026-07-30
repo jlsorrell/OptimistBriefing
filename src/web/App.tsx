@@ -3,14 +3,22 @@ import { useEffect, useState } from "react";
 import type { EditionWithEntries } from "../contracts/editorial";
 import { BriefingApiClient } from "./api-client";
 import { EditionView } from "./components/EditionView";
+import { ArchivePage } from "./pages/ArchivePage";
+import { PreferencesPage } from "./pages/PreferencesPage";
+import { RunStatusPage } from "./pages/RunStatusPage";
+import { SavedPage } from "./pages/SavedPage";
 
 const api = new BriefingApiClient();
 
 export function App() {
+  const path = window.location.pathname.replace(/\/+$/, "") || "/";
   const [edition, setEdition] = useState<EditionWithEntries | null>(null);
   const [error, setError] = useState(false);
 
   useEffect(() => {
+    if (path !== "/") {
+      return;
+    }
     const controller = new AbortController();
     void api
       .latestEdition(controller.signal)
@@ -21,7 +29,20 @@ export function App() {
         }
       });
     return () => controller.abort();
-  }, []);
+  }, [path]);
+
+  if (path === "/archive") {
+    return <ArchivePage />;
+  }
+  if (path === "/preferences") {
+    return <PreferencesPage />;
+  }
+  if (path === "/saved") {
+    return <SavedPage />;
+  }
+  if (path === "/run-status") {
+    return <RunStatusPage />;
+  }
 
   if (error) {
     return (

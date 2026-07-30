@@ -16,6 +16,11 @@ import {
   ValidationError,
   jsonError,
 } from "./errors";
+import { registerArchiveRoutes } from "./routes/archive";
+import { registerFeedbackRoutes } from "./routes/feedback";
+import { registerPreferenceRoutes } from "./routes/preferences";
+import { registerRunRoutes } from "./routes/runs";
+import { registerSourceRoutes } from "./routes/sources";
 
 export type AuthenticatedUser = {
   email: string;
@@ -74,6 +79,12 @@ export function createApp(dependencies: AppDependencies): Hono<AppEnv> {
 
     await next();
   });
+
+  registerFeedbackRoutes(app, dependencies);
+  registerPreferenceRoutes(app, dependencies);
+  registerArchiveRoutes(app, dependencies);
+  registerRunRoutes(app, dependencies);
+  registerSourceRoutes(app, dependencies);
 
   app.get("/api/edition/latest", async (context) => {
     const edition = await dependencies.repository.getLatestEdition();

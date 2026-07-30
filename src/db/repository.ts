@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { READER_PROFILE } from "../config/reader-profile";
 import type {
   ArchiveSearchPage,
   EditionPage,
@@ -33,6 +34,7 @@ export type ArchiveSearchInput = {
   section: EditionSection | null;
   limit: number;
   cursor: string | null;
+  saved?: boolean;
 };
 
 export type FeedbackAction =
@@ -58,16 +60,32 @@ export type FeedbackInput = {
 
 export type FeedbackRecord = FeedbackInput & {
   id: string;
+  adjustments: readonly FeedbackAdjustment[];
   createdAt: string;
 };
 
-export type ReaderPreferences = {
+export type PreferenceDimension = "topic" | "source";
+
+export type FeedbackAdjustment = {
+  dimension: PreferenceDimension;
+  key: string;
+  delta: number;
+  resultingWeight: number;
+};
+
+export type PreferenceValues = {
   topicWeights: Record<string, number>;
   sourceWeights: Record<string, number>;
   institutionWeights: Record<string, number>;
   sectionBudgets: Partial<Record<EditionSection, number>>;
+};
+
+export type ReaderPreferences = PreferenceValues & {
+  baseline: PreferenceValues;
   feedbackHistory: readonly FeedbackRecord[];
 };
+
+export type PreferenceUpdateInput = PreferenceValues;
 
 export type SourceHealth = "unknown" | "healthy" | "degraded" | "failing";
 export type DiscoveryMechanism =
@@ -121,12 +139,43 @@ export type WorkflowRun = {
   updatedAt: string;
 };
 
+export type WorkflowCheckpointStatus = {
+  step: string;
+  state: "completed";
+  attempts: number;
+  itemCount: number;
+};
+
+export type WorkflowFailure = {
+  step: string;
+  attempt: number;
+  reason: string;
+};
+
+export type WorkflowRunDetail = WorkflowRun & {
+  checkpoints: readonly WorkflowCheckpointStatus[];
+  failures: readonly WorkflowFailure[];
+  sourceFailures: readonly string[];
+  rejectedSummaryReasons: readonly string[];
+  publishedAt: string | null;
+  estimatedMonthlyCostUsd: number;
+};
+
 export class RepositoryValidationError extends Error {
   readonly code = "REPOSITORY_VALIDATION_FAILED";
 
   constructor(message: string, options?: ErrorOptions) {
     super(message, options);
     this.name = "RepositoryValidationError";
+  }
+}
+
+export class SourceAlreadyExistsError extends Error {
+  readonly code = "SOURCE_ALREADY_EXISTS";
+
+  constructor() {
+    super("A source with that canonical URL already exists.");
+    this.name = "SourceAlreadyExistsError";
   }
 }
 
@@ -346,19 +395,27 @@ export const FeedbackInputSchema = z.object({
   itemId: z.string().min(1),
   action: FeedbackActionSchema,
   reason: FeedbackReasonSchema.nullable(),
-});
+}).strict();
+
+export const FeedbackAdjustmentSchema = z.object({
+  dimension: z.enum(["topic", "source"]),
+  key: z.string().min(1),
+  delta: z.number().finite(),
+  resultingWeight: z.number().finite(),
+}).strict();
 
 export const FeedbackRecordSchema = FeedbackInputSchema.extend({
   id: z.string().min(1),
+  adjustments: z.array(FeedbackAdjustmentSchema),
   createdAt: z.string().datetime(),
-});
+}).strict();
 
 const FiniteWeightMapSchema = z.record(
   z.string(),
   z.number().finite(),
 );
 
-export const ReaderPreferencesSchema = z.object({
+export const PreferenceValuesSchema = z.object({
   topicWeights: FiniteWeightMapSchema,
   sourceWeights: FiniteWeightMapSchema,
   institutionWeights: FiniteWeightMapSchema,
@@ -366,8 +423,40 @@ export const ReaderPreferencesSchema = z.object({
     EditionSectionSchema,
     z.number().finite().nonnegative(),
   ),
+}).strict();
+
+export const ReaderPreferencesSchema = PreferenceValuesSchema.extend({
+  baseline: PreferenceValuesSchema,
   feedbackHistory: z.array(FeedbackRecordSchema),
-});
+}).strict();
+
+export const PreferenceUpdateInputSchema = PreferenceValuesSchema;
+
+export function approvedBaselinePreferences(): PreferenceValues {
+  return {
+    topicWeights: Object.fromEntries(
+      READER_PROFILE.researchTopics.map((topic) => [topic.id, 1]),
+    ),
+    sourceWeights: {},
+    institutionWeights: Object.fromEntries(
+      [
+        ...READER_PROFILE.preferredInstitutions,
+        ...READER_PROFILE.preferredLabs,
+      ].map((institution) => [institution, 1]),
+    ),
+    sectionBudgets: {
+      morning_brief: READER_PROFILE.sectionBudgets.morningBrief,
+      research: READER_PROFILE.sectionBudgets.featuredResearch,
+      research_radar: READER_PROFILE.sectionBudgets.researchRadar,
+      world: READER_PROFILE.sectionBudgets.world,
+      technology: READER_PROFILE.sectionBudgets.technology,
+      ai_policy: READER_PROFILE.sectionBudgets.aiPolicy,
+      dmv: READER_PROFILE.sectionBudgets.dmvAndBaltimore,
+      baltimore: READER_PROFILE.sectionBudgets.dmvAndBaltimore,
+      forecast: READER_PROFILE.sectionBudgets.forecastSignals,
+    },
+  };
+}
 
 export const SourceHealthSchema = z.enum([
   "unknown",
@@ -387,7 +476,15 @@ export const DiscoveryMechanismSchema = z.enum([
 export const SourceRecordSchema = z.object({
   id: z.string().min(1),
   canonicalName: z.string().min(1),
-  canonicalUrl: z.string().url(),
+  canonicalUrl: z.string().url().refine((value) => {
+    const url = new URL(value);
+    return (
+      url.protocol === "https:" &&
+      url.username === "" &&
+      url.password === "" &&
+      url.hash === ""
+    );
+  }, "Canonical source URL must be HTTPS without credentials or a fragment"),
   role: SourceRefSchema.shape.role,
   trustPrior: z.number().finite().min(0).max(1),
   enabled: z.boolean(),
@@ -396,16 +493,18 @@ export const SourceRecordSchema = z.object({
   sectionEligibility: z.array(EditionSectionSchema),
   lastSuccessAt: z.string().datetime().nullable(),
   healthStatus: SourceHealthSchema,
-});
+}).strict();
 
 export const CreateSourceInputSchema = SourceRecordSchema.omit({
   lastSuccessAt: true,
   healthStatus: true,
-});
+}).extend({
+  sectionEligibility: z.array(EditionSectionSchema).min(1),
+}).strict();
 
 export const UpdateSourceInputSchema = CreateSourceInputSchema.omit({
   id: true,
-}).partial();
+}).partial().strict();
 
 export const WorkflowRunStatusSchema = z.enum([
   "pending",
@@ -427,7 +526,25 @@ export const WorkflowRunSchema = z.object({
   estimatedCostUsd: z.number().finite().nonnegative(),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
-});
+}).strict();
+
+export const WorkflowRunDetailSchema = WorkflowRunSchema.extend({
+  checkpoints: z.array(z.object({
+    step: z.string().min(1),
+    state: z.literal("completed"),
+    attempts: z.number().int().nonnegative(),
+    itemCount: z.number().int().nonnegative(),
+  }).strict()),
+  failures: z.array(z.object({
+    step: z.string().min(1),
+    attempt: z.number().int().positive(),
+    reason: z.string().min(1),
+  }).strict()),
+  sourceFailures: z.array(z.string().min(1)),
+  rejectedSummaryReasons: z.array(z.string().min(1)),
+  publishedAt: z.string().datetime().nullable(),
+  estimatedMonthlyCostUsd: z.number().finite().nonnegative(),
+}).strict();
 
 export interface BriefingRepository {
   upsertItems(items: readonly Item[]): Promise<void>;
@@ -458,12 +575,18 @@ export interface BriefingRepository {
   searchArchive(input: ArchiveSearchInput): Promise<ArchiveSearchPage>;
   recordFeedback(input: FeedbackInput): Promise<void>;
   getPreferences(): Promise<ReaderPreferences>;
+  updatePreferences(input: PreferenceUpdateInput): Promise<ReaderPreferences>;
+  removeFeedbackAdjustment(feedbackId: string): Promise<ReaderPreferences>;
+  resetPreferences(): Promise<ReaderPreferences>;
   listSources(): Promise<readonly SourceRecord[]>;
   createSource(input: CreateSourceInput): Promise<SourceRecord>;
   updateSource(
     sourceId: string,
     input: UpdateSourceInput,
+    actorEmail?: string,
   ): Promise<SourceRecord>;
+  listWorkflowRuns(): Promise<readonly WorkflowRun[]>;
   getWorkflowRun(runId: string): Promise<WorkflowRun | null>;
+  getWorkflowRunDetail(runId: string): Promise<WorkflowRunDetail | null>;
   pruneExpiredData(now: string): Promise<RetentionReport>;
 }
