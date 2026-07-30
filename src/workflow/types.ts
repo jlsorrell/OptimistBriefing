@@ -59,10 +59,18 @@ export type PipelineStore = {
     runId: string,
     step: PipelineStep,
   ): Promise<CheckpointArtifact<T> | null>;
+  beginAttempt(runId: string, step: PipelineStep): Promise<number>;
+  failAttempt(runId: string, step: PipelineStep, attempt: number, error: string): Promise<void>;
+  invalidateFrom(runId: string, step: PipelineStep): Promise<void>;
   createDraft(edition: Edition): Promise<void>;
   replaceEntries(editionId: string, entries: readonly EditionEntry[]): Promise<void>;
   publish(editionId: string, status: "published" | "partial"): Promise<void>;
   getLatestEdition(): Promise<EditionWithEntries | null>;
+  persistEdition(
+    edition: Edition,
+    entries: readonly EditionEntry[],
+    status: "draft" | "published" | "partial",
+  ): Promise<Edition>;
 };
 
 export type SummaryCandidate = {

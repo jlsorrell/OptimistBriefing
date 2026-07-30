@@ -112,6 +112,25 @@ async function publishFixtureEdition(
 }
 
 describe("D1BriefingRepository", () => {
+  it("persists only validated edition coverage metadata in published reads", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const draft = await repo.createDraftEdition("2032-01-01", "metadata-run", {
+      missingSections: ["technology"],
+      sourceFailures: ["reuters"],
+    });
+    await repo.replaceEditionEntries(
+      draft.id,
+      [fixtureEditionEntry(draft.id, "metadata-entry")],
+    );
+    await repo.publishEdition(draft.id, "2032-01-01T09:00:00.000Z", "partial");
+
+    expect(await repo.getEditionByDate("2032-01-01")).toMatchObject({
+      metadata: {
+        missingSections: ["technology"],
+        sourceFailures: ["reuters"],
+      },
+    });
+  });
   it("seeds an editable source catalog without overwriting local customization", async () => {
     const repo = new D1BriefingRepository(env.DB);
     const catalog = await repo.listSources();

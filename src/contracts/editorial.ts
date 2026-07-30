@@ -93,6 +93,16 @@ export const EditionStatusSchema = z.enum([
   "failed",
 ]);
 
+export type EditionMetadata = {
+  missingSections: string[];
+  sourceFailures: string[];
+};
+
+export const EditionMetadataSchema: z.ZodType<EditionMetadata> = z.object({
+  missingSections: z.array(z.string().min(1).max(200)).max(32),
+  sourceFailures: z.array(z.string().min(1).max(200)).max(64),
+}).strict();
+
 export const EditionSchema = z.object({
   id: z.string().min(1),
   editionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -101,6 +111,7 @@ export const EditionSchema = z.object({
   readingMinutes: z.number().int().positive().nullable(),
   publishedAt: z.string().datetime().nullable(),
   createdAt: z.string().datetime(),
+  metadata: EditionMetadataSchema.optional(),
 });
 
 export const EditionEntrySchema = z

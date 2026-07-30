@@ -8,6 +8,7 @@ import {
 } from "../contracts/api";
 import {
   EditionEntrySchema,
+  EditionMetadataSchema,
   EditionSectionSchema,
   EditionSchema,
   EditionWithEntriesSchema,
@@ -16,6 +17,7 @@ import {
   RetentionReportSchema,
   StructuredSummarySchema,
   type Edition,
+  type EditionMetadata,
   type EditionEntry,
   type EditionWithEntries,
   type Item,
@@ -74,6 +76,7 @@ type EditionRow = {
   reading_minutes: number | null;
   published_at: string | null;
   created_at: string;
+  metadata_json: string;
 };
 
 type EntryRow = {
@@ -215,6 +218,9 @@ function editionFromRow(row: EditionRow): Edition {
       readingMinutes: row.reading_minutes,
       publishedAt: row.published_at,
       createdAt: row.created_at,
+      metadata: EditionMetadataSchema.parse(
+        parsedJson(row.metadata_json, "Invalid edition metadata"),
+      ),
     },
     "Invalid edition row",
   );
@@ -597,6 +603,7 @@ export class D1BriefingRepository implements BriefingRepository {
   async createDraftEdition(
     editionDate: string,
     runId: string,
+    metadata: EditionMetadata = { missingSections: [], sourceFailures: [] },
   ): Promise<Edition> {
     const validDate = validated(
       EditionDateSchema,
@@ -618,6 +625,7 @@ export class D1BriefingRepository implements BriefingRepository {
         readingMinutes: null,
         publishedAt: null,
         createdAt: new Date().toISOString(),
+        metadata: EditionMetadataSchema.parse(metadata),
       },
       "Invalid draft edition",
     );
@@ -625,8 +633,8 @@ export class D1BriefingRepository implements BriefingRepository {
       .prepare(
         `INSERT INTO editions (
           id, edition_date, run_id, status, reading_minutes, published_at,
-          created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+          created_at, metadata_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         edition.id,
@@ -636,6 +644,7 @@ export class D1BriefingRepository implements BriefingRepository {
         edition.readingMinutes,
         edition.publishedAt,
         edition.createdAt,
+        JSON.stringify(edition.metadata),
       )
       .run();
     return edition;
@@ -762,6 +771,61 @@ export class D1BriefingRepository implements BriefingRepository {
         "Only an existing draft edition may be published",
       );
     }
+  }
+
+  async persistEdition(
+    editionDate: string,
+    runId: string,
+    entries: readonly EditionEntry[],
+    status: "draft" | "published" | "partial",
+    metadata: EditionMetadata,
+  ): Promise<Edition> {
+    const validDate = validated(EditionDateSchema, editionDate, "Invalid edition date");
+    const validRunId = validated(NonemptyIdSchema, runId, "Invalid workflow run ID");
+    const validMetadata = EditionMetadataSchema.parse(metadata);
+    const existing = await this.db.prepare(
+      "SELECT * FROM editions WHERE edition_date = ? LIMIT 1",
+    ).bind(validDate).first<EditionRow>();
+    if (status === "draft" && existing !== null && (existing.status === "published" || existing.status === "partial")) {
+      return editionFromRow(existing);
+    }
+    if (existing !== null && existing.run_id !== validRunId) {
+      throw new RepositoryValidationError("Edition date belongs to another workflow run");
+    }
+    const editionId = existing?.id ?? crypto.randomUUID();
+    const createdAt = existing?.created_at ?? new Date().toISOString();
+    const validEntries = entries.map((entry) => validated(EditionEntrySchema, {
+      ...entry, editionId,
+    }, "Invalid edition entry"));
+    const previous = existing === null ? [] : (await this.db.prepare(
+      "SELECT summary_id FROM edition_entries WHERE edition_id = ?",
+    ).bind(editionId).all<{ summary_id: string }>()).results;
+    const publishedAt = status === "draft" ? null : new Date().toISOString();
+    const statements: D1PreparedStatement[] = [
+      this.db.prepare(
+        `INSERT INTO editions (id, edition_date, run_id, status, reading_minutes, published_at, created_at, metadata_json)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(edition_date) DO UPDATE SET status = excluded.status, reading_minutes = excluded.reading_minutes,
+           published_at = excluded.published_at, metadata_json = excluded.metadata_json`,
+      ).bind(editionId, validDate, validRunId, "draft", validEntries.length === 0 ? null : 20, null, createdAt, JSON.stringify(validMetadata)),
+      this.db.prepare("DELETE FROM edition_entries WHERE edition_id = ?").bind(editionId),
+    ];
+    for (const row of previous) statements.push(this.db.prepare("DELETE FROM summaries WHERE id = ?").bind(row.summary_id));
+    for (const entry of validEntries) {
+      const summaryId = `edition-entry:${entry.id}`;
+      statements.push(
+        ...summaryStatements(this.db, summaryId, entry.itemId, entry.summary, createdAt),
+        this.db.prepare(
+          `INSERT INTO edition_entries (id, edition_id, item_id, summary_id, section, position, selection_reasons_json, source_refs_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(entry.id, editionId, entry.itemId, summaryId, entry.section, entry.position, JSON.stringify(entry.selectionReasons), JSON.stringify(entry.sourceRefs)),
+      );
+    }
+    if (status !== "draft") {
+      statements.push(this.db.prepare("UPDATE editions SET status = ?, published_at = ? WHERE id = ?").bind(status, publishedAt, editionId));
+    }
+    await this.db.batch(statements);
+    return editionFromRow({ id: editionId, edition_date: validDate, run_id: validRunId, status, reading_minutes: validEntries.length === 0 ? null : 20, published_at: publishedAt, created_at: createdAt, metadata_json: JSON.stringify(validMetadata) });
   }
 
   async getLatestEdition(): Promise<EditionWithEntries | null> {

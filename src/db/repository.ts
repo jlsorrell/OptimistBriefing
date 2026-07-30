@@ -11,6 +11,7 @@ import {
   type EditionEntry,
   type EditionSection,
   type EditionWithEntries,
+  type EditionMetadata,
   type Item,
   type ItemScore,
   type RetentionReport,
@@ -432,7 +433,7 @@ export interface BriefingRepository {
   upsertItems(items: readonly Item[]): Promise<void>;
   saveScores(scores: readonly ItemScore[]): Promise<void>;
   saveSummary(itemId: string, summary: StructuredSummary): Promise<void>;
-  createDraftEdition(editionDate: string, runId: string): Promise<Edition>;
+  createDraftEdition(editionDate: string, runId: string, metadata?: EditionMetadata): Promise<Edition>;
   replaceEditionEntries(
     editionId: string,
     entries: readonly EditionEntry[],
@@ -442,6 +443,13 @@ export interface BriefingRepository {
     publishedAt: string,
     status: "published" | "partial",
   ): Promise<void>;
+  persistEdition(
+    editionDate: string,
+    runId: string,
+    entries: readonly EditionEntry[],
+    status: "draft" | "published" | "partial",
+    metadata: EditionMetadata,
+  ): Promise<Edition>;
   getLatestEdition(): Promise<EditionWithEntries | null>;
   getEditionByDate(
     editionDate: string,

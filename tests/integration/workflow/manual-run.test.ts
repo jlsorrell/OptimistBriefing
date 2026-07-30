@@ -22,6 +22,7 @@ import {
 } from "../../../src/workflow/run-editorial-pipeline";
 import type { BriefingRepository } from "../../../src/db/repository";
 import { D1BriefingRepository } from "../../../src/db/d1-repository";
+import { FakeModelProvider } from "../../../src/models/fake-provider";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv {
@@ -104,6 +105,15 @@ class FixtureStore implements PipelineStore {
     return (this.artifacts.get(`${runId}:${step}`) as T | undefined) ?? null;
   }
 
+  async beginAttempt() { return 1; }
+  async failAttempt() { /* fixture records only successful artifacts */ }
+  async invalidateFrom(runId: string) {
+    this.checkpoints.delete(runId);
+    for (const key of [...this.artifacts.keys()]) {
+      if (key.startsWith(`${runId}:`)) this.artifacts.delete(key);
+    }
+  }
+
   async createDraft(edition: Edition) {
     this.editions.set(edition.editionDate, { ...edition, entries: [] });
   }
@@ -128,6 +138,14 @@ class FixtureStore implements PipelineStore {
     return [...this.editions.values()]
       .filter((edition) => edition.status === "published" || edition.status === "partial")
       .sort((left, right) => right.editionDate.localeCompare(left.editionDate))[0] ?? null;
+  }
+
+  async persistEdition(edition: Edition, entries: readonly EditionEntry[], status: "draft" | "published" | "partial") {
+    const stored: EditionWithEntries = { ...edition, status, publishedAt: status === "draft" ? null : now, entries: [...entries] };
+    const current = this.editions.get(edition.editionDate);
+    if (status === "draft" && current?.status === "partial") return current;
+    this.editions.set(edition.editionDate, stored);
+    return stored;
   }
 }
 
@@ -211,8 +229,28 @@ describe("manual editorial run", () => {
     expect(await context.store.getLatestEdition()).toEqual(prior);
   });
 
+  it("fails six valid entries when they omit required coverage", async () => {
+    const context = fixturePipelineContext({
+      runId: "run-six-world-only",
+      collect: async () => Array.from({ length: 6 }, (_, index) =>
+        fixtureItem(`world-${index}`, "world"),
+      ),
+    });
+
+    await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+      status: "failed",
+      missingSections: ["research", "dmv_or_baltimore"],
+    });
+    expect(await context.store.getLatestEdition()).toBeNull();
+  });
+
   it("resumes an interrupted run from persisted checkpoints without repeating completed work", async () => {
+    let completedStageWasRepeated = false;
     const context = fixturePipelineContext({ runId: "run-resume" });
+    context.normalize = async () => {
+      completedStageWasRepeated = true;
+      throw new Error("completed normalize must not run");
+    };
     await context.store.createRun({
       id: context.runId,
       editionDate: context.editionDate,
@@ -236,6 +274,7 @@ describe("manual editorial run", () => {
     }
 
     await expect(runEditorialPipeline(context)).resolves.toMatchObject({ status: "published" });
+    expect(completedStageWasRepeated).toBe(false);
     expect(await context.store.readCheckpoint(context.runId, "publish")).toBe(true);
   });
 
@@ -294,7 +333,7 @@ describe("manual editorial run", () => {
     const app = createApp({
       repository: new D1BriefingRepository(env.DB),
       authVerifier: async () => ({ email: "reader@example.com" }),
-      workflow: createD1WorkflowLauncher(env.DB),
+      workflow: createD1WorkflowLauncher(env.DB, new FakeModelProvider()),
     });
     const request = () => app.request("/api/admin/runs", {
       method: "POST",
@@ -302,7 +341,8 @@ describe("manual editorial run", () => {
       body: JSON.stringify({ editionDate: "2031-01-01" }),
     });
 
-    await expect(request()).resolves.toMatchObject({ status: 202 });
+    const first = await request();
+    expect(first.status, await first.text()).toBe(202);
     await expect(request()).resolves.toMatchObject({ status: 409 });
     const audit = await env.DB.prepare(
       "SELECT event_type FROM audit_events WHERE event_type = ?",

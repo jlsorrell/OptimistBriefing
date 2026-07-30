@@ -1,5 +1,6 @@
 import type {
   EditionEntry,
+  EditionMetadata,
   EditionSection,
 } from "../contracts/editorial";
 import type {
@@ -52,8 +53,8 @@ export async function composeEdition(
     readingMinutes: valid.length === 0 ? null : 20,
     publishedAt: null,
     createdAt: context.now(),
+    metadata: { missingSections: [], sourceFailures: [...(context.sourceFailures ?? [])] } as EditionMetadata,
   };
-  await context.store.createDraft(edition);
 
   const entries: EditionEntry[] = valid.map((candidate, position) => ({
     id: `${edition.id}:entry:${position}`,
@@ -65,10 +66,9 @@ export async function composeEdition(
     selectionReasons: ["Validated for this edition."],
     sourceRefs: candidate.item.sourceRefs,
   }));
-  await context.store.replaceEntries(edition.id, entries);
-
   const missing = missingSections(entries);
-  const complete = entries.length >= 6 && entries.length <= 8;
+  edition.metadata = { missingSections: missing, sourceFailures: [...(context.sourceFailures ?? [])] };
+  const complete = entries.length >= 6 && entries.length <= 8 && missing.length === 0;
   const partial = !complete && missing.length === 0;
   return {
     edition,

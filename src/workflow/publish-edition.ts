@@ -4,7 +4,10 @@ export async function publishEdition(
   context: PipelineContext,
   composition: CompositionResult,
 ): Promise<CompositionResult> {
-  if (composition.status === "failed") return composition;
-  await context.store.publish(composition.edition.id, composition.status);
+  await context.store.persistEdition(
+    composition.edition,
+    composition.entries,
+    composition.status === "failed" ? "draft" : composition.status,
+  );
   return composition;
 }
