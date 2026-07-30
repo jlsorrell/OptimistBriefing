@@ -101,7 +101,22 @@ test("renders a source-grounded edition at desktop and mobile viewports", async 
   ).toHaveAttribute("aria-pressed", "true");
 
   const forecast = page.locator('[data-entry-id="entry-forecast"]');
-  await forecast.scrollIntoViewIfNeeded();
+  await forecast.evaluate(() => {
+    document.documentElement.style.scrollBehavior = "auto";
+    window.scrollTo({
+      behavior: "instant",
+      top: document.documentElement.scrollHeight,
+    });
+  });
+  await expect
+    .poll(() =>
+      page.evaluate(
+        () =>
+          window.scrollY + window.innerHeight >=
+          document.documentElement.scrollHeight - 2,
+      ),
+    )
+    .toBe(true);
   await expect
     .poll(() =>
       page.evaluate(() =>
