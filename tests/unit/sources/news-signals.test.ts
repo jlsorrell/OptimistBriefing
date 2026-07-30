@@ -111,6 +111,92 @@ describe("news event clause integration", () => {
     expect(result.scopedMaterialFacts).toEqual([]);
   });
 
+  it.each([
+    [
+      "a subordinate reporting complement",
+      "Model Institute adopted Frontier Evaluation Standard after " +
+        "Evaluation Agency announced that Funding Agency launched " +
+        "Community Research Program",
+    ],
+    [
+      "sibling reporting complements",
+      "Evaluation Agency announced that Model Institute adopted " +
+        "Frontier Evaluation Standard while Evaluation Agency announced " +
+        "that Funding Agency launched Community Research Program",
+    ],
+  ])(
+    "fails open across distinct events in %s",
+    (_construction, title) => {
+      const result = signals({ title });
+
+      expect(result.eventInstances).toEqual([]);
+      expect(result.scopedMaterialFacts).toEqual([]);
+    },
+  );
+
+  it("fails open when a repeated event is coordinated with a distinct actor", () => {
+    const result = signals({
+      title:
+        "Model Institute adopted Frontier Evaluation Standard",
+      content:
+        "Model Institute adopted Frontier Evaluation Standard and " +
+        "Funding Agency launched Community Research Program",
+    });
+
+    expect(result.eventInstances).toEqual([]);
+    expect(result.scopedMaterialFacts).toEqual([]);
+  });
+
+  it("does not leak coordinated status or date facts to the exact object", () => {
+    const result = signals({
+      title:
+        "Evaluation Agency proposes Frontier Evaluation Standard",
+      abstract:
+        "Frontier Evaluation Standard remains proposed and Funding Agency " +
+        "adopted another policy and takes effect July 1, 2027",
+    });
+
+    expect(result.eventInstances).toEqual([{
+      subject: "evaluation-agency",
+      domain: "governance-event",
+      object: "frontier-evaluation-standard",
+    }]);
+    expect(result.scopedMaterialFacts).toEqual([
+      expect.objectContaining({
+        kind: "status",
+        value: "proposed",
+      }),
+    ]);
+    expect(result.scopedMaterialFacts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "adopted" }),
+        expect.objectContaining({ value: "2027-07-01" }),
+      ]),
+    );
+  });
+
+  it("fails open for a trailing event after an organization-led headline", () => {
+    const result = signals({
+      title:
+        "Evaluation Agency Frontier Evaluation Standard adopted as " +
+        "Funding Agency launched Community Research Program",
+    });
+
+    expect(result.eventInstances).toEqual([]);
+    expect(result.scopedMaterialFacts).toEqual([]);
+  });
+
+  it("fails open for a reordered organization-led headline", () => {
+    const result = signals({
+      title:
+        "Frontier Evaluation Standard Evaluation Agency " +
+        "Community Research Program adopted",
+    });
+
+    expect(result.eventInstances).toEqual([]);
+    expect(result.scopedMaterialFacts).toEqual([]);
+  });
+
   it("accepts only explicitly scoped metadata for the resolved text event", () => {
     const result = deriveNewsSignals({
       kind: "article",

@@ -53,6 +53,53 @@ describe("parseEventClauses", () => {
     }]);
   });
 
+  it("allows an enumerated count suffix on an organization-led headline", () => {
+    const parsed = parseEventClauses({
+      text: {
+        title:
+          "Evaluation Agency Frontier Evaluation Standard adopted " +
+          "for 100 models",
+      },
+      eventFamilies: ["evaluation-standards"],
+      semantics,
+    });
+
+    expect(parsed).toMatchObject([{
+      predicate: "adopted",
+      subject: "evaluation-agency",
+      domain: "governance-event",
+      object: "frontier-evaluation-standard",
+    }]);
+  });
+
+  it("rejects a trailing event after an organization-led headline", () => {
+    const parsed = parseEventClauses({
+      text: {
+        title:
+          "Evaluation Agency Frontier Evaluation Standard adopted as " +
+          "Funding Agency launched Community Research Program",
+      },
+      eventFamilies: ["evaluation-standards", "funding-budget"],
+      semantics,
+    });
+
+    expect(parsed).toEqual([]);
+  });
+
+  it("rejects a reordered organization-led headline", () => {
+    const parsed = parseEventClauses({
+      text: {
+        title:
+          "Frontier Evaluation Standard Evaluation Agency " +
+          "Community Research Program adopted",
+      },
+      eventFamilies: ["evaluation-standards", "funding-budget"],
+      semantics,
+    });
+
+    expect(parsed).toEqual([]);
+  });
+
   it("parses an object-led passive headline without an auxiliary", () => {
     const parsed = parseEventClauses({
       text: {
@@ -204,6 +251,102 @@ describe("parseEventClauses", () => {
       domain: "governance-event",
       object: "frontier-evaluation-standard",
     }]);
+  });
+
+  it.each([
+    [
+      "a subordinate reporting complement",
+      "Model Institute adopted Frontier Evaluation Standard after " +
+        "Evaluation Agency announced that Funding Agency launched " +
+        "Community Research Program",
+    ],
+    [
+      "sibling reporting complements",
+      "Evaluation Agency announced that Model Institute adopted " +
+        "Frontier Evaluation Standard while Evaluation Agency announced " +
+        "that Funding Agency launched Community Research Program",
+    ],
+  ])(
+    "retains distinct event evidence across %s",
+    (_construction, title) => {
+      const parsed = parseEventClauses({
+        text: { title },
+        eventFamilies: ["evaluation-standards", "funding-budget"],
+        semantics,
+      });
+
+      expect(parsed).toMatchObject([
+        {
+          subject: "model-institute",
+          domain: "governance-event",
+          object: "frontier-evaluation-standard",
+        },
+        {
+          subject: "funding-agency",
+          domain: "funding-event",
+          object: "community-research-program",
+        },
+      ]);
+    },
+  );
+
+  it("retains distinct event evidence across explicit actor coordination", () => {
+    const parsed = parseEventClauses({
+      text: {
+        title:
+          "Model Institute adopted Frontier Evaluation Standard and " +
+          "Funding Agency launched Community Research Program",
+      },
+      eventFamilies: ["evaluation-standards", "funding-budget"],
+      semantics,
+    });
+
+    expect(parsed).toMatchObject([
+      {
+        subject: "model-institute",
+        domain: "governance-event",
+        object: "frontier-evaluation-standard",
+      },
+      {
+        subject: "funding-agency",
+        domain: "funding-event",
+        object: "community-research-program",
+      },
+    ]);
+  });
+
+  it("rejects coordinated actors that share one event predicate", () => {
+    const parsed = parseEventClauses({
+      text: {
+        title:
+          "Evaluation Agency and Funding Agency adopted " +
+          "Frontier Evaluation Standard",
+      },
+      eventFamilies: ["evaluation-standards"],
+      semantics,
+    });
+
+    expect(parsed).toEqual([]);
+  });
+
+  it("rejects unsafe coordinated facts for an exact object", () => {
+    const parsed = parseEventFactClauses({
+      text: {
+        title:
+          "Frontier Evaluation Standard remains proposed and " +
+          "Funding Agency adopted another policy and takes effect " +
+          "July 1, 2027",
+      },
+      eventFamilies: ["evaluation-standards", "funding-budget"],
+      eventInstance: {
+        subject: "model-institute",
+        domain: "governance-event",
+        object: "frontier-evaluation-standard",
+      },
+      semantics,
+    });
+
+    expect(parsed).toEqual([]);
   });
 
   it.each(["after", "before", "because", "while", "whereas", "but"])(

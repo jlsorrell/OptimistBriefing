@@ -77,13 +77,22 @@ const HEADLINE_EVENT =
   /^(?<subject>.+?):\s*(?<objectText>.+?)\s+(?<predicate>proposed|introduced|adopted|approved|launched|released|unveiled|published|issued|announced|updated)$/i;
 
 const ORGANIZATION_HEADLINE_EVENT =
-  /^(?<subject>.+?(?:Agency|Institute|University|Department|Commission|Administration|Company|Laboratory|Lab))\s+(?<objectText>.+?)\s+(?<predicate>proposed|introduced|adopted|approved|launched|released|unveiled|published|issued|announced|updated)\b.*$/i;
+  /^(?<subject>.+?(?:Agency|Institute|University|Department|Commission|Administration|Company|Laboratory|Lab))\s+(?<objectText>.+?)\s+(?<predicate>proposed|introduced|adopted|approved|launched|released|unveiled|published|issued|announced|updated)(?:\s+for\s+\d+(?:,\d{3})*(?:\.\d+)?(?:-|\s+)(?:models?|systems?|agenc(?:y|ies)|organizations?|states?|countries?|users?|employees?|requirements?|evaluations?|tests?|benchmarks?))?$/i;
 
 const REPORTING_COMPLEMENT =
   /\b(?:says?|said|reports?|reported|details?|detailed|confirms?|confirmed|announces?|announced)\s+that\s+/i;
 
 const CLAUSE_BOUNDARY =
   /;\s*|,\s*(?=(?:after|before|because|while|whereas|but)\b)|\s+(?=(?:after|before|because|while|whereas|but)\b)/i;
+
+const COORDINATED_EVENT_BOUNDARY =
+  /,?\s+and\s+(?=(?:(?:The\s+)?(?:[A-Z][A-Za-z0-9&.'’-]*\s+){0,5}(?:Agency|Institute|University|Department|Commission|Administration|Company|Laboratory|Lab)\s+(?:proposes?|proposed|introduces?|introduced|adopts?|adopted|approves?|approved|launches?|launched|releases?|released|unveils?|unveiled|publishes?|published|issues?|issued|announces?|announced|updates?|updated)\b|[A-Z][^.!?]*?\s+(?:(?:was|is|has been|had been)\s+)?(?:proposed|introduced|adopted|approved|launched|released|unveiled|published|issued|announced|updated)\s+by\s+(?:The\s+)?(?:[A-Z][A-Za-z0-9&.'’-]*\s+){0,5}(?:Agency|Institute|University|Department|Commission|Administration|Company|Laboratory|Lab)\b))/i;
+
+const EVENT_PREDICATE_BEFORE_COORDINATION =
+  /\b(?:proposes?|proposed|introduces?|introduced|adopts?|adopted|approves?|approved|launches?|launched|releases?|released|unveils?|unveiled|publishes?|published|issues?|issued|announces?|announced|updates?|updated)\b[^.!?]*?,?\s+and\s+/i;
+
+const UNSAFE_COORDINATED_EVENT =
+  /\band\b(?=[^.!?]*\b(?:proposes?|proposed|introduces?|introduced|adopts?|adopted|approves?|approved|launches?|launched|releases?|released|unveils?|unveiled|publishes?|published|issues?|issued|announces?|announced|updates?|updated)\b)/i;
 
 const SENTENCE_BOUNDARY = /(?<=[!?])\s+|(?<=\.)\s+(?=[A-Z])/;
 const LEADING_DISCOURSE_MARKER =
@@ -92,6 +101,8 @@ const LEADING_CLAUSE_MARKER = /^(?:after|before|because|while|whereas|but)\b\s*/
 const PRONOUN_SUBJECT = /^(?:it|this|that|they|these|those|he|she)\b/i;
 const EVENT_PREDICATE_IN_OBJECT =
   /\b(?:proposes?|proposed|introduces?|introduced|adopts?|adopted|approves?|approved|launches?|launched|releases?|released|unveils?|unveiled|publishes?|published|issues?|issued|announces?|announced|updates?|updated)\b/i;
+const EVENT_OBJECT_IN_HEADLINE_SUBJECT =
+  /\b(?:act|bill|rule|standard|framework|guidance|order|program|initiative|fund|round|assistant|app|tool|service|product|model|benchmark)\b/i;
 
 const PAST_TENSE_PREDICATES: Readonly<Record<string, EventPredicate>> = {
   propose: "proposed",
@@ -133,6 +144,7 @@ interface CapturedEvent {
   subjectText: string;
   objectText: string;
   predicate: EventPredicate;
+  organizationHeadline: boolean;
 }
 
 function normalizePredicate(predicate: string): EventPredicate | null {
@@ -163,6 +175,8 @@ function captureEvent(clauseText: string): CapturedEvent | null {
       subjectText: groups.subject.trim(),
       objectText: groups.objectText.trim(),
       predicate,
+      organizationHeadline:
+        pattern === ORGANIZATION_HEADLINE_EVENT,
     };
   }
 
@@ -187,10 +201,20 @@ function reportingComplement(
 function splitCandidates(sentence: string): string[] | null {
   const candidates = sentence
     .split(CLAUSE_BOUNDARY)
+    .flatMap((candidate) =>
+      EVENT_PREDICATE_BEFORE_COORDINATION.test(candidate)
+        ? candidate.split(COORDINATED_EVENT_BOUNDARY)
+        : [candidate],
+    )
     .map((candidate) => candidate.replace(LEADING_CLAUSE_MARKER, "").trim())
     .filter(Boolean);
 
-  return candidates.length <= MAX_CLAUSES_PER_SENTENCE ? candidates : null;
+  return candidates.length <= MAX_CLAUSES_PER_SENTENCE &&
+    !candidates.some((candidate) =>
+      UNSAFE_COORDINATED_EVENT.test(candidate),
+    )
+    ? candidates
+    : null;
 }
 
 interface SegmentedClause {
@@ -226,21 +250,21 @@ function segmentedClauses(
         continue;
       }
 
-      const complement = reportingComplement(sentence);
-      if (!complement) {
-        continue;
-      }
-      const clauses = splitCandidates(complement);
+      const clauses = splitCandidates(sentence);
       if (!clauses) {
         continue;
       }
 
       for (const [clauseIndex, clauseText] of clauses.entries()) {
+        const complement = reportingComplement(clauseText);
+        if (!complement) {
+          continue;
+        }
         segmented.push({
           sourceField,
           sentenceIndex,
           clauseIndex,
-          text: clauseText,
+          text: complement,
         });
       }
     }
@@ -259,6 +283,12 @@ function parseCandidate(
 ): ParsedEventClause | null {
   const captured = captureEvent(clauseText);
   if (!captured || PRONOUN_SUBJECT.test(captured.subjectText)) {
+    return null;
+  }
+  if (
+    captured.organizationHeadline &&
+    EVENT_OBJECT_IN_HEADLINE_SUBJECT.test(captured.subjectText)
+  ) {
     return null;
   }
   if (EVENT_PREDICATE_IN_OBJECT.test(captured.objectText)) {
