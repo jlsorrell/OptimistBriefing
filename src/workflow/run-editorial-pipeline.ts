@@ -972,11 +972,11 @@ export function createProductionPipelineContext(
       );
       const morningIds = new Set(morning.map(({ id }) => id));
       const radar = selected.researchRadar
-        .filter((item) =>
-          workflowPayload(item).researchTier === "radar" &&
-          !morningIds.has(item.id)
-        )
-        .slice(0, Math.max(0, 8 - morning.length))
+        .filter((item) => !morningIds.has(item.id))
+        .slice(0, Math.min(
+          budgets.researchRadar,
+          Math.max(0, READER_PROFILE.sectionBudgets.morningBrief - morning.length),
+        ))
         .map((item) => ({ id: item.id, section: "research_radar" as const }));
       const ordered = [...morning, ...radar];
       const byId = new Map(parsed.map((item) => [item.id, item]));
@@ -986,7 +986,16 @@ export function createProductionPipelineContext(
         const reasons = [...selectionReasons(item)];
         return withWorkflowPayload(
           item,
-          { section, selectionReasons: reasons },
+          {
+            section,
+            selectionReasons: reasons,
+            ...(item.kind === "paper" || item.kind === "blog"
+              ? {
+                  researchTier:
+                    section === "research_radar" ? "radar" : "featured",
+                }
+              : {}),
+          },
           { section },
         );
       });

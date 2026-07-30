@@ -10,7 +10,10 @@ import type {
   ModelProvider,
 } from "../../../src/models/provider";
 import { createProductionPipelineContext } from "../../../src/workflow/run-editorial-pipeline";
-import type { PipelineStore } from "../../../src/workflow/types";
+import {
+  WorkflowItemPayloadSchema,
+  type PipelineStore,
+} from "../../../src/workflow/types";
 
 const noPublishedRun = () => ({ status: "missing" as const });
 
@@ -64,6 +67,7 @@ function cachedItem(
     kind: "paper" | "article";
     section: "research" | "research_radar" | "world";
     researchTier?: "featured" | "radar";
+    researchScore?: number;
   },
 ): Item {
   return {
@@ -90,6 +94,20 @@ function cachedItem(
         ...(options.researchTier === undefined
           ? {}
           : { researchTier: options.researchTier }),
+        ...(options.researchScore === undefined
+          ? {}
+          : {
+              researchScore: {
+                itemId: id,
+                topicalFit: options.researchScore,
+                technicalQuality: options.researchScore,
+                researchSignal: options.researchScore,
+                novelty: options.researchScore,
+                seriousAttention: options.researchScore,
+                total: options.researchScore,
+                selectionReasons: ["Supported ranking evidence."],
+              },
+            }),
         ...(options.kind === "paper"
           ? {
               rawResearch: {
@@ -186,6 +204,64 @@ describe("shouldRunAt", () => {
     expect(degradedProvider.generateRequests.map(({ maxOutputTokens }) =>
       maxOutputTokens
     )).toEqual([900, 120, 900]);
+  });
+
+  it("assigns research tiers from ranked shortlist roles, not input order", async () => {
+    const context = budgetContext(new RecordingProvider(), "degraded");
+    const shortlisted = await context.shortlist([
+      cachedItem("input-featured-low", {
+        kind: "paper",
+        section: "research",
+        researchTier: "featured",
+        researchScore: 0.6,
+      }),
+      cachedItem("input-featured-middle", {
+        kind: "paper",
+        section: "research",
+        researchTier: "featured",
+        researchScore: 0.7,
+      }),
+      cachedItem("input-featured-high", {
+        kind: "paper",
+        section: "research",
+        researchTier: "featured",
+        researchScore: 0.8,
+      }),
+      cachedItem("input-radar-highest", {
+        kind: "paper",
+        section: "research",
+        researchTier: "radar",
+        researchScore: 0.9,
+      }),
+    ]);
+
+    expect(shortlisted.map((item) => ({
+      id: item.id,
+      section: item.metadata.section,
+      researchTier:
+        WorkflowItemPayloadSchema.parse(item.metadata.workflow).researchTier,
+    }))).toEqual([
+      {
+        id: "input-radar-highest",
+        section: "research",
+        researchTier: "featured",
+      },
+      {
+        id: "input-featured-high",
+        section: "research",
+        researchTier: "featured",
+      },
+      {
+        id: "input-featured-middle",
+        section: "research",
+        researchTier: "featured",
+      },
+      {
+        id: "input-featured-low",
+        section: "research_radar",
+        researchTier: "radar",
+      },
+    ]);
   });
 
   it("uses the local date and stops after the 05:50 local cutoff", () => {
