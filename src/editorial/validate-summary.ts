@@ -145,12 +145,88 @@ function credentialMarkerInValue(value: string): boolean {
   return CREDENTIAL_VALUE_MARKER.test(value);
 }
 
-function decodedOrOriginal(value: string): string {
+const MAX_QUERY_VALUE_LENGTH = 2_048;
+const MAX_QUERY_VALUE_DECODE_DEPTH = 4;
+const MAX_QUERY_VALUE_NODES = 32;
+
+function decodedValue(value: string): string | null {
   try {
     return decodeURIComponent(value);
   } catch {
-    return value;
+    return null;
   }
+}
+
+function assignmentValuesOrNull(value: string): string[] | null {
+  const assignmentValues: string[] = [];
+  for (const match of value.matchAll(
+    /(?:^|[?&#;])([^=?&#;]*)=([^&#;]*)/gu,
+  )) {
+    const parameterName = match[1];
+    if (parameterName === undefined || parameterName.length > 256) {
+      return null;
+    }
+    if (credentialBearingParameterName(parameterName)) return null;
+    const assignmentValue = match[2];
+    if (assignmentValue !== undefined && assignmentValue.length > 0) {
+      assignmentValues.push(assignmentValue);
+      if (assignmentValues.length > MAX_QUERY_VALUE_NODES) return null;
+    }
+  }
+  return assignmentValues;
+}
+
+function nestedUrlHasUnsafeData(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return (
+      url.username.length > 0 ||
+      url.password.length > 0 ||
+      url.hash.length > 0
+    );
+  } catch {
+    return false;
+  }
+}
+
+function credentialBearingQueryValue(value: string): boolean {
+  if (value.length > MAX_QUERY_VALUE_LENGTH) return true;
+  const queue = [{ value, depth: 0 }];
+  const queuedValues = new Set([value]);
+  for (let index = 0; index < queue.length; index += 1) {
+    const candidate = queue[index]!;
+    if (
+      credentialMarkerInValue(candidate.value) ||
+      nestedUrlHasUnsafeData(candidate.value)
+    ) {
+      return true;
+    }
+    const assignmentValues = assignmentValuesOrNull(
+      candidate.value,
+    );
+    if (assignmentValues === null) return true;
+    const decoded = decodedValue(candidate.value);
+    const nestedValues =
+      decoded !== null && decoded !== candidate.value
+        ? [...assignmentValues, decoded]
+        : assignmentValues;
+    for (const nestedValue of nestedValues) {
+      if (queuedValues.has(nestedValue)) continue;
+      if (
+        nestedValue.length > MAX_QUERY_VALUE_LENGTH ||
+        candidate.depth === MAX_QUERY_VALUE_DECODE_DEPTH ||
+        queue.length >= MAX_QUERY_VALUE_NODES
+      ) {
+        return true;
+      }
+      queuedValues.add(nestedValue);
+      queue.push({
+        value: nestedValue,
+        depth: candidate.depth + 1,
+      });
+    }
+  }
+  return false;
 }
 
 function credentialBearingUrl(url: URL): boolean {
@@ -158,7 +234,7 @@ function credentialBearingUrl(url: URL): boolean {
   for (const [key, value] of url.searchParams) {
     if (
       credentialBearingParameterName(key) ||
-      credentialMarkerInValue(decodedOrOriginal(value))
+      credentialBearingQueryValue(value)
     ) {
       return true;
     }
@@ -412,10 +488,21 @@ function proseAccessSources(
   return matchingSources.length > 0 ? matchingSources : citedSources;
 }
 
+function trustedForecastRemainder(value: string): string | null {
+  const normalized = normalizedText(value);
+  const match =
+    /^forecast\s*,\s*not fact(?:(?:\s*[.,:;!?\u2013\u2014-]\s*)|\s+|$)/u.exec(
+      normalized,
+    );
+  if (match === null) return null;
+  return normalized.slice(match[0].length).trim();
+}
+
 function extractivelySupports(
   assertion: string,
   evidenceExcerpt: string,
   citedSources: readonly PacketSource[],
+  allowTrustedForecastLabel = false,
 ): boolean {
   const normalizedAssertion = normalizedText(assertion);
   const normalizedEvidence = normalizedText(evidenceExcerpt);
@@ -425,8 +512,16 @@ function extractivelySupports(
   ) {
     return false;
   }
+  const trustedRemainder = allowTrustedForecastLabel
+    ? trustedForecastRemainder(assertion)
+    : null;
+  const supportedAssertion =
+    trustedRemainder === null
+      ? normalizedAssertion
+      : trustedRemainder;
+  if (supportedAssertion.length === 0) return true;
   if (
-    normalizedEvidence.includes(normalizedAssertion)
+    normalizedEvidence.includes(supportedAssertion)
   ) {
     return true;
   }
@@ -434,7 +529,7 @@ function extractivelySupports(
     [source.title, ...source.excerpts.map((excerpt) => excerpt.text)]
       .map(normalizedText)
       .some((sourceText) =>
-        sourceText.includes(normalizedAssertion),
+        sourceText.includes(supportedAssertion),
       ),
   );
 }
@@ -518,6 +613,10 @@ export function validateSummary(
     errors.push("ACCESS_LEVEL_OVERCLAIM");
   }
 
+  const forecast =
+    packet.itemKind === "forecast" ||
+    packet.sources.some((source) => source.role === "forecast");
+
   (
     [
       ["title", parsed.data.title],
@@ -556,6 +655,7 @@ export function validateSummary(
         prose,
         provenance.evidenceExcerpt,
         citedSources,
+        forecast,
       )
     ) {
       errors.push(`UNGROUNDED_PROSE:${field}`);
@@ -575,9 +675,6 @@ export function validateSummary(
     errors.push("EMPTY_UNCERTAINTY");
   }
 
-  const forecast =
-    packet.itemKind === "forecast" ||
-    packet.sources.some((source) => source.role === "forecast");
   if (forecast) {
     const prose = normalizedText(
       [

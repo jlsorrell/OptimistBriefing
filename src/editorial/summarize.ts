@@ -16,6 +16,7 @@ State uncertainty and disagreement.
 Do not imply full-paper access when access_level is abstract or metadata.
 Copy concise supported wording exactly from cited source titles or excerpts for every factual claim and prominent field.
 Copy uncertainty exactly from cited source titles or excerpts.
+For forecast items, prefix one prose field with "Forecast, not fact."; this fixed editorial label does not require source support, but all remaining prose does.
 Return only data matching the supplied JSON schema.`;
 
 const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {

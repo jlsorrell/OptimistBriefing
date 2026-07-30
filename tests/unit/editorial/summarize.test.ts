@@ -149,6 +149,9 @@ describe("summarizeItem", () => {
     expect(request?.system).toContain(
       "Copy concise supported wording exactly from cited source titles or excerpts",
     );
+    expect(request?.system).toContain(
+      'For forecast items, prefix one prose field with "Forecast, not fact."',
+    );
     expect(request?.sourcePacket).toContain("source_id: source-1");
     expect(request?.sourcePacket).toContain("role: reporting");
     expect(request?.sourcePacket).toContain(

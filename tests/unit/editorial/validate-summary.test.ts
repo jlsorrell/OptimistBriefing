@@ -682,6 +682,77 @@ describe("validateSummary", () => {
     expect(result.errors).toContain("FORECAST_LABEL_MISSING");
   });
 
+  it.each([
+    "Forecast, not fact.",
+    "FORECAST, NOT FACT —",
+  ])(
+    "allows trusted forecast label %s before exact cited prose",
+    (label) => {
+      const citedSentence =
+        "The measured outcome improved during the trial.";
+      const result = validateSummary(
+        summaryFixture({
+          accessLevel: "secondary",
+          oneSentence: `${label} ${citedSentence}`,
+          provenance: {
+            ...summaryFixture().provenance,
+            oneSentence: {
+              sourceIds: ["source-1"],
+              evidenceExcerpt: citedSentence,
+            },
+          },
+        }),
+        sourcePacketFixture({
+          itemKind: "forecast",
+          sources: [
+            {
+              ...sourcePacketFixture({
+                accessLevel: "secondary",
+              }).sources[0]!,
+              role: "forecast",
+            },
+          ],
+        }),
+      );
+
+      expect(result).toEqual({ ok: true, errors: [] });
+    },
+  );
+
+  it("rejects unsupported prose surrounding a trusted forecast label", () => {
+    const citedSentence =
+      "The measured outcome improved during the trial.";
+    const result = validateSummary(
+      summaryFixture({
+        accessLevel: "secondary",
+        oneSentence:
+          `Forecast, not fact. Experts guarantee success. ${citedSentence}`,
+        provenance: {
+          ...summaryFixture().provenance,
+          oneSentence: {
+            sourceIds: ["source-1"],
+            evidenceExcerpt: citedSentence,
+          },
+        },
+      }),
+      sourcePacketFixture({
+        itemKind: "forecast",
+        sources: [
+          {
+            ...sourcePacketFixture({
+              accessLevel: "secondary",
+            }).sources[0]!,
+            role: "forecast",
+          },
+        ],
+      }),
+    );
+
+    expect(result.errors).toContain(
+      "UNGROUNDED_PROSE:oneSentence",
+    );
+  });
+
   it("rejects a negated forecast label", () => {
     const result = validateSummary(
       summaryFixture({
@@ -882,6 +953,62 @@ describe("SourcePacketSchema", () => {
       },
     ],
     [
+      "nested redirect with session ID",
+      {
+        ...source,
+        url:
+          "https://example.com/report?next=https%3A%2F%2Fother.example%2F%3FsessionId%3Dopaque-value",
+      },
+    ],
+    [
+      "nested JWT token assignment",
+      {
+        ...source,
+        url:
+          "https://example.com/report?next=jwtToken%3Dopaque-value",
+      },
+    ],
+    [
+      "nested access token assignment",
+      {
+        ...source,
+        url:
+          "https://example.com/report?next=accessToken%3Dopaque-value",
+      },
+    ],
+    [
+      "double-encoded authorization token redirect",
+      {
+        ...source,
+        url:
+          "https://example.com/report?next=https%253A%252F%252Fother.example%252F%253FauthorizationToken%253Dopaque-value",
+      },
+    ],
+    [
+      "credential assignment nested inside another assignment",
+      {
+        ...source,
+        url:
+          "https://example.com/report?next=redirect%3DsessionId%253Dopaque-value",
+      },
+    ],
+    [
+      "nested redirect URL credentials",
+      {
+        ...source,
+        url:
+          "https://example.com/report?next=https%3A%2F%2Freader%3Aopaque-value%40other.example%2Freport",
+      },
+    ],
+    [
+      "nested redirect URL fragment",
+      {
+        ...source,
+        url:
+          "https://example.com/report?next=https%3A%2F%2Fother.example%2Freport%23methods",
+      },
+    ],
+    [
       "credential-bearing query value",
       {
         ...source,
@@ -949,5 +1076,40 @@ describe("SourcePacketSchema", () => {
         ],
       }).success,
     ).toBe(true);
+  });
+
+  it("allows an encoded nested URL with ordinary query parameters", () => {
+    expect(
+      SourcePacketSchema.safeParse({
+        itemKind: "article",
+        sources: [
+          {
+            ...source,
+            url:
+              "https://example.com/report?next=https%253A%252F%252Fother.example%252F%253Fpage%253D2%2526lang%253Den",
+          },
+        ],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("does not include a nested credential value in validation errors", () => {
+    const result = SourcePacketSchema.safeParse({
+      itemKind: "article",
+      sources: [
+        {
+          ...source,
+          url:
+            "https://example.com/report?next=https%3A%2F%2Fother.example%2F%3FsessionId%3Ddo-not-expose",
+        },
+      ],
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(JSON.stringify(result.error.issues)).not.toContain(
+        "do-not-expose",
+      );
+    }
   });
 });
