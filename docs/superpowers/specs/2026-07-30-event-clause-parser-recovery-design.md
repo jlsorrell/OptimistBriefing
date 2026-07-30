@@ -4,6 +4,8 @@
 **Date:** July 30, 2026  
 **Parent plan:** Personal Morning Briefing, Task 7  
 **Failure policy:** Fail open
+**Amendment:** Exact-object fact clauses and organization-led headlines
+approved July 30, 2026
 
 ## 1. Purpose
 
@@ -64,6 +66,9 @@ move the boundary but would not establish subject–predicate–object ownership
   so an event or fact does not leak into its neighboring clause.
 - Attach material facts only to the event instance expressed in the same
   clause.
+- After one event instance is resolved unambiguously, accept facts from a
+  separate clause only when that clause explicitly names the same canonical
+  event object.
 - Preserve deterministic, auditable behavior suitable for a Cloudflare Worker.
 - Preserve the existing `CanonicalEventInstance`,
   `ScopedNewsMaterialFact`, and `deriveNewsSignals` contracts.
@@ -73,6 +78,8 @@ move the boundary but would not establish subject–predicate–object ownership
 
 - General natural-language understanding.
 - Pronoun or entity coreference resolution.
+- Treating generic references such as `the policy`, `the standard`, or
+  `the program` as exact event-object references.
 - Dependency parsing for arbitrary English.
 - Inferring unstated actors, objects, causality, or temporal relationships.
 - Changing source collection, ranking weights, clustering policy, UI, or
@@ -109,6 +116,25 @@ interface ParsedEventClause {
   facts: NewsMaterialFact[];
 }
 ```
+
+After the document has one resolved event, the parser may also return
+fact-only clause records:
+
+```ts
+interface ParsedEventFactClause {
+  sourceField: "title" | "abstract" | "content";
+  sentenceIndex: number;
+  clauseIndex: number;
+  text: string;
+  domain: string;
+  object: string;
+  facts: NewsMaterialFact[];
+}
+```
+
+A fact-only record never creates event identity. It is accepted only when its
+domain and explicit canonical object exactly match the document's already
+resolved event instance.
 
 This is an internal representation, not a persistence or API contract. A
 record exists only when all required event fields are supported and
@@ -177,6 +203,8 @@ Subject, predicate, and object must be recoverable from the same clause:
 - Passive: `Frontier Evaluation Standard was adopted by Model Institute.`
 - Supported headline form: `Model Institute: Frontier Evaluation Standard
   adopted.`
+- Supported organization-led headline form: `Evaluation Agency AI evaluation
+  standard adopted.`
 
 The existing entity and object canonicalization rules may be reused after the
 clause identifies their spans. A generic or missing subject, multiple plausible
@@ -186,13 +214,21 @@ the clause unresolved.
 ### 6.5 Attach facts locally
 
 Dates, amounts, counts, status changes, and other material facts are extracted
-from a parsed event clause only after that clause has an event instance.
-They are emitted as `ScopedNewsMaterialFact` values associated with that exact
-instance.
+from either:
+
+1. a parsed event clause that provides a complete event instance; or
+2. after exactly one event instance has been resolved, a fact clause that
+   explicitly names the same canonical event object.
+
+Both paths emit `ScopedNewsMaterialFact` values associated with that exact
+instance. An object-only fact clause can add facts but can never establish,
+replace, or disambiguate event identity.
 
 Facts in a sibling, wrapper, preceding, or subordinate clause are not attached
-to the event. A pronoun-led clause such as `It takes effect July 1` is not
-coreference-resolved in this recovery and therefore contributes no scoped fact.
+to the event unless that clause explicitly names the exact resolved event
+object. A pronoun-led clause such as `It takes effect July 1`, or a generic
+clause such as `The policy takes effect July 1`, is not coreference-resolved in
+this recovery and therefore contributes no scoped fact.
 
 Explicit valid `metadata.scopedMaterialFacts` continue to be accepted only when
 their event instance exactly matches the single resolved canonical instance.
@@ -209,10 +245,11 @@ After parsing all fields:
 - More than one distinct tuple is ambiguous and produces
   `eventInstances: []`.
 
-Only scoped facts belonging to the single resolved tuple contribute to its
-material-change fingerprint. General material facts may still be retained for
-other editorial uses, but they cannot influence repeat suppression without
-clause ownership.
+Only scoped facts from the event clause or an exact-object fact clause
+belonging to the single resolved tuple contribute to its material-change
+fingerprint. General material facts may still be retained for other editorial
+uses, but they cannot influence repeat suppression without this clause
+ownership.
 
 ## 7. Fail-open Semantics
 
@@ -246,7 +283,8 @@ the story as a repeat.
 Implementation follows test-driven development. A table-driven grammar corpus
 will cover:
 
-- simple active, passive, and headline constructions;
+- simple active, passive, colon-headline, and organization-led headline
+  constructions;
 - reporting wrappers with embedded `that` clauses;
 - nested subjects that differ from wrapper subjects;
 - `after`, `before`, `because`, `while`, `whereas`, `but`, and semicolon
@@ -254,6 +292,7 @@ will cover:
 - multiple distinct events in one sentence or document;
 - unrelated policies and incidental event objects;
 - pronoun-led facts and other unsupported coreference;
+- exact-object fact restatements and rejected generic-object restatements;
 - dates, status changes, counts, and funding amounts;
 - title, abstract, and content field boundaries;
 - case and punctuation variants;
@@ -287,4 +326,3 @@ This recovery is complete when:
 
 After approval, the original Task 7 is marked complete and work resumes at Task
 8 of the morning-briefing implementation plan.
-

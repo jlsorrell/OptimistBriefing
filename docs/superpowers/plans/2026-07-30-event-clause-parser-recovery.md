@@ -13,9 +13,14 @@
 - Failure policy is fail open: ambiguous or unsupported text must produce no canonical event instance, which leaves the development `repeatable: false`.
 - Repeat suppression requires exactly one unambiguous canonical event tuple across title, abstract, and content.
 - Subject, supported event predicate, event object, and scoped material facts must belong to the same parsed clause.
+- After one canonical event is resolved, a separate fact clause may contribute
+  scoped facts only when it explicitly names the exact same canonical event
+  object and domain.
 - Reporting wrappers with a supported `that` complement use the embedded event; the wrapper actor must not replace the embedded subject.
 - Split `after`, `before`, `because`, `while`, `whereas`, `but`, and semicolon clauses conservatively.
 - Do not perform pronoun or entity coreference resolution.
+- Generic references such as `the policy`, `the standard`, and `the program`
+  are not exact-object fact clauses.
 - Preserve `CanonicalEventInstance`, `ScopedNewsMaterialFact`, `deriveCanonicalEventInstances`, `deriveMaterialFacts`, `deriveScopedMaterialFacts`, and `deriveNewsSignals` public contracts.
 - Keep general unscoped material facts available for editorial use, but never use them for repeat suppression without exact clause ownership.
 - Explicit `metadata.scopedMaterialFacts` are accepted only when their event instance exactly matches the single text-derived event instance.
@@ -40,6 +45,11 @@
 - Modify `src/sources/news-signals.ts`
   - Supplies subject/object/fact semantics to the parser, replaces the existing
     sentence-wide tuple/fact-scoping logic, and preserves exported wrappers.
+- Modify `src/sources/event-clause-parser.ts` in Task 2
+  - Adds exact-object fact-clause parsing and the safe organization-led headline
+    form discovered during integration; neither may weaken fail-open identity.
+- Modify `tests/unit/sources/event-clause-parser.test.ts` in Task 2
+  - Adds failing-first coverage for those two bounded grammar extensions.
 - Modify `tests/unit/editorial/pipeline.test.ts`
   - Adds end-to-end fail-open and repeat-fingerprint regressions at the
     normalize/cluster boundary.
@@ -407,6 +417,8 @@ git commit -m "feat: add bounded event clause parser"
 
 **Files:**
 - Create: `tests/unit/sources/news-signals.test.ts`
+- Modify: `src/sources/event-clause-parser.ts`
+- Modify: `tests/unit/sources/event-clause-parser.test.ts`
 - Modify: `src/sources/news-signals.ts:24-64`
 - Modify: `src/sources/news-signals.ts:101-175`
 - Modify: `src/sources/news-signals.ts:465-640`
@@ -420,12 +432,35 @@ git commit -m "feat: add bounded event clause parser"
   - Existing `eventObjectCandidates`, `canonicalInstanceSubject`,
     `normalizedEventObject`, and material-fact normalization rules.
 - Produces:
+  - `parseEventFactClauses(...)`, which returns fact-only records for clauses
+    that explicitly name a provided resolved event object.
   - Unchanged `deriveCanonicalEventInstances(...)`.
   - Unchanged `deriveMaterialFacts(...)`.
   - Unchanged `deriveScopedMaterialFacts(...)`.
   - Unchanged `deriveNewsSignals(...)`.
   - A single text-derived event instance and only its same-clause scoped facts,
     or empty arrays when the text is ambiguous.
+
+The Task 2 parser extension has this exact interface:
+
+```ts
+export interface ParsedEventFactClause {
+  sourceField: "title" | "abstract" | "content";
+  sentenceIndex: number;
+  clauseIndex: number;
+  text: string;
+  domain: CanonicalEventDomain;
+  object: string;
+  facts: NewsMaterialFact[];
+}
+
+export function parseEventFactClauses(input: {
+  text: EventTextFields;
+  eventFamilies: readonly string[];
+  eventInstance: CanonicalEventInstance;
+  semantics: EventClauseSemantics;
+}): ParsedEventFactClause[];
+```
 
 - [ ] **Step 1: Write real-semantics regressions for the two review defects**
 
@@ -619,7 +654,121 @@ npx vitest run tests/unit/sources/news-signals.test.ts
 
 Expected: FAIL on the embedded-subject and subordinate-fact regressions.
 
-- [ ] **Step 4: Extract clause-local fact parsing without changing general facts**
+- [ ] **Step 4: Extend the parser with exact-object fact clauses and the safe headline form**
+
+Before modifying parser production code, add these tests to
+`tests/unit/sources/event-clause-parser.test.ts` and run them to observe the
+expected missing-export/headline failures:
+
+```ts
+import {
+  parseEventClauses,
+  parseEventFactClauses,
+  type EventClauseSemantics,
+} from "../../../src/sources/event-clause-parser";
+
+it("parses an organization-led headline with an explicit actor and object", () => {
+  const parsed = parseEventClauses({
+    text: {
+      title:
+        "Evaluation Agency Frontier Evaluation Standard adopted",
+    },
+    eventFamilies: ["evaluation-standards"],
+    semantics,
+  });
+
+  expect(parsed).toMatchObject([{
+    predicate: "adopted",
+    subject: "evaluation-agency",
+    domain: "governance-event",
+    object: "frontier-evaluation-standard",
+  }]);
+});
+
+it("extracts facts from a clause that names the exact resolved object", () => {
+  const parsed = parseEventFactClauses({
+    text: {
+      title:
+        "Frontier Evaluation Standard takes effect July 1, 2027",
+    },
+    eventFamilies: ["evaluation-standards"],
+    eventInstance: {
+      subject: "model-institute",
+      domain: "governance-event",
+      object: "frontier-evaluation-standard",
+    },
+    semantics,
+  });
+
+  expect(parsed).toEqual([{
+    sourceField: "title",
+    sentenceIndex: 0,
+    clauseIndex: 0,
+    text:
+      "Frontier Evaluation Standard takes effect July 1, 2027",
+    domain: "governance-event",
+    object: "frontier-evaluation-standard",
+    facts: [{
+      kind: "date",
+      key: "effective-date",
+      value: "2027-07-01",
+    }],
+  }]);
+});
+
+it.each([
+  "It takes effect July 1, 2027",
+  "The policy takes effect July 1, 2027",
+  "Community Research Program takes effect July 1, 2027",
+])("rejects a non-exact fact reference: %s", (title) => {
+  const parsed = parseEventFactClauses({
+    text: { title },
+    eventFamilies: ["evaluation-standards", "funding-budget"],
+    eventInstance: {
+      subject: "model-institute",
+      domain: "governance-event",
+      object: "frontier-evaluation-standard",
+    },
+    semantics,
+  });
+
+  expect(parsed).toEqual([]);
+});
+```
+
+Run:
+
+```bash
+npx vitest run tests/unit/sources/event-clause-parser.test.ts
+```
+
+Expected RED: `parseEventFactClauses` is missing and the organization-led
+headline produces no parsed event.
+
+Then extend `src/sources/event-clause-parser.ts`:
+
+1. Add the exported `ParsedEventFactClause` interface and
+   `parseEventFactClauses` signature specified in this task's Interfaces block.
+2. Add a separate organization-led headline pattern whose captured subject ends
+   in `Agency`, `Institute`, `University`, `Department`, `Commission`,
+   `Administration`, `Company`, `Laboratory`, or `Lab`. Keep the existing colon
+   headline form.
+3. Match passive, colon headline, organization-led headline, then active.
+4. Reuse the existing bounded field/sentence/clause segmentation for fact
+   clauses.
+5. Reject pronoun-led clauses before semantic callbacks.
+6. Call `semantics.eventObjects` with the individual clause. Require exactly one
+   candidate whose `domain` and `object` exactly equal the supplied
+   `eventInstance`.
+7. Call `semantics.materialFacts` only after that exact match and return no
+   record when it produces no facts.
+8. Never use a fact-only clause to create or change a
+   `CanonicalEventInstance`.
+
+Run the focused parser test again. Expected GREEN: all parser tests pass,
+including the new headline and exact-object cases.
+
+- [ ] **Step 5: Extract clause-local fact parsing without changing general facts**
 
 In `src/sources/news-signals.ts`, perform a mechanical extraction from
 `deriveMaterialFacts`: move the existing statements beginning with
@@ -673,8 +822,14 @@ export function deriveMaterialFacts(
   }
 
   const eventFamilies = deriveEventFamilies(text, metadata);
+  const clauses = parseNewsEventClauses(text, eventFamilies);
   return scopedFactsForInstance(
-    parseNewsEventClauses(text, eventFamilies),
+    clauses,
+    parseNewsEventFactClauses(
+      text,
+      eventFamilies,
+      eventInstance,
+    ),
     eventInstance,
   );
 }
@@ -682,15 +837,18 @@ export function deriveMaterialFacts(
 
 Do not read `metadata.materialFacts` in either branch.
 
-- [ ] **Step 5: Add the domain-semantics adapter and stable tuple resolution**
+- [ ] **Step 6: Add the domain-semantics adapter and stable tuple resolution**
 
 Import Task 1:
 
 ```ts
 import {
   parseEventClauses,
+  parseEventFactClauses,
+  type EventClauseSemantics,
   type EventTextFields,
   type ParsedEventClause,
+  type ParsedEventFactClause,
 } from "./event-clause-parser";
 ```
 
@@ -706,6 +864,30 @@ function eventTextFields(input: MaterialTextInput): EventTextFields {
   };
 }
 
+function newsClauseSemantics(): EventClauseSemantics {
+  return {
+    canonicalSubject(subjectText) {
+      return canonicalInstanceSubject(
+        deriveNamedEntities(subjectText, {}),
+      );
+    },
+    eventObjects(objectText, families, subject) {
+      return eventObjectCandidates(objectText, families)
+        .map((candidate) => ({
+          ...candidate,
+          object: normalizedEventObject(candidate.object, subject),
+        }))
+        .filter(
+          ({ object }) =>
+            object !== "generic-governance-instrument",
+        );
+    },
+    materialFacts(clauseText) {
+      return extractMaterialFacts(clauseText);
+    },
+  };
+}
+
 function parseNewsEventClauses(
   text: MaterialTextInput,
   eventFamilies: readonly string[],
@@ -713,27 +895,20 @@ function parseNewsEventClauses(
   return parseEventClauses({
     text: eventTextFields(text),
     eventFamilies,
-    semantics: {
-      canonicalSubject(subjectText) {
-        return canonicalInstanceSubject(
-          deriveNamedEntities(subjectText, {}),
-        );
-      },
-      eventObjects(objectText, families, subject) {
-        return eventObjectCandidates(objectText, families)
-          .map((candidate) => ({
-            ...candidate,
-            object: normalizedEventObject(candidate.object, subject),
-          }))
-          .filter(
-            ({ object }) =>
-              object !== "generic-governance-instrument",
-          );
-      },
-      materialFacts(clauseText) {
-        return extractMaterialFacts(clauseText);
-      },
-    },
+    semantics: newsClauseSemantics(),
+  });
+}
+
+function parseNewsEventFactClauses(
+  text: MaterialTextInput,
+  eventFamilies: readonly string[],
+  eventInstance: CanonicalEventInstance,
+): ParsedEventFactClause[] {
+  return parseEventFactClauses({
+    text: eventTextFields(text),
+    eventFamilies,
+    eventInstance,
+    semantics: newsClauseSemantics(),
   });
 }
 
@@ -753,7 +928,7 @@ function canonicalInstances(
 The parser must receive only captured subject and object spans; never pass a
 whole sentence to `canonicalSubject` or `eventObjects`.
 
-- [ ] **Step 6: Replace sentence-wide event and scoped-fact derivation**
+- [ ] **Step 7: Replace sentence-wide event and scoped-fact derivation**
 
 Update the exported wrappers:
 
@@ -771,16 +946,21 @@ export function deriveCanonicalEventInstances(
 
 function scopedFactsForInstance(
   clauses: readonly ParsedEventClause[],
+  factClauses: readonly ParsedEventFactClause[],
   eventInstance: CanonicalEventInstance,
 ): NewsMaterialFact[] {
   return uniqueMaterialFacts(
-    clauses
-      .filter((candidate) =>
+    [
+      ...clauses.filter((candidate) =>
         candidate.subject === eventInstance.subject &&
         candidate.domain === eventInstance.domain &&
         candidate.object === eventInstance.object,
-      )
-      .flatMap(({ facts }) => facts),
+      ),
+      ...factClauses.filter((candidate) =>
+        candidate.domain === eventInstance.domain &&
+        candidate.object === eventInstance.object,
+      ),
+    ].flatMap(({ facts }) => facts),
   );
 }
 ```
@@ -802,6 +982,7 @@ function sameEventInstance(
 
 function scopedMaterialFactsForResolvedEvent(input: {
   clauses: readonly ParsedEventClause[];
+  factClauses: readonly ParsedEventFactClause[];
   metadata: Readonly<Record<string, unknown>>;
   eventInstances: readonly CanonicalEventInstance[];
 }): ScopedNewsMaterialFact[] {
@@ -825,6 +1006,7 @@ function scopedMaterialFactsForResolvedEvent(input: {
     : [];
   const derived = scopedFactsForInstance(
     input.clauses,
+    input.factClauses,
     eventInstance,
   ).map((fact) => ({ ...fact, eventInstance }));
   const unique = new Map(
@@ -847,8 +1029,19 @@ export function deriveScopedMaterialFacts(
   eventInstances: readonly CanonicalEventInstance[],
 ): ScopedNewsMaterialFact[] {
   const eventFamilies = deriveEventFamilies(text, metadata);
+  const clauses = parseNewsEventClauses(text, eventFamilies);
+  const eventInstance = eventInstances.length === 1
+    ? eventInstances[0] ?? null
+    : null;
   return scopedMaterialFactsForResolvedEvent({
-    clauses: parseNewsEventClauses(text, eventFamilies),
+    clauses,
+    factClauses: eventInstance === null
+      ? []
+      : parseNewsEventFactClauses(
+          text,
+          eventFamilies,
+          eventInstance,
+        ),
     metadata,
     eventInstances,
   });
@@ -859,7 +1052,7 @@ Delete the superseded `eventTuplesForSentence`,
 `referencesExactEventInstance`, `regexPhrase`, and `materialFactClauses`
 functions. Do not retain a second sentence-wide fallback.
 
-- [ ] **Step 7: Parse once in `deriveNewsSignals`**
+- [ ] **Step 8: Resolve identity before the bounded fact-clause pass**
 
 Inside `deriveNewsSignals`, replace independent tuple/fact parsing with one
 clause parse:
@@ -870,8 +1063,19 @@ const parsedEventClauses = parseNewsEventClauses(
   eventFamilies,
 );
 const eventInstances = canonicalInstances(parsedEventClauses);
+const eventInstance = eventInstances.length === 1
+  ? eventInstances[0] ?? null
+  : null;
+const parsedEventFactClauses = eventInstance === null
+  ? []
+  : parseNewsEventFactClauses(
+      materialText,
+      eventFamilies,
+      eventInstance,
+    );
 const scopedMaterialFacts = scopedMaterialFactsForResolvedEvent({
   clauses: parsedEventClauses,
+  factClauses: parsedEventFactClauses,
   metadata: input.metadata,
   eventInstances,
 });
@@ -881,7 +1085,7 @@ const materialFacts = extractMaterialFacts(combinedText(materialText));
 Keep the exported wrapper functions for compatibility, but use shared internal
 helpers so `deriveNewsSignals` does not parse the same text more than once.
 
-- [ ] **Step 8: Run the source-level tests and make them pass**
+- [ ] **Step 9: Run the source-level tests and make them pass**
 
 Run:
 
@@ -891,7 +1095,7 @@ npx vitest run tests/unit/sources/event-clause-parser.test.ts tests/unit/sources
 
 Expected: all parser and real-semantics integration tests PASS.
 
-- [ ] **Step 9: Add end-to-end fail-open and fingerprint regressions**
+- [ ] **Step 10: Add end-to-end fail-open and fingerprint regressions**
 
 Append two tests to `tests/unit/editorial/pipeline.test.ts` using its existing
 `rawNews`, `normalizeCandidate`, and `clusterNews` helpers:
@@ -945,7 +1149,7 @@ it("changes only the material fingerprint for a same-event clause update", () =>
 });
 ```
 
-- [ ] **Step 10: Run the editorial pipeline regression suite**
+- [ ] **Step 11: Run the editorial pipeline regression suite**
 
 Run:
 
@@ -956,7 +1160,7 @@ npx vitest run tests/unit/editorial/pipeline.test.ts
 Expected: all editorial pipeline tests PASS, including all adversarial Task 7
 cases accumulated before this recovery.
 
-- [ ] **Step 11: Run full project verification**
+- [ ] **Step 12: Run full project verification**
 
 Run each command separately:
 
@@ -976,7 +1180,7 @@ Expected:
 - Vite production build PASS;
 - `git diff --check` prints no errors.
 
-- [ ] **Step 12: Commit the integration**
+- [ ] **Step 13: Commit the integration**
 
 ```bash
 git add src/sources/news-signals.ts tests/unit/sources/news-signals.test.ts tests/unit/editorial/pipeline.test.ts
