@@ -94,6 +94,14 @@ const EVENT_PREDICATE_BEFORE_COORDINATION =
 const UNSAFE_COORDINATED_EVENT =
   /\band\b(?=[^.!?]*\b(?:proposes?|proposed|introduces?|introduced|adopts?|adopted|approves?|approved|launches?|launched|releases?|released|unveils?|unveiled|publishes?|published|issues?|issued|announces?|announced|updates?|updated)\b)/i;
 
+const MATERIAL_COORDINATION_BOUNDARY = /,?\s+and\s+/gi;
+const MATERIAL_PREDICATE =
+  /(?:propos(?:e|es|ed)|introduc(?:e|es|ed)|adopt(?:s|ed)?|approv(?:e|es|ed)|pass(?:es|ed)?|launch(?:es|ed)?|releas(?:e|es|ed)|publish(?:es|ed)|unveil(?:s|ed)?|delay(?:s|ed)?|postpon(?:e|es|ed)|reject(?:s|ed)?|block(?:s|ed)?|withdraw(?:s|n)?|repeal(?:s|ed)?|effective|takes?\s+effect|deadline(?:\s+is|\s+of)?)/i;
+const EXPLICIT_ORGANIZATION_OWNER =
+  /^(?:(?:The\s+)?(?:[A-Z][A-Za-z0-9&.'’-]*\s+){0,5}(?:Agency|Institute|University|Department|Commission|Administration|Company|Laboratory|Lab))\b/;
+const EXPLICIT_EVENT_OBJECT_OWNER =
+  /^(?:(?:(?:[Tt]he|[Aa]n?|[Aa]nother)\s+)(?:[A-Za-z0-9&.'’-]+\s+){0,5}(?:act|bill|policy|rule|standard|framework|guidance|order|program|initiative|fund|round|assistant|app|tool|service|product|model|benchmark)|(?:[A-Z][A-Za-z0-9&.'’-]*\s+){0,5}(?:Act|Bill|Policy|Rule|Standard|Framework|Guidance|Order|Program|Initiative|Fund|Round|Assistant|App|Tool|Service|Product|Model|Benchmark))\b/;
+
 const SENTENCE_BOUNDARY = /(?<=[!?])\s+|(?<=\.)\s+(?=[A-Z])/;
 const LEADING_DISCOURSE_MARKER =
   /^(?:however|meanwhile|therefore|also|additionally|moreover|finally)\s*,?\s*/i;
@@ -198,6 +206,42 @@ function reportingComplement(
   return reportingComplement(sentence.slice(match.index + match[0].length), depth + 1);
 }
 
+function splitMaterialCoordination(candidate: string): string[] {
+  const boundaries = [
+    ...candidate.matchAll(MATERIAL_COORDINATION_BOUNDARY),
+  ].filter((boundary) => {
+    if (boundary.index === undefined) {
+      return false;
+    }
+
+    const left = candidate.slice(0, boundary.index);
+    const right = candidate
+      .slice(boundary.index + boundary[0].length)
+      .trim();
+
+    return MATERIAL_PREDICATE.test(left) &&
+      MATERIAL_PREDICATE.test(right) &&
+      !PRONOUN_SUBJECT.test(right) &&
+      (
+        EXPLICIT_ORGANIZATION_OWNER.test(right) ||
+        EXPLICIT_EVENT_OBJECT_OWNER.test(right)
+      );
+  });
+
+  if (boundaries.length === 0) {
+    return [candidate];
+  }
+
+  const candidates: string[] = [];
+  let start = 0;
+  for (const boundary of boundaries) {
+    candidates.push(candidate.slice(start, boundary.index));
+    start = (boundary.index ?? 0) + boundary[0].length;
+  }
+  candidates.push(candidate.slice(start));
+  return candidates;
+}
+
 function splitCandidates(sentence: string): string[] | null {
   const candidates = sentence
     .split(CLAUSE_BOUNDARY)
@@ -206,6 +250,7 @@ function splitCandidates(sentence: string): string[] | null {
         ? candidate.split(COORDINATED_EVENT_BOUNDARY)
         : [candidate],
     )
+    .flatMap(splitMaterialCoordination)
     .map((candidate) => candidate.replace(LEADING_CLAUSE_MARKER, "").trim())
     .filter(Boolean);
 

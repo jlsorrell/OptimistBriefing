@@ -175,6 +175,76 @@ describe("news event clause integration", () => {
     );
   });
 
+  it.each([
+    "delayed",
+    "postponed",
+    "blocked",
+    "rejected",
+    "withdrawn",
+    "repealed",
+  ])(
+    "does not leak coordinated %s status to the exact event object",
+    (status) => {
+      const result = signals({
+        title:
+          "Evaluation Agency proposes Frontier Evaluation Standard",
+        abstract:
+          `Another policy was ${status}, and ` +
+          "Frontier Evaluation Standard takes effect July 1, 2027",
+      });
+
+      expect(result.scopedMaterialFacts).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ value: "proposed" }),
+          expect.objectContaining({ value: "2027-07-01" }),
+        ]),
+      );
+      expect(result.scopedMaterialFacts).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "status",
+            value:
+              status === "postponed" ? "delayed" :
+              status === "rejected" ? "blocked" :
+              status === "repealed" ? "withdrawn" :
+              status,
+          }),
+        ]),
+      );
+    },
+  );
+
+  it("preserves same-object adopted and effective facts", () => {
+    const result = signals({
+      title:
+        "Evaluation Agency adopts Frontier Evaluation Standard",
+      abstract:
+        "Frontier Evaluation Standard was adopted and takes effect July 1, 2027",
+    });
+
+    expect(result.scopedMaterialFacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "adopted" }),
+        expect.objectContaining({ value: "2027-07-01" }),
+      ]),
+    );
+  });
+
+  it("does not resolve a pronoun-led coordinated fact clause", () => {
+    const result = signals({
+      title:
+        "Evaluation Agency proposes Frontier Evaluation Standard",
+      abstract:
+        "Another policy was delayed, and it takes effect July 1, 2027",
+    });
+
+    expect(result.scopedMaterialFacts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "2027-07-01" }),
+      ]),
+    );
+  });
+
   it("fails open for a trailing event after an organization-led headline", () => {
     const result = signals({
       title:

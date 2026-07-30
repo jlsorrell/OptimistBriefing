@@ -34,6 +34,33 @@ const semantics: EventClauseSemantics = {
   },
 };
 
+const materialStatusSemantics: EventClauseSemantics = {
+  ...semantics,
+  materialFacts(clauseText) {
+    const status =
+      /\b(delayed|postponed|blocked|rejected|withdrawn|repealed)\b/i
+        .exec(clauseText)?.[1]
+        ?.toLocaleLowerCase("en-US");
+
+    return [
+      ...(status
+        ? [{
+            kind: "status" as const,
+            key: "event-status",
+            value: status,
+          }]
+        : []),
+      ...(/takes effect July 1, 2027/i.test(clauseText)
+        ? [{
+            kind: "date" as const,
+            key: "effective-date",
+            value: "2027-07-01",
+          }]
+        : []),
+    ];
+  },
+};
+
 describe("parseEventClauses", () => {
   it("parses an organization-led headline with an explicit actor and object", () => {
     const parsed = parseEventClauses({
@@ -146,6 +173,62 @@ describe("parseEventClauses", () => {
         key: "effective-date",
         value: "2027-07-01",
       }],
+    }]);
+  });
+
+  it.each([
+    "delayed",
+    "postponed",
+    "blocked",
+    "rejected",
+    "withdrawn",
+    "repealed",
+  ])(
+    "isolates an unrelated %s status from an exact-object date",
+    (status) => {
+      const parsed = parseEventFactClauses({
+        text: {
+          title:
+            `Another policy was ${status}, and ` +
+            "Frontier Evaluation Standard takes effect July 1, 2027",
+        },
+        eventFamilies: ["evaluation-standards"],
+        eventInstance: {
+          subject: "model-institute",
+          domain: "governance-event",
+          object: "frontier-evaluation-standard",
+        },
+        semantics: materialStatusSemantics,
+      });
+
+      expect(parsed.flatMap(({ facts }) => facts)).toEqual([{
+        kind: "date",
+        key: "effective-date",
+        value: "2027-07-01",
+      }]);
+    },
+  );
+
+  it("isolates an exact-object date from a later unrelated status", () => {
+    const parsed = parseEventFactClauses({
+      text: {
+        title:
+          "Frontier Evaluation Standard takes effect July 1, 2027, and " +
+          "another policy was blocked",
+      },
+      eventFamilies: ["evaluation-standards"],
+      eventInstance: {
+        subject: "model-institute",
+        domain: "governance-event",
+        object: "frontier-evaluation-standard",
+      },
+      semantics: materialStatusSemantics,
+    });
+
+    expect(parsed.flatMap(({ facts }) => facts)).toEqual([{
+      kind: "date",
+      key: "effective-date",
+      value: "2027-07-01",
     }]);
   });
 
