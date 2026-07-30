@@ -131,7 +131,7 @@ type WorkflowRunRow = {
 };
 
 function validated<T>(
-  schema: z.ZodType<T>,
+  schema: z.ZodType<T, z.ZodTypeDef, unknown>,
   value: unknown,
   context: string,
 ): T {

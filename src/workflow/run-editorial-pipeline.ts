@@ -6,10 +6,52 @@ import { SourceHttpClient } from "../sources/http-client";
 import { createNewsCollectorFromCatalog } from "../sources/news-collector";
 import { normalizeCandidate } from "../editorial/normalize";
 import { deduplicateItems } from "../editorial/deduplicate";
-import { summarizeItem } from "../editorial/summarize";
-import { validateSummary, type SourcePacket } from "../editorial/validate-summary";
+import {
+  summarizeItem,
+  SummaryRejectedError,
+} from "../editorial/summarize";
+import type { SourcePacket } from "../editorial/validate-summary";
 import type { ModelProvider } from "../models/provider";
-import { ItemSchema, StructuredSummarySchema } from "../contracts/editorial";
+import { assessResearch } from "../editorial/assess-research";
+import { scoreResearch } from "../editorial/research-score";
+import {
+  NewsScoreSchema,
+  scoreNews,
+  scoreNewsDevelopment,
+  type NewsScore,
+} from "../editorial/news-score";
+import {
+  clusterNews,
+  NewsDevelopmentSchema,
+  type NewsDevelopment,
+} from "../editorial/cluster";
+import {
+  shortlist as selectShortlist,
+  type SectionBudgets,
+  type ShortlistPreferences,
+} from "../editorial/shortlist";
+import { editorialSignals } from "../editorial/editorial-signals";
+import { READER_PROFILE } from "../config/reader-profile";
+import { ArxivAdapter } from "../sources/arxiv";
+import { SemanticScholarAdapter } from "../sources/semantic-scholar";
+import { OpenAlexAdapter } from "../sources/openalex";
+import { ResearchCollector } from "../sources/research-collector";
+import {
+  RawNewsCandidateSchema,
+  RawResearchCandidateSchema,
+  type ResearchSourceInput,
+} from "../sources/types";
+import {
+  EditionEntrySchema,
+  EditionMetadataSchema,
+  EditionSchema,
+  ItemScoreSchema,
+  ItemSchema,
+  StructuredSummarySchema,
+  type EditionSection,
+  type Item,
+  type ItemScore,
+} from "../contracts/editorial";
 import type {
   Edition,
   EditionEntry,
@@ -17,12 +59,17 @@ import type {
 } from "../contracts/editorial";
 import {
   PIPELINE_STEPS,
+  CollectedCandidateSchema,
+  WorkflowItemPayloadSchema,
+  WorkflowItemSchema,
   type CheckpointArtifact,
+  type CollectedCandidate,
   type PipelineContext,
   type PipelineResult,
   type PipelineRun,
   type PipelineStore,
   type PipelineStatus,
+  type WorkflowItemPayload,
 } from "./types";
 
 export { PIPELINE_STEPS } from "./types";
@@ -62,23 +109,214 @@ const PersistedRunSchema = z.object({
   attempt_count: z.number().int().nonnegative(), failure_code: z.string().nullable(),
   estimated_cost_usd: z.number().finite().nonnegative(), created_at: z.string().datetime(), updated_at: z.string().datetime(),
 }).strict();
-const PersistedArtifactSchema = z.object({
-  output: z.unknown(), attempts: z.number().int().positive(), durationMs: z.number().finite().nonnegative(),
-  itemCount: z.number().int().nonnegative(), estimatedCostUsd: z.number().finite().nonnegative(),
-}).strict();
-const SummaryCandidateSchema = z.object({ item: ItemSchema, summary: StructuredSummarySchema }).strict();
-const ValidatedSummaryCandidateSchema = SummaryCandidateSchema.extend({ valid: z.boolean(), validationErrors: z.array(z.string()).optional() }).strict();
-const CompositionSchema = z.object({
-  edition: z.object({ id: z.string().min(1), editionDate: z.string(), runId: z.string(), status: z.literal("draft"), readingMinutes: z.number().int().positive().nullable(), publishedAt: z.null(), createdAt: z.string(), metadata: z.object({ missingSections: z.array(z.string()), sourceFailures: z.array(z.string()) }) }),
-  entries: z.array(z.unknown()), status: z.enum(["published", "partial", "failed"]), missingSections: z.array(z.string()), sourceFailures: z.array(z.string()),
-}).strict();
+const CollectedCandidatesSchema = z.array(CollectedCandidateSchema).max(1_000);
 
-function validateCheckpointOutput(step: (typeof PIPELINE_STEPS)[number], output: unknown): unknown {
-  if (["collect", "normalize", "enrich", "prefilter", "assess", "score", "cluster", "shortlist"].includes(step)) return z.array(ItemSchema).parse(output);
-  if (step === "synthesize") return z.array(SummaryCandidateSchema).parse(output);
-  if (step === "validate") return z.array(ValidatedSummaryCandidateSchema).parse(output);
-  if (step === "compose" || step === "publish") return CompositionSchema.parse(output);
-  return z.never().parse(step);
+type ItemStage =
+  | "normalize"
+  | "enrich"
+  | "prefilter"
+  | "assess"
+  | "score"
+  | "cluster"
+  | "shortlist";
+
+function stageItemsSchema(stage: ItemStage) {
+  return z.array(WorkflowItemSchema).max(1_000).superRefine(
+    (items, context) => {
+      items.forEach((item, index) => {
+        if (item.metadata.workflow === undefined) return;
+        const payload = WorkflowItemPayloadSchema.parse(
+          item.metadata.workflow,
+        );
+        const research = item.kind === "paper" || item.kind === "blog";
+        const requireField = (
+          present: boolean,
+          field: keyof WorkflowItemPayload,
+        ) => {
+          if (present) return;
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `Production ${stage} artifacts require ${field}.`,
+            path: [index, "metadata", "workflow", field],
+          });
+        };
+        if (research) {
+          requireField(payload.rawResearch !== undefined, "rawResearch");
+        }
+        if (
+          stage === "enrich" ||
+          stage === "prefilter" ||
+          stage === "assess" ||
+          stage === "score" ||
+          stage === "cluster" ||
+          stage === "shortlist"
+        ) {
+          requireField(payload.embedding !== undefined, "embedding");
+          requireField(
+            research
+              ? payload.topicalFit !== undefined
+              : payload.personalRelevance !== undefined,
+            research ? "topicalFit" : "personalRelevance",
+          );
+        }
+        if (
+          research &&
+          (stage === "assess" ||
+            stage === "score" ||
+            stage === "cluster" ||
+            stage === "shortlist")
+        ) {
+          requireField(payload.assessment !== undefined, "assessment");
+        }
+        if (
+          research &&
+          (stage === "score" ||
+            stage === "cluster" ||
+            stage === "shortlist")
+        ) {
+          requireField(payload.researchScore !== undefined, "researchScore");
+        }
+        if (!research && stage === "score") {
+          requireField(payload.newsScore !== undefined, "newsScore");
+        }
+        if (!research && (stage === "cluster" || stage === "shortlist")) {
+          requireField(payload.development !== undefined, "development");
+          requireField(
+            payload.developmentScore !== undefined,
+            "developmentScore",
+          );
+        }
+        if (stage === "shortlist") {
+          requireField(payload.section !== undefined, "section");
+          requireField(
+            payload.selectionReasons !== undefined,
+            "selectionReasons",
+          );
+        }
+      });
+    },
+  );
+}
+
+const NormalizedItemsSchema = stageItemsSchema("normalize");
+const EnrichedItemsSchema = stageItemsSchema("enrich");
+const PrefilteredItemsSchema = stageItemsSchema("prefilter");
+const AssessedItemsSchema = stageItemsSchema("assess");
+const ScoredItemsSchema = stageItemsSchema("score");
+const ClusteredItemsSchema = stageItemsSchema("cluster");
+const ShortlistedItemsSchema = stageItemsSchema("shortlist");
+const SummaryCandidateSchema = z.object({
+  item: WorkflowItemSchema,
+  summary: StructuredSummarySchema,
+}).strict();
+const ValidatedSummaryCandidateSchema = SummaryCandidateSchema.extend({
+  valid: z.boolean(),
+  validationErrors: z.array(z.string().min(1).max(200)).max(64).optional(),
+}).strict();
+const SummaryCandidatesSchema = z.array(SummaryCandidateSchema).max(8);
+const ValidatedSummaryCandidatesSchema = z.array(
+  ValidatedSummaryCandidateSchema,
+).max(8);
+const CheckpointStringSchema = z.string().min(1).max(200);
+const DraftEditionSchema = EditionSchema.extend({
+  status: z.literal("draft"),
+  publishedAt: z.null(),
+  metadata: EditionMetadataSchema,
+}).strict();
+const CompositionSchema = z.object({
+  edition: DraftEditionSchema,
+  entries: z.array(EditionEntrySchema).max(8),
+  status: z.enum(["published", "partial", "failed"]),
+  missingSections: z.array(CheckpointStringSchema).max(32),
+  sourceFailures: z.array(CheckpointStringSchema).max(64),
+}).strict().superRefine((composition, context) => {
+  composition.entries.forEach((entry, index) => {
+    if (entry.editionId !== composition.edition.id) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Composition entries must belong to the composed edition.",
+        path: ["entries", index, "editionId"],
+      });
+    }
+  });
+  if (
+    JSON.stringify(composition.missingSections) !==
+      JSON.stringify(composition.edition.metadata.missingSections) ||
+    JSON.stringify(composition.sourceFailures) !==
+      JSON.stringify(composition.edition.metadata.sourceFailures)
+  ) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Composition metadata must match its durable status fields.",
+      path: ["edition", "metadata"],
+    });
+  }
+});
+
+function checkpointOutputSchema(
+  step: (typeof PIPELINE_STEPS)[number],
+): z.ZodType<unknown, z.ZodTypeDef, unknown> {
+  switch (step) {
+    case "collect":
+      return CollectedCandidatesSchema;
+    case "normalize":
+      return NormalizedItemsSchema;
+    case "enrich":
+      return EnrichedItemsSchema;
+    case "prefilter":
+      return PrefilteredItemsSchema;
+    case "assess":
+      return AssessedItemsSchema;
+    case "score":
+      return ScoredItemsSchema;
+    case "cluster":
+      return ClusteredItemsSchema;
+    case "shortlist":
+      return ShortlistedItemsSchema;
+    case "synthesize":
+      return SummaryCandidatesSchema;
+    case "validate":
+      return ValidatedSummaryCandidatesSchema;
+    case "compose":
+    case "publish":
+      return CompositionSchema;
+  }
+}
+
+const ArtifactAttemptsSchema = z.number().int().positive();
+const ArtifactDurationSchema = z.number().finite().nonnegative();
+const ArtifactItemCountSchema = z.number().int().nonnegative();
+const ArtifactCostSchema = z.number().finite().nonnegative();
+const ARTIFACT_KEYS = new Set([
+  "output",
+  "attempts",
+  "durationMs",
+  "itemCount",
+  "estimatedCostUsd",
+]);
+
+function parseCheckpointArtifact(
+  step: (typeof PIPELINE_STEPS)[number],
+  value: unknown,
+): CheckpointArtifact<unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Checkpoint artifact must be an object.");
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  if (
+    keys.length !== ARTIFACT_KEYS.size ||
+    keys.some((key) => !ARTIFACT_KEYS.has(key))
+  ) {
+    throw new TypeError("Checkpoint artifact has unknown or missing fields.");
+  }
+  return {
+    output: checkpointOutputSchema(step).parse(record.output),
+    attempts: ArtifactAttemptsSchema.parse(record.attempts),
+    durationMs: ArtifactDurationSchema.parse(record.durationMs),
+    itemCount: ArtifactItemCountSchema.parse(record.itemCount),
+    estimatedCostUsd: ArtifactCostSchema.parse(record.estimatedCostUsd),
+  };
 }
 
 class D1PipelineStore implements PipelineStore {
@@ -99,7 +337,12 @@ class D1PipelineStore implements PipelineStore {
   }
 
   async getRun(runId: string): Promise<PipelineRun | null> {
-    const row = await this.db.prepare("SELECT * FROM workflow_runs WHERE id = ?")
+    const row = await this.db.prepare(
+      `SELECT
+        id, edition_date, status, current_step, retryable, attempt_count,
+        failure_code, estimated_cost_usd, created_at, updated_at
+       FROM workflow_runs WHERE id = ?`,
+    )
       .bind(runId).first<PersistedRunRow>();
     return row === null ? null : this.runFromRow(row);
   }
@@ -140,8 +383,7 @@ class D1PipelineStore implements PipelineStore {
     step: (typeof PIPELINE_STEPS)[number],
     artifact: CheckpointArtifact,
   ): Promise<void> {
-    const validArtifact = PersistedArtifactSchema.parse(artifact);
-    validateCheckpointOutput(step, validArtifact.output);
+    const validArtifact = parseCheckpointArtifact(step, artifact);
     await this.db.prepare(
       `INSERT INTO audit_events (id, run_id, event_type, event_json, created_at)
        VALUES (?, ?, ?, ?, ?)`,
@@ -181,23 +423,28 @@ class D1PipelineStore implements PipelineStore {
     for (const id of ids) await this.db.prepare("DELETE FROM audit_events WHERE id = ?").bind(id).run();
   }
 
-  async readArtifact<T>(
+  async readArtifact(
     runId: string,
     step: (typeof PIPELINE_STEPS)[number],
-  ): Promise<CheckpointArtifact<T> | null> {
+  ): Promise<CheckpointArtifact<unknown> | null> {
     const records = await this.db.prepare(
       `SELECT event_json FROM audit_events
        WHERE run_id = ? AND event_type = ? ORDER BY created_at DESC`,
     ).bind(runId, "workflow_checkpoint").all<{ event_json: string }>();
     for (const record of records.results) {
+      let parsed: { step?: unknown; artifact?: unknown };
       try {
-        const parsed = JSON.parse(record.event_json) as { step?: unknown; artifact?: unknown };
-        if (parsed.step !== step) continue;
-        const artifact = PersistedArtifactSchema.parse(parsed.artifact);
-        validateCheckpointOutput(step, artifact.output);
-        return artifact as CheckpointArtifact<T>;
-      } catch {
-        // Corrupt diagnostic data is not a completed checkpoint.
+        parsed = JSON.parse(record.event_json) as { step?: unknown; artifact?: unknown };
+      } catch (error) {
+        throw new Error("INVALID_CHECKPOINT_RECORD", { cause: error });
+      }
+      if (parsed.step !== step) continue;
+      try {
+        return parseCheckpointArtifact(step, parsed.artifact);
+      } catch (error) {
+        throw new Error(`INVALID_CHECKPOINT_ARTIFACT:${step}`, {
+          cause: error,
+        });
       }
     }
     return null;
@@ -262,46 +509,540 @@ class D1PipelineStore implements PipelineStore {
   }
 }
 
+export function createD1PipelineStore(db: D1Database): PipelineStore {
+  return new D1PipelineStore(db);
+}
+
+export type PipelineProviders = {
+  summary: ModelProvider;
+  assessment: ModelProvider;
+};
+
+export type ProductionPipelineContextOptions = {
+  editionDate: string;
+  runId: string;
+  store: PipelineStore;
+  now: () => string;
+  providers: PipelineProviders;
+  collectCandidates: () => Promise<readonly CollectedCandidate[]>;
+  persistItems?: (items: readonly Item[]) => Promise<void>;
+  sourceFailures?: readonly string[];
+};
+
+function workflowPayload(item: Item): WorkflowItemPayload {
+  return WorkflowItemPayloadSchema.parse(item.metadata.workflow);
+}
+
+function withWorkflowPayload(
+  item: Item,
+  patch: Partial<Omit<WorkflowItemPayload, "version">>,
+  metadataPatch: Readonly<Record<string, unknown>> = {},
+): Item {
+  const existing = item.metadata.workflow === undefined
+    ? { version: 1 as const }
+    : workflowPayload(item);
+  const workflow = WorkflowItemPayloadSchema.parse({
+    ...existing,
+    ...patch,
+    version: 1,
+  });
+  return WorkflowItemSchema.parse({
+    ...item,
+    metadata: {
+      ...item.metadata,
+      ...metadataPatch,
+      workflow,
+    },
+  });
+}
+
+function normalizedCandidate(candidate: CollectedCandidate): Item {
+  const storedItem = ItemSchema.safeParse(candidate);
+  if (storedItem.success) {
+    return withWorkflowPayload(storedItem.data, {});
+  }
+  const research = RawResearchCandidateSchema.safeParse(candidate);
+  return withWorkflowPayload(
+    normalizeCandidate(candidate),
+    research.success ? { rawResearch: research.data } : {},
+  );
+}
+
+function cosineSimilarity(
+  left: readonly number[],
+  right: readonly number[],
+): number {
+  if (left.length === 0 || left.length !== right.length) return 0;
+  let dot = 0;
+  let leftMagnitude = 0;
+  let rightMagnitude = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    const leftValue = left[index];
+    const rightValue = right[index];
+    if (leftValue === undefined || rightValue === undefined) return 0;
+    dot += leftValue * rightValue;
+    leftMagnitude += leftValue * leftValue;
+    rightMagnitude += rightValue * rightValue;
+  }
+  if (leftMagnitude === 0 || rightMagnitude === 0) return 0;
+  return Math.max(
+    0,
+    Math.min(1, dot / Math.sqrt(leftMagnitude * rightMagnitude)),
+  );
+}
+
+function profileEmbeddingTexts(): string[] {
+  return READER_PROFILE.researchTopics.map((topic) =>
+    [topic.description, ...topic.positiveExamples].join(". "),
+  );
+}
+
+function itemEmbeddingText(item: Item): string {
+  return [item.title, item.primaryTopic, item.normalizedText]
+    .filter((value) => value.length > 0)
+    .join("\n");
+}
+
+function newsSection(item: Item): EditionSection {
+  const parsed = z.enum([
+    "world",
+    "technology",
+    "ai_policy",
+    "dmv",
+    "baltimore",
+    "forecast",
+  ]).safeParse(item.metadata.primarySection);
+  return parsed.success ? parsed.data : item.kind === "forecast"
+    ? "forecast"
+    : "world";
+}
+
+function sourceQuality(item: Item): number {
+  const priorities: Readonly<Record<Item["sourceRefs"][number]["role"], number>> = {
+    primary: 0.98,
+    reporting: 0.9,
+    analysis: 0.7,
+    blog: 0.7,
+    opinion: 0.4,
+    forecast: 0.5,
+  };
+  return Math.max(...item.sourceRefs.map((source) => priorities[source.role]));
+}
+
+function newsImportance(section: EditionSection): number {
+  if (section === "world" || section === "ai_policy") return 0.85;
+  if (section === "technology") return 0.8;
+  if (section === "dmv" || section === "baltimore") return 0.75;
+  return 0.6;
+}
+
+function recency(item: Item, now: string): number {
+  if (item.publishedAt === null) return 0.5;
+  const ageHours = Math.max(
+    0,
+    (Date.parse(now) - Date.parse(item.publishedAt)) / (60 * 60 * 1_000),
+  );
+  return Math.max(0, Math.min(1, 1 - ageHours / (7 * 24)));
+}
+
+function packet(item: Item): SourcePacket {
+  const sources = [
+    ...new Map(item.sourceRefs.map((source) => [source.id, source])).values(),
+  ].slice(0, 12);
+  return {
+    itemKind: item.kind,
+    sources: sources.map((source) => ({
+      sourceId: source.id,
+      role: source.role,
+      title: item.title,
+      url: source.url,
+      retrievedAt: source.retrievedAt,
+      accessLevel: item.accessLevel,
+      excerpts: [{
+        number: 1,
+        text: item.normalizedText.slice(0, 4_000) || item.title,
+      }],
+    })),
+  };
+}
+
+function averageNewsComponent(
+  scores: readonly NewsScore[],
+  key:
+    | "publicImportance"
+    | "personalRelevance"
+    | "sourceQuality"
+    | "recency"
+    | "geography"
+    | "novelty",
+): number {
+  if (scores.length === 0) return 0;
+  return scores.reduce((sum, score) => sum + score[key], 0) / scores.length;
+}
+
+function itemFromDevelopment(
+  development: NewsDevelopment,
+  score: NewsScore,
+): Item {
+  const representative = development.representativeItem;
+  return withWorkflowPayload(
+    ItemSchema.parse({
+      ...representative,
+      id: development.id,
+      canonicalUrl:
+        development.canonicalPrimaryDocument ??
+        representative.canonicalUrl,
+      title: development.title,
+      sourceRefs: development.sourceRefs,
+      normalizedText: development.items
+        .map((item) => item.normalizedText)
+        .join(" "),
+      metadata: {
+        ...representative.metadata,
+        primarySection: development.primarySection,
+        sectionEligibility: development.sectionEligibility,
+      },
+    }),
+    {
+      development,
+      developmentScore: score,
+    },
+  );
+}
+
+function selectionReasons(item: Item): readonly string[] {
+  const payload = workflowPayload(item);
+  return (
+    payload.researchScore?.selectionReasons ??
+    payload.developmentScore?.selectionReasons ??
+    ["Selected by the editorial shortlist."]
+  );
+}
+
+export function createProductionPipelineContext(
+  options: ProductionPipelineContextOptions,
+): PipelineContext {
+  return {
+    editionDate: options.editionDate,
+    runId: options.runId,
+    store: options.store,
+    now: options.now,
+    collect: async () =>
+      z.array(CollectedCandidateSchema).parse(
+        await options.collectCandidates(),
+      ),
+    normalize: async (candidates) => {
+      const normalized = candidates.map(normalizedCandidate);
+      return deduplicateItems(normalized).items.map((item) =>
+        withWorkflowPayload(item, {}),
+      );
+    },
+    ...(options.persistItems === undefined
+      ? {}
+      : { persistItems: options.persistItems }),
+    enrich: async (items) => {
+      if (items.length === 0) return [];
+      const profileTexts = profileEmbeddingTexts();
+      const vectors = z.array(
+        z.array(z.number().finite()).min(1).max(4_096),
+      ).length(items.length + profileTexts.length).parse(
+        await options.providers.summary.embed([
+          ...items.map(itemEmbeddingText),
+          ...profileTexts,
+        ]),
+      );
+      const dimension = vectors[0]?.length;
+      if (
+        dimension === undefined ||
+        vectors.some((vector) => vector.length !== dimension)
+      ) {
+        throw new Error("INVALID_EMBEDDING_BATCH");
+      }
+      const profileVectors = vectors.slice(items.length);
+      return items.map((candidate, index) => {
+        const item = WorkflowItemSchema.parse(candidate);
+        const embedding = vectors[index];
+        if (embedding === undefined) throw new Error("MISSING_ITEM_EMBEDDING");
+        const relevance = Math.max(
+          0,
+          ...profileVectors.map((profileVector) =>
+            cosineSimilarity(embedding, profileVector),
+          ),
+        );
+        return withWorkflowPayload(
+          item,
+          item.kind === "paper" || item.kind === "blog"
+            ? { embedding, topicalFit: relevance }
+            : { embedding, personalRelevance: relevance },
+        );
+      });
+    },
+    prefilter: async (items) => items
+      .map((item) => WorkflowItemSchema.parse(item))
+      .filter((item) => {
+        if (item.normalizedText.trim().length === 0) return false;
+        if (item.kind !== "paper" && item.kind !== "blog") return true;
+        const topicalFit = workflowPayload(item).topicalFit;
+        return (
+          topicalFit !== undefined &&
+          topicalFit >=
+            READER_PROFILE.researchQualityGates.minimumTopicalFit
+        );
+      }),
+    assess: async (items) => Promise.all(items.map(async (candidate) => {
+      const item = WorkflowItemSchema.parse(candidate);
+      if (item.kind !== "paper" && item.kind !== "blog") return item;
+      const rawResearch = workflowPayload(item).rawResearch;
+      if (rawResearch === undefined) {
+        throw new Error(`MISSING_RAW_RESEARCH:${item.id}`);
+      }
+      const assessment = await assessResearch(
+        rawResearch,
+        options.providers.assessment,
+      );
+      return withWorkflowPayload(item, { assessment });
+    })),
+    score: async (items) => items.map((candidate) => {
+      const item = WorkflowItemSchema.parse(candidate);
+      const payload = workflowPayload(item);
+      if (item.kind === "paper" || item.kind === "blog") {
+        const rawResearch = payload.rawResearch;
+        const assessment = payload.assessment;
+        if (rawResearch === undefined || assessment === undefined) {
+          throw new Error(`MISSING_RESEARCH_ASSESSMENT:${item.id}`);
+        }
+        const citationSignal =
+          rawResearch.citationCount === null
+            ? null
+            : Math.min(1, Math.log1p(rawResearch.citationCount) / Math.log(101));
+        const researchScore = scoreResearch({
+          itemId: item.id,
+          topicalFit: payload.topicalFit ?? 0,
+          technicalQuality: null,
+          researchSignal: Math.min(
+            1,
+            0.5 + rawResearch.preferredInstitutionMatches.length * 0.15,
+          ),
+          novelty: null,
+          seriousAttention: citationSignal,
+          assessment,
+        });
+        return withWorkflowPayload(item, { researchScore });
+      }
+      const signals = editorialSignals(item);
+      const section = newsSection(item);
+      const newsScore = scoreNews({
+        itemId: item.id,
+        publicImportance: newsImportance(section),
+        personalRelevance: payload.personalRelevance ?? 0,
+        sourceQuality: sourceQuality(item),
+        recency: recency(item, options.now()),
+        geography:
+          section === "dmv" || section === "baltimore" ? 1 : 0.25,
+        novelty: 0.7,
+        evidence: signals.map((signal) => ({
+          sourceId: signal.sourceId,
+          role: signal.sourceRole,
+          accessLevel: signal.accessLevel,
+          provenanceUrl: signal.sourceUrl,
+          canCorroborateFacts: signal.canCorroborateFacts,
+        })),
+      });
+      return withWorkflowPayload(item, { newsScore });
+    }),
+    cluster: async (items) => {
+      const parsed = items.map((item) => WorkflowItemSchema.parse(item));
+      const research = parsed.filter(
+        (item) => item.kind === "paper" || item.kind === "blog",
+      );
+      const news = parsed.filter(
+        (item) => item.kind !== "paper" && item.kind !== "blog",
+      );
+      const embeddings = Object.fromEntries(news.map((item) => [
+        item.id,
+        workflowPayload(item).embedding ?? [],
+      ]));
+      const byId = new Map(news.map((item) => [item.id, item]));
+      const developments = clusterNews(news, embeddings);
+      const developmentItems = developments.map((development) => {
+        const scores = development.itemIds.map((itemId) => {
+          const item = byId.get(itemId);
+          if (item === undefined) throw new Error(`MISSING_CLUSTER_ITEM:${itemId}`);
+          return NewsScoreSchema.parse(workflowPayload(item).newsScore);
+        });
+        const developmentScore = scoreNewsDevelopment(development, {
+          publicImportance: averageNewsComponent(scores, "publicImportance"),
+          personalRelevance: averageNewsComponent(scores, "personalRelevance"),
+          sourceQuality: averageNewsComponent(scores, "sourceQuality"),
+          recency: averageNewsComponent(scores, "recency"),
+          geography: averageNewsComponent(scores, "geography"),
+          novelty: averageNewsComponent(scores, "novelty"),
+        });
+        return itemFromDevelopment(development, developmentScore);
+      });
+      return [...research, ...developmentItems];
+    },
+    shortlist: async (items) => {
+      const parsed = items.map((item) => WorkflowItemSchema.parse(item));
+      const candidates = parsed.map((item) =>
+        item.kind === "paper" || item.kind === "blog"
+          ? item
+          : NewsDevelopmentSchema.parse(workflowPayload(item).development),
+      );
+      const scores = parsed.map((item): ItemScore | NewsScore =>
+        item.kind === "paper" || item.kind === "blog"
+          ? ItemScoreSchema.parse(workflowPayload(item).researchScore)
+          : NewsScoreSchema.parse(workflowPayload(item).developmentScore),
+      );
+      const preferences: ShortlistPreferences = {
+        researchTopics: READER_PROFILE.researchTopics.map(({ id }) => id),
+        researchQualityGates: {
+          ...READER_PROFILE.researchQualityGates,
+        },
+      };
+      const budgets: SectionBudgets = {
+        ...READER_PROFILE.sectionBudgets,
+      };
+      const selected = selectShortlist(
+        candidates,
+        scores,
+        preferences,
+        budgets,
+      );
+      const ordered = selected.morningBrief.map((candidate) =>
+        "representativeItem" in candidate
+          ? { id: candidate.id, section: candidate.primarySection }
+          : { id: candidate.id, section: "research" as const }
+      );
+      const byId = new Map(parsed.map((item) => [item.id, item]));
+      return ordered.map(({ id, section }) => {
+        const item = byId.get(id);
+        if (item === undefined) throw new Error(`MISSING_SHORTLIST_ITEM:${id}`);
+        const reasons = [...selectionReasons(item)];
+        return withWorkflowPayload(
+          item,
+          { section, selectionReasons: reasons },
+          { section },
+        );
+      });
+    },
+    synthesize: async (items) => {
+      const summaries = await Promise.all(items.map(async (candidate) => {
+        const item = WorkflowItemSchema.parse(candidate);
+        try {
+          return {
+            item,
+            summary: await summarizeItem(
+              packet(item),
+              options.providers.summary,
+            ),
+          };
+        } catch (error) {
+          if (error instanceof SummaryRejectedError) return null;
+          throw error;
+        }
+      }));
+      return summaries.filter(
+        (entry): entry is NonNullable<typeof entry> => entry !== null,
+      );
+    },
+    validate: async (entries) => entries.map((entry) => {
+      const parsedSummary = StructuredSummarySchema.strict().safeParse(
+        entry.summary,
+      );
+      const sourceIds = new Set(entry.item.sourceRefs.map(({ id }) => id));
+      const validationErrors = parsedSummary.success
+        ? [
+            ...new Set(
+              parsedSummary.data.claims.flatMap((claim) =>
+                claim.sourceIds
+                  .filter((sourceId) => !sourceIds.has(sourceId))
+                  .map((sourceId) =>
+                    `UNKNOWN_ITEM_SOURCE:${
+                      encodeURIComponent(sourceId).slice(0, 160)
+                    }`
+                  ),
+              ),
+            ),
+          ]
+        : ["SCHEMA_INVALID"];
+      return {
+        ...entry,
+        valid: validationErrors.length === 0,
+        ...(validationErrors.length === 0 ? {} : { validationErrors }),
+      };
+    }),
+    ...(options.sourceFailures === undefined
+      ? {}
+      : { sourceFailures: options.sourceFailures }),
+  };
+}
+
+function catalogSourceInput(
+  source: Awaited<ReturnType<D1BriefingRepository["listSources"]>>[number],
+): ResearchSourceInput {
+  return {
+    id: source.id,
+    canonicalName: source.canonicalName,
+    canonicalUrl: source.canonicalUrl,
+    role: source.role,
+    enabled: source.enabled,
+    sectionEligibility: [...source.sectionEligibility],
+    restrictions: source.restrictions,
+  };
+}
+
 function configuredPipelineContext(
   store: D1PipelineStore,
   editionDate: string,
   runId: string,
-  provider: ModelProvider,
+  providers: PipelineProviders,
 ): PipelineContext {
-  const passthrough = async (items: readonly import("../contracts/editorial").Item[]) => items;
-  const packet = (item: import("../contracts/editorial").Item): SourcePacket => ({
-    itemKind: item.kind,
-    sources: item.sourceRefs.map((source) => ({
-      sourceId: source.id, role: source.role, title: item.title, url: source.url,
-      retrievedAt: source.retrievedAt, accessLevel: item.accessLevel,
-      excerpts: [{ number: 1, text: item.normalizedText.slice(0, 4_000) || item.title }],
-    })),
-  });
-  return {
+  const now = () => new Date().toISOString();
+  return createProductionPipelineContext({
     editionDate,
     runId,
     store,
-    now: () => new Date().toISOString(),
-    collect: async () => {
+    now,
+    providers,
+    persistItems: async (items) => store.repository.upsertItems(items),
+    collectCandidates: async () => {
       const sources = await store.repository.listSources();
-      const collector = createNewsCollectorFromCatalog({ http: new SourceHttpClient(), sources });
-      const to = new Date().toISOString();
-      const from = new Date(Date.now() - 36 * 60 * 60 * 1_000).toISOString();
-      return (await collector.collect({ from, to })).map(normalizeCandidate);
+      const source = (id: string) => {
+        const match = sources.find((candidate) => candidate.id === id);
+        if (match === undefined) throw new Error(`MISSING_CATALOG_SOURCE:${id}`);
+        return catalogSourceInput(match);
+      };
+      const http = new SourceHttpClient();
+      const newsCollector = createNewsCollectorFromCatalog({ http, sources });
+      const researchCollector = new ResearchCollector({
+        discoveryAdapters: [new ArxivAdapter(http, source("arxiv"))],
+        enrichers: [
+          new SemanticScholarAdapter(http, source("semantic-scholar")),
+          new OpenAlexAdapter(http, source("openalex")),
+        ],
+        preferredInstitutions: READER_PROFILE.preferredInstitutions,
+        preferredLabs: READER_PROFILE.preferredLabs,
+      });
+      const to = now();
+      const from = new Date(
+        Date.parse(to) - 36 * 60 * 60 * 1_000,
+      ).toISOString();
+      const [news, research] = await Promise.all([
+        newsCollector.collect({ from, to }),
+        researchCollector.collect({ from, to }),
+      ]);
+      return [
+        ...research.map((candidate) =>
+          RawResearchCandidateSchema.parse(candidate),
+        ),
+        ...news.map((candidate) => RawNewsCandidateSchema.parse(candidate)),
+      ];
     },
-    normalize: async (items) => deduplicateItems(items).items,
-    enrich: passthrough,
-    prefilter: passthrough,
-    assess: passthrough,
-    score: passthrough,
-    cluster: passthrough,
-    shortlist: passthrough,
-    synthesize: async (items) => Promise.all(items.map(async (item) => ({ item, summary: await summarizeItem(packet(item), provider) }))),
-    validate: async (entries) => entries.map((entry) => ({ ...entry, valid: validateSummary(entry.summary, packet(entry.item)).ok })),
-  };
+  });
 }
 
-export function createD1WorkflowLauncher(db: D1Database, provider: ModelProvider): {
+export function createD1WorkflowLauncher(db: D1Database, providers: PipelineProviders): {
   start(input: { editionDate: string; actorEmail?: string }): Promise<{ runId: string }>;
   resume(input: { runId: string; actorEmail?: string }): Promise<void>;
 } {
@@ -310,7 +1051,7 @@ export function createD1WorkflowLauncher(db: D1Database, provider: ModelProvider
     async start(input) {
       const runId = crypto.randomUUID();
       try {
-        await runEditorialPipeline(configuredPipelineContext(store, input.editionDate, runId, provider));
+        await runEditorialPipeline(configuredPipelineContext(store, input.editionDate, runId, providers));
       } catch (error) {
         await store.audit(
           error instanceof WorkflowRunAlreadyExistsError ? null : runId,
@@ -333,17 +1074,13 @@ export function createD1WorkflowLauncher(db: D1Database, provider: ModelProvider
         throw new WorkflowResumeUnavailableError();
       }
       await store.audit(run.id, "manual_run_resumed", input.actorEmail);
-      await runEditorialPipeline(configuredPipelineContext(store, run.editionDate, run.id, provider));
+      await runEditorialPipeline(configuredPipelineContext(store, run.editionDate, run.id, providers));
     },
   };
 }
 
 function countOutput(value: unknown): number {
   return Array.isArray(value) ? value.length : 1;
-}
-
-function isCheckpointArtifact(value: unknown): value is CheckpointArtifact {
-  return typeof value === "object" && value !== null && "output" in value;
 }
 
 function result(
@@ -379,29 +1116,32 @@ async function checkpoint<T>(
   context: PipelineContext,
   run: PipelineRun,
   step: (typeof PIPELINE_STEPS)[number],
-  execute: () => Promise<T>,
+  outputSchema: z.ZodType<T, z.ZodTypeDef, unknown>,
+  execute: () => Promise<unknown>,
+  beforeSave?: (output: T) => Promise<void>,
 ): Promise<T> {
   // The read belongs immediately before every step so a resumed run never repeats it.
   await context.store.getRun(context.runId);
   const completed = await context.store.readCheckpoint(context.runId, step);
   if (completed) {
-    const artifact = await context.store.readArtifact<T>(context.runId, step);
+    const artifact = await context.store.readArtifact(context.runId, step);
     if (artifact === null) throw new Error(`MISSING_CHECKPOINT_ARTIFACT:${step}`);
-    return isCheckpointArtifact(artifact) ? artifact.output : artifact as T;
+    return outputSchema.parse(artifact.output);
   }
 
   const attempt = await context.store.beginAttempt(context.runId, step);
   const startedAt = Date.parse(context.now());
   let output: T;
   try {
-    output = await execute();
+    output = outputSchema.parse(await execute());
+    await beforeSave?.(output);
   } catch (error) {
     await context.store.failAttempt(context.runId, step, attempt, error instanceof Error ? error.message : "PIPELINE_FAILED");
     throw error;
   }
   const estimatedCostUsd = context.estimateCostUsd?.(step, output) ?? 0;
   const artifact: CheckpointArtifact<T> = {
-    output: validateCheckpointOutput(step, output) as T,
+    output,
     attempts: attempt,
     durationMs: Math.max(0, Date.parse(context.now()) - startedAt),
     itemCount: countOutput(output),
@@ -442,18 +1182,54 @@ export async function runEditorialPipeline(
   await context.store.saveRun(run);
 
   try {
-    const collected = await checkpoint(context, run, "collect", context.collect);
-    const normalized = await checkpoint(context, run, "normalize", () => context.normalize(collected));
-    const enriched = await checkpoint(context, run, "enrich", () => context.enrich(normalized));
-    const prefilted = await checkpoint(context, run, "prefilter", () => context.prefilter(enriched));
-    const assessed = await checkpoint(context, run, "assess", () => context.assess(prefilted));
-    const scored = await checkpoint(context, run, "score", () => context.score(assessed));
-    const clustered = await checkpoint(context, run, "cluster", () => context.cluster(scored));
-    const shortlisted = await checkpoint(context, run, "shortlist", () => context.shortlist(clustered));
-    const synthesized = await checkpoint(context, run, "synthesize", () => context.synthesize(shortlisted));
-    const validated = await checkpoint(context, run, "validate", () => context.validate(synthesized));
-    const composition = await checkpoint(context, run, "compose", () => composeEdition(context, validated));
-    await checkpoint(context, run, "publish", () => publishEdition(context, composition));
+    const collected = await checkpoint(
+      context, run, "collect", CollectedCandidatesSchema, context.collect,
+    );
+    const normalized = await checkpoint(
+      context, run, "normalize", NormalizedItemsSchema,
+      () => context.normalize(collected),
+      context.persistItems,
+    );
+    const enriched = await checkpoint(
+      context, run, "enrich", EnrichedItemsSchema,
+      () => context.enrich(normalized),
+    );
+    const prefilted = await checkpoint(
+      context, run, "prefilter", PrefilteredItemsSchema,
+      () => context.prefilter(enriched),
+    );
+    const assessed = await checkpoint(
+      context, run, "assess", AssessedItemsSchema,
+      () => context.assess(prefilted),
+    );
+    const scored = await checkpoint(
+      context, run, "score", ScoredItemsSchema,
+      () => context.score(assessed),
+    );
+    const clustered = await checkpoint(
+      context, run, "cluster", ClusteredItemsSchema,
+      () => context.cluster(scored),
+    );
+    const shortlisted = await checkpoint(
+      context, run, "shortlist", ShortlistedItemsSchema,
+      () => context.shortlist(clustered),
+    );
+    const synthesized = await checkpoint(
+      context, run, "synthesize", SummaryCandidatesSchema,
+      () => context.synthesize(shortlisted),
+    );
+    const validated = await checkpoint(
+      context, run, "validate", ValidatedSummaryCandidatesSchema,
+      () => context.validate(synthesized),
+    );
+    const composition = await checkpoint(
+      context, run, "compose", CompositionSchema,
+      () => composeEdition(context, validated, normalized),
+    );
+    await checkpoint(
+      context, run, "publish", CompositionSchema,
+      () => publishEdition(context, composition),
+    );
     const finalRun = {
       ...(await context.store.getRun(context.runId) ?? run),
       status: composition.status,

@@ -2,7 +2,9 @@ import type {
   EditionEntry,
   EditionMetadata,
   EditionSection,
+  Item,
 } from "../contracts/editorial";
+import { WorkflowItemPayloadSchema } from "./types";
 import type {
   CompositionResult,
   PipelineContext,
@@ -43,8 +45,10 @@ function missingSections(entries: readonly EditionEntry[]): string[] {
 export async function composeEdition(
   context: PipelineContext,
   candidates: readonly ValidatedSummaryCandidate[],
+  persistedItems: readonly Item[],
 ): Promise<CompositionResult> {
   const valid = candidates.filter((candidate) => candidate.valid).slice(0, 8);
+  const persistedItemIds = new Set(persistedItems.map(({ id }) => id));
   const edition = {
     id: `edition:${context.runId}`,
     editionDate: context.editionDate,
@@ -56,16 +60,27 @@ export async function composeEdition(
     metadata: { missingSections: [], sourceFailures: [...(context.sourceFailures ?? [])] } as EditionMetadata,
   };
 
-  const entries: EditionEntry[] = valid.map((candidate, position) => ({
-    id: `${edition.id}:entry:${position}`,
-    editionId: edition.id,
-    itemId: candidate.item.id,
-    section: sectionFor(candidate),
-    position,
-    summary: candidate.summary,
-    selectionReasons: ["Validated for this edition."],
-    sourceRefs: candidate.item.sourceRefs,
-  }));
+  const entries: EditionEntry[] = valid.map((candidate, position) => {
+    const workflow = WorkflowItemPayloadSchema.safeParse(
+      candidate.item.metadata.workflow,
+    );
+    const itemId = workflow.success && workflow.data.development !== undefined
+      ? workflow.data.development.representativeItem.id
+      : candidate.item.id;
+    if (!persistedItemIds.has(itemId)) {
+      throw new Error(`UNPERSISTED_EDITION_ITEM:${itemId}`);
+    }
+    return {
+      id: `${edition.id}:entry:${position}`,
+      editionId: edition.id,
+      itemId,
+      section: sectionFor(candidate),
+      position,
+      summary: candidate.summary,
+      selectionReasons: ["Validated for this edition."],
+      sourceRefs: candidate.item.sourceRefs,
+    };
+  });
   const missing = missingSections(entries);
   edition.metadata = { missingSections: missing, sourceFailures: [...(context.sourceFailures ?? [])] };
   const complete = entries.length >= 6 && entries.length <= 8 && missing.length === 0;

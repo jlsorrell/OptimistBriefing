@@ -6,6 +6,7 @@ import type {
   Item,
   StructuredSummary,
 } from "../../../src/contracts/editorial";
+import { EditionMetadataSchema } from "../../../src/contracts/editorial";
 import { D1BriefingRepository } from "../../../src/db/d1-repository";
 import { RepositoryValidationError } from "../../../src/db/repository";
 import { SourceHttpClient } from "../../../src/sources/http-client";
@@ -112,6 +113,38 @@ async function publishFixtureEdition(
 }
 
 describe("D1BriefingRepository", () => {
+  it("accepts only exact legacy or complete bounded edition metadata", () => {
+    expect(EditionMetadataSchema.parse({})).toEqual({
+      missingSections: [],
+      sourceFailures: [],
+    });
+    expect(EditionMetadataSchema.parse({
+      missingSections: ["technology"],
+      sourceFailures: ["reuters"],
+    })).toEqual({
+      missingSections: ["technology"],
+      sourceFailures: ["reuters"],
+    });
+
+    for (const invalid of [
+      { missingSections: ["technology"] },
+      {
+        missingSections: [],
+        sourceFailures: [],
+        unexpected: true,
+      },
+      {
+        missingSections: Array.from(
+          { length: 33 },
+          (_, index) => `missing-${index}`,
+        ),
+        sourceFailures: [],
+      },
+    ]) {
+      expect(() => EditionMetadataSchema.parse(invalid)).toThrow();
+    }
+  });
+
   it("persists only validated edition coverage metadata in published reads", async () => {
     const repo = new D1BriefingRepository(env.DB);
     const draft = await repo.createDraftEdition("2032-01-01", "metadata-run", {

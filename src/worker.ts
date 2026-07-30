@@ -27,11 +27,18 @@ export default {
           audience: env.CLOUDFLARE_ACCESS_AUDIENCE,
           allowedEmails: parseAllowedEmails(env.ALLOWED_EMAILS),
         }),
-        workflow: createD1WorkflowLauncher(env.DB, new OpenAIModelProvider({
-          apiKey: requiredBinding(env.OPENAI_API_KEY, "OPENAI_API_KEY"),
-          generationModel: requiredBinding(env.SUMMARY_MODEL, "SUMMARY_MODEL"),
-          embeddingModel: requiredBinding(env.EMBEDDING_MODEL, "EMBEDDING_MODEL"),
-        })),
+        workflow: createD1WorkflowLauncher(env.DB, {
+          summary: new OpenAIModelProvider({
+            apiKey: requiredBinding(env.OPENAI_API_KEY, "OPENAI_API_KEY"),
+            generationModel: requiredBinding(env.SUMMARY_MODEL, "SUMMARY_MODEL"),
+            embeddingModel: requiredBinding(env.EMBEDDING_MODEL, "EMBEDDING_MODEL"),
+          }),
+          assessment: new OpenAIModelProvider({
+            apiKey: requiredBinding(env.OPENAI_API_KEY, "OPENAI_API_KEY"),
+            generationModel: requiredBinding(env.ASSESSMENT_MODEL, "ASSESSMENT_MODEL"),
+            embeddingModel: requiredBinding(env.EMBEDDING_MODEL, "EMBEDDING_MODEL"),
+          }),
+        }),
       });
       return app.fetch(request);
     } catch {

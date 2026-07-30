@@ -93,20 +93,29 @@ export const EditionStatusSchema = z.enum([
   "failed",
 ]);
 
+const CompleteEditionMetadataSchema = z.object({
+  missingSections: z.array(z.string().min(1).max(200)).max(32),
+  sourceFailures: z.array(z.string().min(1).max(200)).max(64),
+}).strict();
+
+const LegacyEditionMetadataSchema = z.object({}).strict().transform(() => ({
+  missingSections: [] as string[],
+  sourceFailures: [] as string[],
+}));
+
 export type EditionMetadata = {
-  missingSections?: string[];
-  sourceFailures?: string[];
+  missingSections: string[];
+  sourceFailures: string[];
 };
 
-const EditionMetadataBaseSchema = z.object({
-  missingSections: z.array(z.string().min(1).max(200)).max(32).default([]),
-  sourceFailures: z.array(z.string().min(1).max(200)).max(64).default([]),
-}).strict();
-export const EditionMetadataSchema = EditionMetadataBaseSchema as unknown as z.ZodType<
+export const EditionMetadataSchema: z.ZodType<
   EditionMetadata,
   z.ZodTypeDef,
-  EditionMetadata
->;
+  unknown
+> = z.union([
+  LegacyEditionMetadataSchema,
+  CompleteEditionMetadataSchema,
+]);
 
 export const EditionSchema = z.object({
   id: z.string().min(1),
@@ -130,6 +139,7 @@ export const EditionEntrySchema = z
     selectionReasons: z.array(z.string().min(1)),
     sourceRefs: z.array(SourceRefSchema).min(1),
   })
+  .strict()
   .superRefine((entry, context) => {
     const sourceIds = new Set(entry.sourceRefs.map((sourceRef) => sourceRef.id));
 

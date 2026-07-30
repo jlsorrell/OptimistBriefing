@@ -1,3 +1,11 @@
+import { z } from "zod";
+
+import {
+  EditionSectionSchema,
+  ItemSchema,
+  ItemScoreSchema,
+  ResearchAssessmentSchema,
+} from "../contracts/editorial";
 import type {
   Edition,
   EditionEntry,
@@ -5,6 +13,14 @@ import type {
   Item,
   StructuredSummary,
 } from "../contracts/editorial";
+import {
+  NewsDevelopmentSchema,
+} from "../editorial/cluster";
+import { NewsScoreSchema } from "../editorial/news-score";
+import {
+  RawNewsCandidateSchema,
+  RawResearchCandidateSchema,
+} from "../sources/types";
 
 export const PIPELINE_STEPS = [
   "collect",
@@ -23,6 +39,47 @@ export const PIPELINE_STEPS = [
 
 export type PipelineStep = (typeof PIPELINE_STEPS)[number];
 export type PipelineStatus = "published" | "partial" | "failed" | "retryable";
+
+export const CollectedCandidateSchema = z.union([
+  ItemSchema,
+  RawResearchCandidateSchema,
+  RawNewsCandidateSchema,
+]);
+
+export type CollectedCandidate = z.infer<typeof CollectedCandidateSchema>;
+
+export const WorkflowItemPayloadSchema = z.object({
+  version: z.literal(1),
+  rawResearch: RawResearchCandidateSchema.optional(),
+  embedding: z.array(z.number().finite()).min(1).max(4_096).optional(),
+  topicalFit: z.number().finite().min(0).max(1).optional(),
+  personalRelevance: z.number().finite().min(0).max(1).optional(),
+  assessment: ResearchAssessmentSchema.strict().optional(),
+  researchScore: ItemScoreSchema.strict().optional(),
+  newsScore: NewsScoreSchema.strict().optional(),
+  development: NewsDevelopmentSchema.strict().optional(),
+  developmentScore: NewsScoreSchema.strict().optional(),
+  section: EditionSectionSchema.optional(),
+  selectionReasons: z.array(z.string().min(1).max(300)).max(16).optional(),
+}).strict();
+
+export type WorkflowItemPayload = z.infer<
+  typeof WorkflowItemPayloadSchema
+>;
+
+export const WorkflowItemSchema = ItemSchema.superRefine((item, context) => {
+  const workflow = item.metadata.workflow;
+  if (workflow === undefined) return;
+  const parsed = WorkflowItemPayloadSchema.safeParse(workflow);
+  if (!parsed.success) {
+    parsed.error.issues.forEach((issue) => {
+      context.addIssue({
+        ...issue,
+        path: ["metadata", "workflow", ...issue.path],
+      });
+    });
+  }
+});
 
 export type PipelineRun = {
   id: string;
@@ -55,10 +112,10 @@ export type PipelineStore = {
     step: PipelineStep,
     artifact: CheckpointArtifact,
   ): Promise<void>;
-  readArtifact<T>(
+  readArtifact(
     runId: string,
     step: PipelineStep,
-  ): Promise<CheckpointArtifact<T> | null>;
+  ): Promise<CheckpointArtifact<unknown> | null>;
   beginAttempt(runId: string, step: PipelineStep): Promise<number>;
   failAttempt(runId: string, step: PipelineStep, attempt: number, error: string): Promise<void>;
   invalidateFrom(runId: string, step: PipelineStep): Promise<void>;
@@ -80,7 +137,7 @@ export type SummaryCandidate = {
 
 export type ValidatedSummaryCandidate = SummaryCandidate & {
   valid: boolean;
-  validationErrors?: readonly string[];
+  validationErrors?: readonly string[] | undefined;
 };
 
 export type PipelineContext = {
@@ -88,8 +145,11 @@ export type PipelineContext = {
   runId: string;
   store: PipelineStore;
   now: () => string;
-  collect: () => Promise<readonly Item[]>;
-  normalize: (items: readonly Item[]) => Promise<readonly Item[]>;
+  collect: () => Promise<readonly CollectedCandidate[]>;
+  normalize: (
+    items: readonly CollectedCandidate[],
+  ) => Promise<readonly Item[]>;
+  persistItems?: (items: readonly Item[]) => Promise<void>;
   enrich: (items: readonly Item[]) => Promise<readonly Item[]>;
   prefilter: (items: readonly Item[]) => Promise<readonly Item[]>;
   assess: (items: readonly Item[]) => Promise<readonly Item[]>;
