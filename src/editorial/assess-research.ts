@@ -1,10 +1,12 @@
 import {
   ResearchAssessmentSchema,
+  type AccessLevel,
   type ResearchAssessment,
 } from "../contracts/editorial";
 import type { ModelProvider } from "../models/provider";
 import type { RawResearchCandidate } from "../sources/types";
 import {
+  impliesFullTextAccess,
   serializeSourcePacket,
   type SourcePacket,
 } from "./validate-summary";
@@ -51,10 +53,13 @@ const RESEARCH_ASSESSMENT_JSON_SCHEMA: Record<string, unknown> = {
 function assessmentPacket(
   candidate: RawResearchCandidate,
 ): SourcePacket {
+  const accessLevel = suppliedAccessLevel(candidate);
   const sourceText =
-    candidate.accessLevel === "full_text"
+    accessLevel === "full_text" || accessLevel === "secondary"
       ? (candidate.content ?? candidate.abstract ?? candidate.title)
-      : (candidate.abstract ?? candidate.title);
+      : accessLevel === "abstract"
+        ? (candidate.abstract ?? candidate.title)
+        : candidate.title;
   return {
     itemKind: candidate.kind,
     sources: [
@@ -64,11 +69,16 @@ function assessmentPacket(
         title: candidate.title,
         url: candidate.originalUrl,
         retrievedAt: candidate.retrievedAt,
-        accessLevel: candidate.accessLevel,
+        accessLevel,
         excerpts: [
           {
             number: 1,
-            text: sourceText.slice(0, 4_000),
+            text: sourceText
+              .normalize("NFKC")
+              .replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ")
+              .replace(/\s+/g, " ")
+              .trim()
+              .slice(0, 4_000),
           },
         ],
       },
@@ -76,10 +86,34 @@ function assessmentPacket(
   };
 }
 
+function suppliedAccessLevel(
+  candidate: RawResearchCandidate,
+): AccessLevel {
+  const hasContent =
+    candidate.content !== null && candidate.content.trim().length > 0;
+  const hasAbstract =
+    candidate.abstract !== null && candidate.abstract.trim().length > 0;
+  if (candidate.accessLevel === "full_text" && hasContent) {
+    return "full_text";
+  }
+  if (
+    candidate.accessLevel === "secondary" &&
+    (hasContent || hasAbstract)
+  ) {
+    return "secondary";
+  }
+  if (hasAbstract) return "abstract";
+  return "metadata";
+}
+
+const StrictResearchAssessmentSchema =
+  ResearchAssessmentSchema.strict();
+
 export async function assessResearch(
   candidate: RawResearchCandidate,
   provider: ModelProvider,
 ): Promise<ResearchAssessment> {
+  const accessLevel = suppliedAccessLevel(candidate);
   const output = await provider.generateObject({
     model: "research-assessment",
     schemaName: "research_assessment",
@@ -88,8 +122,17 @@ export async function assessResearch(
     sourcePacket: serializeSourcePacket(assessmentPacket(candidate)),
     maxOutputTokens: 1_200,
   });
-  const assessment = ResearchAssessmentSchema.parse(output);
-  if (assessment.accessLevel !== candidate.accessLevel) {
+  const assessment = StrictResearchAssessmentSchema.parse(output);
+  const assessmentProse = [
+    ...assessment.strengths,
+    ...assessment.limitations,
+    assessment.rationale,
+  ];
+  if (
+    assessment.accessLevel !== accessLevel ||
+    (accessLevel !== "full_text" &&
+      assessmentProse.some(impliesFullTextAccess))
+  ) {
     throw new Error("ACCESS_LEVEL_OVERCLAIM");
   }
   return assessment;

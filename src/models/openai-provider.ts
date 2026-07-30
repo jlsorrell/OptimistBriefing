@@ -17,7 +17,11 @@ export interface OpenAIModelProviderOptions {
   maxTransportRetries?: number;
   onUsage?: (usage: ModelUsage) => void;
   fetch?: typeof fetch;
+  sleep?: (milliseconds: number) => Promise<void>;
 }
+
+const MAX_TRANSPORT_RETRIES = 5;
+const MAX_RETRY_DELAY_MS = 30_000;
 
 export class OpenAIModelProvider implements ModelProvider {
   readonly usage: ModelUsage[] = [];
@@ -27,8 +31,19 @@ export class OpenAIModelProvider implements ModelProvider {
   readonly #embeddingModel: string;
   readonly #maxTransportRetries: number;
   readonly #onUsage: ((usage: ModelUsage) => void) | undefined;
+  readonly #sleep: (milliseconds: number) => Promise<void>;
 
   constructor(options: OpenAIModelProviderOptions) {
+    const maxTransportRetries = options.maxTransportRetries ?? 2;
+    if (
+      !Number.isInteger(maxTransportRetries) ||
+      maxTransportRetries < 0 ||
+      maxTransportRetries > MAX_TRANSPORT_RETRIES
+    ) {
+      throw new RangeError(
+        `maxTransportRetries must be an integer from 0 to ${MAX_TRANSPORT_RETRIES}.`,
+      );
+    }
     this.#client = new OpenAI({
       apiKey: options.apiKey,
       maxRetries: 0,
@@ -36,8 +51,14 @@ export class OpenAIModelProvider implements ModelProvider {
     });
     this.#generationModel = options.generationModel;
     this.#embeddingModel = options.embeddingModel;
-    this.#maxTransportRetries = options.maxTransportRetries ?? 2;
+    this.#maxTransportRetries = maxTransportRetries;
     this.#onUsage = options.onUsage;
+    this.#sleep =
+      options.sleep ??
+      ((milliseconds) =>
+        new Promise((resolve) => {
+          setTimeout(resolve, milliseconds);
+        }));
   }
 
   async embed(
@@ -120,9 +141,33 @@ export class OpenAIModelProvider implements ModelProvider {
         if (!retryable || attempt === this.#maxTransportRetries) {
           throw error;
         }
+        await this.#sleep(this.#retryDelayMilliseconds(error, attempt));
       }
     }
     throw new Error("Unreachable model retry state.");
+  }
+
+  #retryDelayMilliseconds(error: unknown, attempt: number): number {
+    if (error instanceof APIError) {
+      const retryAfter = error.headers?.get("retry-after");
+      if (retryAfter !== null && retryAfter !== undefined) {
+        const seconds = Number(retryAfter);
+        if (Number.isFinite(seconds) && seconds >= 0) {
+          return Math.min(
+            MAX_RETRY_DELAY_MS,
+            Math.round(seconds * 1_000),
+          );
+        }
+        const retryAt = Date.parse(retryAfter);
+        if (Number.isFinite(retryAt)) {
+          return Math.min(
+            MAX_RETRY_DELAY_MS,
+            Math.max(0, retryAt - Date.now()),
+          );
+        }
+      }
+    }
+    return Math.min(MAX_RETRY_DELAY_MS, 250 * 2 ** attempt);
   }
 
   #recordUsage(usage: ModelUsage): void {

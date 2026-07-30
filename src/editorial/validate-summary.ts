@@ -8,35 +8,114 @@ import {
   type StructuredSummary,
 } from "../contracts/editorial";
 
+const NO_CONTROL_CHARACTERS = /^[^\u0000-\u001f\u007f-\u009f]+$/u;
+
+function safeSingleLine(maxLength: number) {
+  return z
+    .string()
+    .min(1)
+    .max(maxLength)
+    .refine((value) => NO_CONTROL_CHARACTERS.test(value), {
+      message: "Control characters are not allowed.",
+    });
+}
+
+const SafeSourceIdSchema = safeSingleLine(200);
+
+const SafeUrlSchema = z
+  .string()
+  .min(1)
+  .max(2_048)
+  .url()
+  .superRefine((value, context) => {
+    if (!NO_CONTROL_CHARACTERS.test(value)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Control characters are not allowed.",
+      });
+      return;
+    }
+    let url: URL;
+    try {
+      url = new URL(value);
+    } catch {
+      return;
+    }
+    if (
+      (url.protocol !== "http:" && url.protocol !== "https:") ||
+      url.username.length > 0 ||
+      url.password.length > 0
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "Source URLs must be credential-free HTTP(S) URLs.",
+      });
+    }
+  });
+
+const SourcePacketExcerptSchema = z
+  .object({
+    number: z.number().int().positive(),
+    text: safeSingleLine(4_000),
+  })
+  .strict();
+
+const SourcePacketSourceSchema = z
+  .object({
+    sourceId: SafeSourceIdSchema,
+    role: SourceRefSchema.shape.role,
+    title: safeSingleLine(500),
+    url: SafeUrlSchema,
+    retrievedAt: z
+      .string()
+      .min(1)
+      .max(40)
+      .datetime()
+      .refine((value) => NO_CONTROL_CHARACTERS.test(value), {
+        message: "Control characters are not allowed.",
+      }),
+    accessLevel: AccessLevelSchema,
+    excerpts: z
+      .array(SourcePacketExcerptSchema)
+      .min(1)
+      .max(8)
+      .superRefine((excerpts, context) => {
+        const numbers = new Set<number>();
+        excerpts.forEach((excerpt, index) => {
+          if (numbers.has(excerpt.number)) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: "Excerpt numbers must be unique.",
+              path: [index, "number"],
+            });
+          }
+          numbers.add(excerpt.number);
+        });
+      }),
+  })
+  .strict();
+
 export const SourcePacketSchema = z
   .object({
     itemKind: ItemKindSchema,
     sources: z
-      .array(
-        z
-          .object({
-            sourceId: z.string().min(1),
-            role: SourceRefSchema.shape.role,
-            title: z.string().min(1).max(500),
-            url: z.string().url(),
-            retrievedAt: z.string().datetime(),
-            accessLevel: AccessLevelSchema,
-            excerpts: z
-              .array(
-                z
-                  .object({
-                    number: z.number().int().positive(),
-                    text: z.string().min(1).max(4_000),
-                  })
-                  .strict(),
-              )
-              .min(1)
-              .max(8),
-          })
-          .strict(),
-      )
+      .array(SourcePacketSourceSchema)
       .min(1)
-      .max(12),
+      .max(12)
+      .superRefine((sources, context) => {
+        const sourceIds = new Set<string>();
+        sources.forEach((source, index) => {
+          if (sourceIds.has(source.sourceId)) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              message: "Source IDs must be unique.",
+              path: [index, "sourceId"],
+            });
+          }
+          sourceIds.add(source.sourceId);
+        });
+      }),
   })
   .strict();
 
@@ -74,47 +153,107 @@ function normalizedText(value: string): string {
     .trim();
 }
 
-function permitsAccessLevel(
-  summary: StructuredSummary,
-  packet: SourcePacket,
+const StrictSummaryClaimSchema = StructuredSummarySchema.shape.claims.element
+  .extend({
+    sourceIds: z.array(SafeSourceIdSchema).min(1),
+  })
+  .strict();
+
+const StrictStructuredSummarySchema = StructuredSummarySchema.extend({
+  claims: z.array(StrictSummaryClaimSchema).min(1),
+}).strict();
+
+type PacketSource = SourcePacket["sources"][number];
+
+function sourceContains(
+  source: PacketSource,
+  value: string,
 ): boolean {
-  if (summary.accessLevel === "metadata") return true;
-  if (summary.accessLevel === "full_text") {
-    return packet.sources.some(
+  const normalized = normalizedText(value);
+  return [source.title, ...source.excerpts.map((excerpt) => excerpt.text)]
+    .map(normalizedText)
+    .some((sourceText) => sourceText.includes(normalized));
+}
+
+function relevantAccessSources(
+  sources: readonly PacketSource[],
+): readonly PacketSource[] {
+  const primarySources = sources.filter(
+    (source) => source.role === "primary",
+  );
+  return primarySources.length > 0 ? primarySources : sources;
+}
+
+function allRelevantSourcesHaveAccess(
+  sources: readonly PacketSource[],
+  accessLevel: StructuredSummary["accessLevel"],
+): boolean {
+  if (accessLevel === "metadata") return sources.length > 0;
+  const relevant = relevantAccessSources(sources);
+  if (relevant.length === 0) return false;
+  if (accessLevel === "full_text") {
+    return relevant.every(
       (source) => source.accessLevel === "full_text",
     );
   }
-  return packet.sources.some(
+  return relevant.every(
     (source) =>
-      source.accessLevel === summary.accessLevel ||
+      source.accessLevel === accessLevel ||
       source.accessLevel === "full_text",
   );
 }
 
-function impliesFullTextAccess(summary: StructuredSummary): boolean {
-  const prose = normalizedText(
-    [
-      summary.title,
-      summary.oneSentence,
-      summary.whyItMatters,
-      summary.uncertainty,
-    ].join(" "),
+function permitsAccessLevel(
+  summary: StructuredSummary,
+  citedSources: readonly PacketSource[],
+): boolean {
+  return allRelevantSourcesHaveAccess(
+    citedSources,
+    summary.accessLevel,
   );
+}
+
+export function impliesFullTextAccess(value: string): boolean {
+  const prose = normalizedText(value);
+  const withoutHonestLimitations = prose
+    .replace(
+      /\b(?:full|complete)[- ](?:paper|text|manuscript)\s+(?:(?:was|is|were|are)\s+)?(?:not (?:available|supplied|accessed|reviewed)|unavailable)\b/g,
+      "",
+    )
+    .replace(
+      /\bwithout (?:access to|reading|reviewing) (?:the )?(?:full|complete)[- ](?:paper|text|manuscript)\b/g,
+      "",
+    )
+    .replace(
+      /\bno (?:[a-z-]+ (?:or|and) )?(?:full|complete)[- ](?:paper|text|manuscript)\s+(?:was|is|were|are)\s+available\b/g,
+      "",
+    );
   return (
-    /\b(?:in|from|according to) the full[- ](?:paper|text)\b/.test(
-      prose,
+    /\b(?:full|complete)[- ](?:paper|text|manuscript)\b/.test(
+      withoutHonestLimitations,
     ) ||
-    /\bthe full[- ](?:paper|text)\s+(?:demonstrates|reports|shows|finds|describes|establishes|proves|details)\b/.test(
-      prose,
+    /\b(?:complete|full) (?:methods|appendix|supplement)\b/.test(
+      withoutHonestLimitations,
     )
   );
+}
+
+function proseAccessSources(
+  matchingSources: readonly PacketSource[],
+  citedSources: readonly PacketSource[],
+): readonly PacketSource[] {
+  const citedPrimarySources = citedSources.filter(
+    (source) => source.role === "primary",
+  );
+  if (citedPrimarySources.length > 0) return citedPrimarySources;
+  return matchingSources.length > 0 ? matchingSources : citedSources;
 }
 
 export function validateSummary(
   summary: unknown,
   packet: SourcePacket,
 ): ValidationResult {
-  const parsed = StructuredSummarySchema.safeParse(summary);
+  const parsed = StrictStructuredSummarySchema.safeParse(summary);
   if (!parsed.success) {
     return {
       ok: false,
@@ -133,14 +272,18 @@ export function validateSummary(
   const sources = new Map(
     packet.sources.map((source) => [source.sourceId, source]),
   );
+  const allCitedSources: PacketSource[] = [];
 
   parsed.data.claims.forEach((claim, claimIndex) => {
     const citedSources = claim.sourceIds.flatMap((sourceId) => {
       const source = sources.get(sourceId);
       if (source === undefined) {
-        errors.push(`UNKNOWN_SOURCE:${sourceId}`);
+        errors.push(
+          `UNKNOWN_SOURCE:${encodeURIComponent(sourceId).slice(0, 600)}`,
+        );
         return [];
       }
+      allCitedSources.push(source);
       return [source];
     });
     const evidence = normalizedText(claim.evidenceExcerpt);
@@ -148,22 +291,57 @@ export function validateSummary(
       errors.push(`EMPTY_EVIDENCE:${claimIndex}`);
       return;
     }
-    const evidenceFound = citedSources.some((source) =>
-      normalizedText(
-        source.excerpts.map((excerpt) => excerpt.text).join(" "),
-      ).includes(evidence),
+    const evidenceSources = citedSources.filter((source) =>
+      source.excerpts.some((excerpt) =>
+        normalizedText(excerpt.text).includes(evidence),
+      ),
     );
-    if (!evidenceFound) {
+    if (evidenceSources.length === 0) {
       errors.push(`EVIDENCE_NOT_FOUND:${claimIndex}`);
+    }
+    if (
+      (impliesFullTextAccess(claim.text) ||
+        impliesFullTextAccess(claim.evidenceExcerpt)) &&
+      !allRelevantSourcesHaveAccess(citedSources, "full_text")
+    ) {
+      errors.push("ACCESS_LEVEL_OVERCLAIM");
     }
   });
 
-  const hasFullText = packet.sources.some(
-    (source) => source.accessLevel === "full_text",
-  );
+  if (!permitsAccessLevel(parsed.data, allCitedSources)) {
+    errors.push("ACCESS_LEVEL_OVERCLAIM");
+  }
+
+  (
+    [
+      ["title", parsed.data.title],
+      ["oneSentence", parsed.data.oneSentence],
+      ["whyItMatters", parsed.data.whyItMatters],
+    ] as const
+  ).forEach(([field, prose]) => {
+    const matchingSources = packet.sources.filter((source) =>
+      sourceContains(source, prose),
+    );
+    if (matchingSources.length === 0) {
+      errors.push(`UNGROUNDED_PROSE:${field}`);
+    }
+    if (
+      impliesFullTextAccess(prose) &&
+      !allRelevantSourcesHaveAccess(
+        proseAccessSources(matchingSources, allCitedSources),
+        "full_text",
+      )
+    ) {
+      errors.push("ACCESS_LEVEL_OVERCLAIM");
+    }
+  });
+
   if (
-    !permitsAccessLevel(parsed.data, packet) ||
-    (!hasFullText && impliesFullTextAccess(parsed.data))
+    impliesFullTextAccess(parsed.data.uncertainty) &&
+    !allRelevantSourcesHaveAccess(
+      proseAccessSources([], allCitedSources),
+      "full_text",
+    )
   ) {
     errors.push("ACCESS_LEVEL_OVERCLAIM");
   }
@@ -185,8 +363,8 @@ export function validateSummary(
       ].join(" "),
     );
     if (
-      !prose.includes("forecast") ||
-      !/\bnot (?:a )?fact\b/.test(prose)
+      !/\bforecast\s*,\s*not (?:a )?fact\b/.test(prose) ||
+      /\bnot a forecast\b/.test(prose)
     ) {
       errors.push("FORECAST_LABEL_MISSING");
     }
