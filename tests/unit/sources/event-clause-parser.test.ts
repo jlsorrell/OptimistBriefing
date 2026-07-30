@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   parseEventClauses,
+  parseEventFactClauses,
   type EventClauseSemantics,
 } from "../../../src/sources/event-clause-parser";
 
@@ -34,6 +35,92 @@ const semantics: EventClauseSemantics = {
 };
 
 describe("parseEventClauses", () => {
+  it("parses an organization-led headline with an explicit actor and object", () => {
+    const parsed = parseEventClauses({
+      text: {
+        title:
+          "Evaluation Agency Frontier Evaluation Standard adopted",
+      },
+      eventFamilies: ["evaluation-standards"],
+      semantics,
+    });
+
+    expect(parsed).toMatchObject([{
+      predicate: "adopted",
+      subject: "evaluation-agency",
+      domain: "governance-event",
+      object: "frontier-evaluation-standard",
+    }]);
+  });
+
+  it("parses an object-led passive headline without an auxiliary", () => {
+    const parsed = parseEventClauses({
+      text: {
+        title:
+          "Frontier Evaluation Standard adopted by Evaluation Agency",
+      },
+      eventFamilies: ["evaluation-standards"],
+      semantics,
+    });
+
+    expect(parsed).toMatchObject([{
+      predicate: "adopted",
+      subject: "evaluation-agency",
+      domain: "governance-event",
+      object: "frontier-evaluation-standard",
+    }]);
+  });
+
+  it("extracts facts from a clause that names the exact resolved object", () => {
+    const parsed = parseEventFactClauses({
+      text: {
+        title:
+          "Frontier Evaluation Standard takes effect July 1, 2027",
+      },
+      eventFamilies: ["evaluation-standards"],
+      eventInstance: {
+        subject: "model-institute",
+        domain: "governance-event",
+        object: "frontier-evaluation-standard",
+      },
+      semantics,
+    });
+
+    expect(parsed).toEqual([{
+      sourceField: "title",
+      sentenceIndex: 0,
+      clauseIndex: 0,
+      text:
+        "Frontier Evaluation Standard takes effect July 1, 2027",
+      domain: "governance-event",
+      object: "frontier-evaluation-standard",
+      facts: [{
+        kind: "date",
+        key: "effective-date",
+        value: "2027-07-01",
+      }],
+    }]);
+  });
+
+  it.each([
+    "It takes effect July 1, 2027",
+    "The policy takes effect July 1, 2027",
+    "Community Research Program takes effect July 1, 2027",
+  ])("rejects a non-exact fact reference: %s", (title) => {
+    const parsed = parseEventFactClauses({
+      text: { title },
+      eventFamilies: ["evaluation-standards", "funding-budget"],
+      eventInstance: {
+        subject: "model-institute",
+        domain: "governance-event",
+        object: "frontier-evaluation-standard",
+      },
+      semantics,
+    });
+
+    expect(parsed).toEqual([]);
+  });
+
   it.each([
     [
       "Model Institute adopted Frontier Evaluation Standard",

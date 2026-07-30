@@ -54,6 +54,16 @@ export interface ParsedEventClause {
   facts: NewsMaterialFact[];
 }
 
+export interface ParsedEventFactClause {
+  sourceField: "title" | "abstract" | "content";
+  sentenceIndex: number;
+  clauseIndex: number;
+  text: string;
+  domain: CanonicalEventDomain;
+  object: string;
+  facts: NewsMaterialFact[];
+}
+
 const MAX_COMPLEMENT_DEPTH = 3;
 const MAX_CLAUSES_PER_SENTENCE = 16;
 
@@ -61,10 +71,13 @@ const ACTIVE_EVENT =
   /^(?<subject>.+?)\s+(?<predicate>proposes?|proposed|introduces?|introduced|adopts?|adopted|approves?|approved|launches?|launched|releases?|released|unveils?|unveiled|publishes?|published|issues?|issued|announces?|announced|updates?|updated)\b(?<objectText>.+)$/i;
 
 const PASSIVE_EVENT =
-  /^(?<objectText>.+?)\s+(?:was|is|has been|had been)\s+(?<predicate>proposed|introduced|adopted|approved|launched|released|unveiled|published|issued|announced|updated)\s+by\s+(?<subject>[^.!?]+)$/i;
+  /^(?<objectText>.+?)\s+(?:(?:was|is|has been|had been)\s+)?(?<predicate>proposed|introduced|adopted|approved|launched|released|unveiled|published|issued|announced|updated)\s+by\s+(?<subject>[^.!?]+)$/i;
 
 const HEADLINE_EVENT =
   /^(?<subject>.+?):\s*(?<objectText>.+?)\s+(?<predicate>proposed|introduced|adopted|approved|launched|released|unveiled|published|issued|announced|updated)$/i;
+
+const ORGANIZATION_HEADLINE_EVENT =
+  /^(?<subject>.+?(?:Agency|Institute|University|Department|Commission|Administration|Company|Laboratory|Lab))\s+(?<objectText>.+?)\s+(?<predicate>proposed|introduced|adopted|approved|launched|released|unveiled|published|issued|announced|updated)\b.*$/i;
 
 const REPORTING_COMPLEMENT =
   /\b(?:says?|said|reports?|reported|details?|detailed|confirms?|confirmed|announces?|announced)\s+that\s+/i;
@@ -129,7 +142,12 @@ function normalizePredicate(predicate: string): EventPredicate | null {
 function captureEvent(clauseText: string): CapturedEvent | null {
   const matchableClause = clauseText.replace(/[.!?]+$/, "").trim();
 
-  for (const pattern of [PASSIVE_EVENT, HEADLINE_EVENT, ACTIVE_EVENT]) {
+  for (const pattern of [
+    PASSIVE_EVENT,
+    HEADLINE_EVENT,
+    ORGANIZATION_HEADLINE_EVENT,
+    ACTIVE_EVENT,
+  ]) {
     const match = pattern.exec(matchableClause);
     const groups = match?.groups;
     if (!groups?.subject || !groups.objectText || !groups.predicate) {
@@ -173,6 +191,62 @@ function splitCandidates(sentence: string): string[] | null {
     .filter(Boolean);
 
   return candidates.length <= MAX_CLAUSES_PER_SENTENCE ? candidates : null;
+}
+
+interface SegmentedClause {
+  sourceField: SourceField;
+  sentenceIndex: number;
+  clauseIndex: number;
+  text: string;
+}
+
+function segmentedClauses(
+  text: EventTextFields,
+): SegmentedClause[] {
+  const segmented: SegmentedClause[] = [];
+  const fields: ReadonlyArray<
+    readonly [SourceField, string | null | undefined]
+  > = [
+    ["title", text.title],
+    ["abstract", text.abstract],
+    ["content", text.content],
+  ];
+
+  for (const [sourceField, value] of fields) {
+    if (!value?.trim()) {
+      continue;
+    }
+
+    const sentences = value.split(SENTENCE_BOUNDARY);
+    for (const [sentenceIndex, sourceSentence] of sentences.entries()) {
+      const sentence = sourceSentence
+        .replace(LEADING_DISCOURSE_MARKER, "")
+        .trim();
+      if (!sentence) {
+        continue;
+      }
+
+      const complement = reportingComplement(sentence);
+      if (!complement) {
+        continue;
+      }
+      const clauses = splitCandidates(complement);
+      if (!clauses) {
+        continue;
+      }
+
+      for (const [clauseIndex, clauseText] of clauses.entries()) {
+        segmented.push({
+          sourceField,
+          sentenceIndex,
+          clauseIndex,
+          text: clauseText,
+        });
+      }
+    }
+  }
+
+  return segmented;
 }
 
 function parseCandidate(
@@ -234,49 +308,73 @@ export function parseEventClauses(input: {
   semantics: EventClauseSemantics;
 }): ParsedEventClause[] {
   const parsed: ParsedEventClause[] = [];
-  const fields: ReadonlyArray<readonly [SourceField, string | null | undefined]> = [
-    ["title", input.text.title],
-    ["abstract", input.text.abstract],
-    ["content", input.text.content],
-  ];
+  for (const clause of segmentedClauses(input.text)) {
+    const candidate = parseCandidate(
+      clause.text,
+      clause.sourceField,
+      clause.sentenceIndex,
+      clause.clauseIndex,
+      input.eventFamilies,
+      input.semantics,
+    );
+    if (candidate) {
+      parsed.push(candidate);
+    }
+  }
 
-  for (const [sourceField, value] of fields) {
-    if (!value?.trim()) {
+  return parsed;
+}
+
+export function parseEventFactClauses(input: {
+  text: EventTextFields;
+  eventFamilies: readonly string[];
+  eventInstance: CanonicalEventInstance;
+  semantics: EventClauseSemantics;
+}): ParsedEventFactClause[] {
+  const parsed: ParsedEventFactClause[] = [];
+
+  for (const clause of segmentedClauses(input.text)) {
+    if (PRONOUN_SUBJECT.test(clause.text.trim())) {
       continue;
     }
 
-    const sentences = value.split(SENTENCE_BOUNDARY);
-    for (const [sentenceIndex, sourceSentence] of sentences.entries()) {
-      const sentence = sourceSentence
-        .replace(LEADING_DISCOURSE_MARKER, "")
-        .trim();
-      if (!sentence) {
-        continue;
-      }
-
-      const complement = reportingComplement(sentence);
-      if (!complement) {
-        continue;
-      }
-      const clauses = splitCandidates(complement);
-      if (!clauses) {
-        continue;
-      }
-
-      for (const [clauseIndex, clauseText] of clauses.entries()) {
-        const candidate = parseCandidate(
-          clauseText,
-          sourceField,
-          sentenceIndex,
-          clauseIndex,
-          input.eventFamilies,
-          input.semantics,
-        );
-        if (candidate) {
-          parsed.push(candidate);
-        }
-      }
+    const candidates = input.semantics.eventObjects(
+      clause.text,
+      input.eventFamilies,
+      input.eventInstance.subject,
+    );
+    if (candidates.length !== 1) {
+      continue;
     }
+
+    const candidate = candidates[0];
+    if (
+      candidate === undefined ||
+      candidate.domain !== input.eventInstance.domain ||
+      candidate.object !== input.eventInstance.object
+    ) {
+      continue;
+    }
+
+    const facts = [
+      ...input.semantics.materialFacts(
+        clause.text,
+        input.eventInstance,
+      ),
+    ];
+    if (facts.length === 0) {
+      continue;
+    }
+
+    parsed.push({
+      sourceField: clause.sourceField,
+      sentenceIndex: clause.sentenceIndex,
+      clauseIndex: clause.clauseIndex,
+      text: clause.text,
+      domain: candidate.domain,
+      object: candidate.object,
+      facts,
+    });
   }
 
   return parsed;

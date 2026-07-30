@@ -1551,6 +1551,53 @@ describe("editorial production path", () => {
     });
   });
 
+  it("fails open for unsupported or conflicting clause ownership", () => {
+    const ambiguous = normalizeCandidate(
+      rawNews("ambiguous-clause", {
+        title:
+          "Evaluation Agency and Model Institute discussed Frontier Evaluation Standard",
+        abstract:
+          "It was adopted and takes effect July 1, 2027",
+        content: null,
+        primaryDocumentUrl: null,
+        namedEntities: [],
+      }),
+    );
+
+    const development = clusterNews([ambiguous], {})[0];
+
+    expect(development?.eventInstance).toBeNull();
+    expect(development?.repeatable).toBe(false);
+  });
+
+  it("changes only the material fingerprint for a same-event clause update", () => {
+    const development = (sourceId: string, date: string) =>
+      clusterNews([
+        normalizeCandidate(
+          rawNews(sourceId, {
+            title:
+              "Evaluation Agency adopts Frontier Evaluation Standard",
+            abstract:
+              "Evaluation Agency adopted Frontier Evaluation Standard, " +
+              `which takes effect ${date}`,
+            content: null,
+            primaryDocumentUrl: null,
+            namedEntities: [],
+          }),
+        ),
+      ], {})[0];
+
+    const december = development("effective-december", "December 1, 2026");
+    const january = development("effective-january", "January 1, 2027");
+
+    expect(december?.repeatable).toBe(true);
+    expect(january?.repeatable).toBe(true);
+    expect(december?.developmentKey).toBe(january?.developmentKey);
+    expect(december?.materialFactsFingerprint).not.toBe(
+      january?.materialFactsFingerprint,
+    );
+  });
+
   it("maps Task 5 provider labels to configured IDs before diversity selection", () => {
     const raw = [
       rawResearch(

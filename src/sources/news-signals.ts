@@ -3,13 +3,20 @@ import type {
   ItemKind,
 } from "../contracts/editorial";
 import {
-  CanonicalEventInstanceSchema,
   ScopedNewsMaterialFactSchema,
   type CanonicalEventDomain,
   type CanonicalEventInstance,
   type NewsMaterialFact,
   type ScopedNewsMaterialFact,
 } from "./types";
+import {
+  parseEventClauses,
+  parseEventFactClauses,
+  type EventClauseSemantics,
+  type EventTextFields,
+  type ParsedEventClause,
+  type ParsedEventFactClause,
+} from "./event-clause-parser";
 
 const ENTITY_PATTERNS: readonly [string, RegExp][] = [
   ["Baltimore", /\bBaltimore\b/i],
@@ -93,11 +100,6 @@ function withoutDiscourseMarker(value: string): string {
     "",
   );
 }
-
-const ACTIVE_EVENT_PREDICATE =
-  "propos(?:e|es|ed)|introduc(?:e|es|ed)|adopt(?:s|ed)?|approv(?:e|es|ed)|launch(?:es|ed)?|releas(?:e|es|ed)|unveil(?:s|ed)?|publish(?:es|ed)|issu(?:e|es|ed)|announc(?:e|es|ed)|updat(?:e|es|ed)";
-const PASSIVE_EVENT_PREDICATE =
-  "proposed|introduced|adopted|approved|launched|released|unveiled|published|issued|announced|updated";
 
 function normalizedEventObject(
   value: string,
@@ -459,58 +461,73 @@ function canonicalInstanceSubject(
   return candidates.length === 1 ? candidates[0] ?? null : null;
 }
 
-function eventTuplesForSentence(
-  sentence: string,
-  eventFamilies: readonly string[],
-): CanonicalEventInstance[] {
-  const candidateText = withoutDiscourseMarker(sentence.trim());
-  const active = new RegExp(
-    `^(?<subject>.+?)\\s+(?:${ACTIVE_EVENT_PREDICATE})\\b(?<objectText>.+)$`,
-    "i",
-  ).exec(candidateText);
-  const passive = new RegExp(
-    `^(?<objectText>.+?)\\s+(?:(?:was|is|has been|had been)\\s+)?(?:${PASSIVE_EVENT_PREDICATE})\\s+by\\s+(?<subject>[^.!?]+)`,
-    "i",
-  ).exec(candidateText);
-  const headline = new RegExp(
-    `^(?<subject>.+?(?:Agency|Institute|University|Department|Commission|Administration|Company|Laboratory|Lab))\\s+(?<objectText>.+?)\\s+(?:${PASSIVE_EVENT_PREDICATE})\\b`,
-    "i",
-  ).exec(candidateText);
-  return [active?.groups, passive?.groups, headline?.groups].flatMap(
-    (construction): CanonicalEventInstance[] => {
-      const subjectText = construction?.subject;
-      const objectText = construction?.objectText;
-      if (subjectText === undefined || objectText === undefined) {
-        return [];
-      }
-      const subject = canonicalInstanceSubject(
+function eventTextFields(input: MaterialTextInput): EventTextFields {
+  if (typeof input === "string") return { title: input };
+  return {
+    title: input[0] ?? "",
+    abstract: input[1] ?? null,
+    content: input[2] ?? null,
+  };
+}
+
+function newsClauseSemantics(): EventClauseSemantics {
+  return {
+    canonicalSubject(subjectText) {
+      return canonicalInstanceSubject(
         deriveNamedEntities(subjectText, {}),
       );
-      if (subject === null) return [];
-      const objects = eventObjectCandidates(
-        objectText,
-        eventFamilies,
-      ).map((candidate) => ({
-        ...candidate,
-        object: normalizedEventObject(candidate.object, subject),
-      }));
-      if (objects.length !== 1) return [];
-      const object = objects[0];
-      if (
-        object === undefined ||
-        object.object === "generic-governance-instrument"
-      ) {
-        return [];
-      }
-      return [
-        CanonicalEventInstanceSchema.parse({
-          subject,
-          domain: object.domain,
-          object: object.object,
-        }),
-      ];
     },
+    eventObjects(objectText, families, subject) {
+      return eventObjectCandidates(objectText, families)
+        .map((candidate) => ({
+          ...candidate,
+          object: normalizedEventObject(candidate.object, subject),
+        }))
+        .filter(
+          ({ object }) =>
+            object !== "generic-governance-instrument",
+        );
+    },
+    materialFacts(clauseText) {
+      return extractMaterialFacts(clauseText);
+    },
+  };
+}
+
+function parseNewsEventClauses(
+  text: MaterialTextInput,
+  eventFamilies: readonly string[],
+): ParsedEventClause[] {
+  return parseEventClauses({
+    text: eventTextFields(text),
+    eventFamilies,
+    semantics: newsClauseSemantics(),
+  });
+}
+
+function parseNewsEventFactClauses(
+  text: MaterialTextInput,
+  eventFamilies: readonly string[],
+  eventInstance: CanonicalEventInstance,
+): ParsedEventFactClause[] {
+  return parseEventFactClauses({
+    text: eventTextFields(text),
+    eventFamilies,
+    eventInstance,
+    semantics: newsClauseSemantics(),
+  });
+}
+
+function canonicalInstances(
+  clauses: readonly ParsedEventClause[],
+): CanonicalEventInstance[] {
+  const instances = new Map(
+    clauses.map(({ subject, domain, object }) => [
+      `${subject}\u0000${domain}\u0000${object}`,
+      { subject, domain, object },
+    ]),
   );
+  return instances.size === 1 ? [...instances.values()] : [];
 }
 
 export function deriveCanonicalEventInstances(
@@ -519,60 +536,108 @@ export function deriveCanonicalEventInstances(
   _namedEntities: readonly string[],
   eventFamilies: readonly string[],
 ): CanonicalEventInstance[] {
-  const tuples = sentences(input).flatMap((sentence) =>
-    eventTuplesForSentence(sentence, eventFamilies),
+  return canonicalInstances(
+    parseNewsEventClauses(input, eventFamilies),
   );
-  const uniqueTuples = new Map(
-    tuples.map((instance) => [
-      `${instance.subject}\u0000${instance.domain}\u0000${instance.object}`,
-      instance,
+}
+
+function scopedFactsForInstance(
+  clauses: readonly ParsedEventClause[],
+  factClauses: readonly ParsedEventFactClause[],
+  eventInstance: CanonicalEventInstance,
+): NewsMaterialFact[] {
+  return uniqueMaterialFacts(
+    [
+      ...clauses.filter((candidate) =>
+        candidate.subject === eventInstance.subject &&
+        candidate.domain === eventInstance.domain &&
+        candidate.object === eventInstance.object,
+      ),
+      ...factClauses.filter((candidate) =>
+        candidate.domain === eventInstance.domain &&
+        candidate.object === eventInstance.object,
+      ),
+    ].flatMap(({ facts }) => facts),
+  );
+}
+
+function sameEventInstance(
+  left: CanonicalEventInstance,
+  right: CanonicalEventInstance,
+): boolean {
+  return left.subject === right.subject &&
+    left.domain === right.domain &&
+    left.object === right.object;
+}
+
+function scopedMaterialFactsForResolvedEvent(input: {
+  clauses: readonly ParsedEventClause[];
+  factClauses: readonly ParsedEventFactClause[];
+  metadata: Readonly<Record<string, unknown>>;
+  eventInstances: readonly CanonicalEventInstance[];
+}): ScopedNewsMaterialFact[] {
+  if (input.eventInstances.length !== 1) return [];
+  const eventInstance = input.eventInstances[0];
+  if (eventInstance === undefined) return [];
+
+  const explicit = Array.isArray(input.metadata.scopedMaterialFacts)
+    ? input.metadata.scopedMaterialFacts.flatMap(
+        (entry): ScopedNewsMaterialFact[] => {
+          const parsed = ScopedNewsMaterialFactSchema.safeParse(entry);
+          return parsed.success &&
+            sameEventInstance(
+              parsed.data.eventInstance,
+              eventInstance,
+            )
+            ? [parsed.data]
+            : [];
+        },
+      )
+    : [];
+  const derived = scopedFactsForInstance(
+    input.clauses,
+    input.factClauses,
+    eventInstance,
+  ).map((fact) => ({ ...fact, eventInstance }));
+  const unique = new Map(
+    [...explicit, ...derived].map((fact) => [
+      `${fact.kind}\u0000${fact.key}\u0000${fact.value}`,
+      fact,
     ]),
   );
-  return uniqueTuples.size === 1
-    ? [...uniqueTuples.values()]
-    : [];
-}
-
-function regexPhrase(value: string): RegExp {
-  return new RegExp(
-    `\\b${value
-      .split("-")
-      .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
-      .join("\\s+")}\\b`,
-    "i",
+  return [...unique.values()].sort(
+    (left, right) =>
+      left.kind.localeCompare(right.kind) ||
+      left.key.localeCompare(right.key) ||
+      left.value.localeCompare(right.value),
   );
 }
 
-function referencesExactEventInstance(
-  sentence: string,
-  eventInstance: CanonicalEventInstance,
-  eventFamilies: readonly string[],
-): boolean {
-  if (regexPhrase(eventInstance.object).test(sentence)) return true;
-  return eventObjectCandidates(sentence, eventFamilies)
-    .map((candidate) => ({
-      ...candidate,
-      object: normalizedEventObject(
-        candidate.object,
-        eventInstance.subject,
-      ),
-    }))
-    .some(
-      (candidate) =>
-        candidate.object === eventInstance.object &&
-        candidate.domain === eventInstance.domain,
+function uniqueMaterialFacts(
+  facts: readonly NewsMaterialFact[],
+): NewsMaterialFact[] {
+  const uniqueFacts = new Map<string, NewsMaterialFact>();
+  for (const fact of facts) {
+    const normalizedFact = {
+      ...fact,
+      value:
+        fact.kind === "number" || fact.kind === "amount"
+          ? normalizeNumberFact(fact.value)
+          : fact.kind === "date"
+            ? normalizeDateFact(fact.value)
+            : fact.value.toLocaleLowerCase("en-US").trim(),
+    };
+    uniqueFacts.set(
+      `${normalizedFact.kind}\u0000${normalizedFact.key}\u0000${normalizedFact.value}`,
+      normalizedFact,
     );
-}
-
-function materialFactClauses(sentence: string): string[] {
-  return sentence
-    .split(
-      /;\s*|,\s*(?=(?:while|whereas|but)\b)|\s+(?=(?:while|whereas)\b)/i,
-    )
-    .map((clause) =>
-      clause.replace(/^(?:while|whereas|but)\s+/i, "").trim(),
-    )
-    .filter(Boolean);
+  }
+  return [...uniqueFacts.values()].sort(
+    (left, right) =>
+      left.kind.localeCompare(right.kind) ||
+      left.key.localeCompare(right.key) ||
+      left.value.localeCompare(right.value),
+  );
 }
 
 export function deriveEventFamilies(
@@ -588,63 +653,9 @@ export function deriveEventFamilies(
   ]).sort((left, right) => left.localeCompare(right));
 }
 
-export function deriveMaterialFacts(
-  text: MaterialTextInput,
-  metadata: Readonly<Record<string, unknown>>,
-  eventInstance: CanonicalEventInstance | null = null,
+function extractMaterialFacts(
+  sourceText: string,
 ): NewsMaterialFact[] {
-  const eventFamilies = deriveEventFamilies(text, metadata);
-  const sourceText =
-    eventInstance === null
-      ? combinedText(text)
-      : sentences(text)
-          .flatMap(materialFactClauses)
-          .filter((sentence) => {
-            const candidates = eventObjectCandidates(
-              sentence,
-              eventFamilies,
-            ).map((candidate) => ({
-              ...candidate,
-              object: normalizedEventObject(
-                candidate.object,
-                eventInstance.subject,
-              ),
-            })).filter(
-              (candidate) =>
-                candidate.object === eventInstance.object ||
-                candidate.object.split("-").length > 1,
-            );
-            if (
-              candidates.some(
-                (candidate) =>
-                  candidate.object === eventInstance.object &&
-                  candidate.domain === eventInstance.domain,
-              )
-            ) {
-              return true;
-            }
-            if (candidates.length > 0) return false;
-            if (
-              /^(?:it|this|that|they|these|those|he|she)\b/i.test(
-                sentence.trim(),
-              )
-            ) {
-              return false;
-            }
-            if (
-              /\b(?:earlier|previous|formerly|prior|unrelated|separate)\b/i.test(
-                sentence,
-              )
-            ) {
-              return false;
-            }
-            return referencesExactEventInstance(
-              sentence,
-              eventInstance,
-              eventFamilies,
-            );
-          })
-          .join(". ");
   const facts: NewsMaterialFact[] = [];
   const materialContext =
     /\b(?:standard|framework|requirements?|policy|rule|bill|law|measure|guidance|document|order|program|system|model|funding|budget|appropriation|initiative|fund|round|grant|product|assistant|app|tool|service)\b/i;
@@ -795,29 +806,28 @@ export function deriveMaterialFacts(
       });
     }
   }
-  const uniqueFacts = new Map<string, NewsMaterialFact>();
-  for (const fact of facts) {
-    const normalizedFact = {
-      ...fact,
-      value:
-        fact.kind === "number"
-          ? normalizeNumberFact(fact.value)
-          : fact.kind === "amount"
-            ? normalizeNumberFact(fact.value)
-          : fact.kind === "date"
-            ? normalizeDateFact(fact.value)
-            : fact.value.toLocaleLowerCase("en-US").trim(),
-    };
-    uniqueFacts.set(
-      `${normalizedFact.kind}\u0000${normalizedFact.key}\u0000${normalizedFact.value}`,
-      normalizedFact,
-    );
+  return uniqueMaterialFacts(facts);
+}
+
+export function deriveMaterialFacts(
+  text: MaterialTextInput,
+  metadata: Readonly<Record<string, unknown>>,
+  eventInstance: CanonicalEventInstance | null = null,
+): NewsMaterialFact[] {
+  if (eventInstance === null) {
+    return extractMaterialFacts(combinedText(text));
   }
-  return [...uniqueFacts.values()].sort(
-    (left, right) =>
-      left.kind.localeCompare(right.kind) ||
-      left.key.localeCompare(right.key) ||
-      left.value.localeCompare(right.value),
+
+  const eventFamilies = deriveEventFamilies(text, metadata);
+  const clauses = parseNewsEventClauses(text, eventFamilies);
+  return scopedFactsForInstance(
+    clauses,
+    parseNewsEventFactClauses(
+      text,
+      eventFamilies,
+      eventInstance,
+    ),
+    eventInstance,
   );
 }
 
@@ -826,40 +836,23 @@ export function deriveScopedMaterialFacts(
   metadata: Readonly<Record<string, unknown>>,
   eventInstances: readonly CanonicalEventInstance[],
 ): ScopedNewsMaterialFact[] {
-  if (eventInstances.length !== 1) return [];
-  const eventInstance = eventInstances[0];
-  if (eventInstance === undefined) return [];
-  const explicitScopedFacts = Array.isArray(
-    metadata.scopedMaterialFacts,
-  )
-    ? metadata.scopedMaterialFacts.flatMap(
-        (entry): ScopedNewsMaterialFact[] => {
-          const parsed = ScopedNewsMaterialFactSchema.safeParse(entry);
-          return parsed.success &&
-            parsed.data.eventInstance.subject ===
-              eventInstance.subject &&
-            parsed.data.eventInstance.domain ===
-              eventInstance.domain &&
-            parsed.data.eventInstance.object === eventInstance.object
-            ? [parsed.data]
-            : [];
-        },
-      )
-    : [];
-  const facts = [
-    ...explicitScopedFacts,
-    ...deriveMaterialFacts(text, metadata, eventInstance).map(
-      (fact) => ({ ...fact, eventInstance }),
-    ),
-  ];
-  return [
-    ...new Map(
-      facts.map((fact) => [
-        `${fact.kind}\u0000${fact.key}\u0000${fact.value}`,
-        fact,
-      ]),
-    ).values(),
-  ];
+  const eventFamilies = deriveEventFamilies(text, metadata);
+  const clauses = parseNewsEventClauses(text, eventFamilies);
+  const eventInstance = eventInstances.length === 1
+    ? eventInstances[0] ?? null
+    : null;
+  return scopedMaterialFactsForResolvedEvent({
+    clauses,
+    factClauses: eventInstance === null
+      ? []
+      : parseNewsEventFactClauses(
+          text,
+          eventFamilies,
+          eventInstance,
+        ),
+    metadata,
+    eventInstances,
+  });
 }
 
 export function deriveNamedEntities(
@@ -1038,21 +1031,28 @@ export function deriveNewsSignals(input: {
     materialText,
     input.metadata,
   );
-  const eventInstances = deriveCanonicalEventInstances(
+  const parsedEventClauses = parseNewsEventClauses(
     materialText,
-    input.metadata,
-    namedEntities,
     eventFamilies,
   );
-  const scopedMaterialFacts = deriveScopedMaterialFacts(
-    materialText,
-    input.metadata,
+  const eventInstances = canonicalInstances(parsedEventClauses);
+  const eventInstance = eventInstances.length === 1
+    ? eventInstances[0] ?? null
+    : null;
+  const parsedEventFactClauses = eventInstance === null
+    ? []
+    : parseNewsEventFactClauses(
+        materialText,
+        eventFamilies,
+        eventInstance,
+      );
+  const scopedMaterialFacts = scopedMaterialFactsForResolvedEvent({
+    clauses: parsedEventClauses,
+    factClauses: parsedEventFactClauses,
+    metadata: input.metadata,
     eventInstances,
-  );
-  const materialFacts = deriveMaterialFacts(
-    materialText,
-    input.metadata,
-  );
+  });
+  const materialFacts = extractMaterialFacts(combinedText(materialText));
   return {
     sectionEligibility,
     namedEntities,
