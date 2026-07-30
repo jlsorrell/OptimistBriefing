@@ -783,6 +783,7 @@ describe("D1BriefingRepository", () => {
     expect(await repo.pruneExpiredData("2026-07-29T10:00:00.000Z")).toEqual({
       deletedUnselectedCandidates: 1,
       deletedWorkflowRuns: 0,
+      deletedWorkflowArtifacts: 0,
       deletedDiagnosticLogs: 0,
     });
 
@@ -819,9 +820,60 @@ describe("D1BriefingRepository", () => {
     });
   });
 
-  it("prunes only diagnostic events while preserving durable audit and monthly usage history", async () => {
+  it("expires workflow artifacts after 90 days while preserving durable audit and monthly usage history", async () => {
     const repo = new D1BriefingRepository(env.DB);
     await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO workflow_runs (
+          id, edition_date, status, current_step, retryable, attempt_count,
+          failure_code, estimated_cost_usd, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).bind(
+        "old-artifact-run", "2026-04-01", "failed", "synthesize", 0, 1,
+        "OLD_FAILURE", 0, "2026-04-01T00:00:00.000Z",
+        "2026-04-01T00:00:00.000Z",
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        "old-checkpoint", "old-artifact-run", "workflow_checkpoint",
+        JSON.stringify({
+          step: "collect",
+          artifact: {
+            itemCount: 1,
+            payload: "full private checkpoint payload",
+          },
+        }),
+        "2026-04-01T00:00:00.000Z",
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        "old-attempt", "old-artifact-run", "workflow_attempt",
+        "{\"step\":\"collect\",\"attempt\":1}",
+        "2026-04-01T00:00:00.000Z",
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        "old-attempt-failed", "old-artifact-run", "workflow_attempt_failed",
+        "{\"step\":\"collect\",\"attempt\":1,\"error\":\"SOURCE_TIMEOUT\"}",
+        "2026-04-01T00:00:00.000Z",
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        "old-orphan-checkpoint", null, "workflow_checkpoint",
+        "{\"step\":\"collect\",\"artifact\":{\"payload\":\"orphaned private payload\"}}",
+        "2026-04-01T00:00:00.000Z",
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        "recent-checkpoint", null, "workflow_checkpoint",
+        "{\"step\":\"collect\",\"artifact\":{\"payload\":\"recent\"}}",
+        "2026-07-01T00:00:00.000Z",
+      ),
       env.DB.prepare(
         "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
       ).bind("old-diagnostic", null, "diagnostic_log", "{}", "2026-05-01T00:00:00.000Z"),
@@ -848,13 +900,27 @@ describe("D1BriefingRepository", () => {
     ]);
 
     const report = await repo.pruneExpiredData("2026-07-29T10:00:00.000Z");
-    expect(report.deletedDiagnosticLogs).toBe(1);
+    expect(report).toEqual({
+      deletedUnselectedCandidates: 0,
+      deletedWorkflowRuns: 1,
+      deletedWorkflowArtifacts: 4,
+      deletedDiagnosticLogs: 1,
+    });
+    await repo.recordRetentionAudit("2026-07-29T10:00:00.000Z", report);
     expect((await env.DB.prepare(
-      "SELECT event_type FROM audit_events ORDER BY event_type",
-    ).all<{ event_type: string }>()).results).toEqual([
-      { event_type: "model_usage" },
-      { event_type: "source_updated" },
+      "SELECT id, event_type FROM audit_events WHERE event_type <> ? ORDER BY id",
+    ).bind(
+      "retention_pruned",
+    ).all<{ id: string; event_type: string }>()).results).toEqual([
+      { id: "old-audit", event_type: "source_updated" },
+      { id: "old-model-usage", event_type: "model_usage" },
+      { id: "recent-checkpoint", event_type: "workflow_checkpoint" },
     ]);
+    expect(await env.DB.prepare(
+      "SELECT event_json FROM audit_events WHERE event_type = ?",
+    ).bind("retention_pruned").first<{ event_json: string }>()).toEqual({
+      event_json: JSON.stringify(report),
+    });
   });
 
   it("persists item scores and summaries and searches the archive through FTS", async () => {

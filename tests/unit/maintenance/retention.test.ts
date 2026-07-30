@@ -13,6 +13,7 @@ describe("pruneExpiredData", () => {
         return {
           deletedUnselectedCandidates: 2,
           deletedWorkflowRuns: 1,
+          deletedWorkflowArtifacts: 4,
           deletedDiagnosticLogs: 3,
         };
       },
@@ -26,6 +27,7 @@ describe("pruneExpiredData", () => {
 
     const report = await pruneExpiredData(repository, fixedNow);
     expect(report.deletedUnselectedCandidates).toBe(2);
+    expect(report.deletedWorkflowArtifacts).toBe(4);
     expect(report.deletedDiagnosticLogs).toBe(3);
     expect(await repository.getEditionByDate("2026-07-28")).not.toBeNull();
     expect(events).toEqual([{ now: fixedNow, report }]);

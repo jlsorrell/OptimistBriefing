@@ -1846,7 +1846,8 @@ export class D1BriefingRepository implements BriefingRepository {
     );
     const runCutoff = new Date(Date.parse(validNow) - 90 * 24 * 60 * 60 * 1_000).toISOString();
     const diagnosticCutoff = new Date(Date.parse(validNow) - 30 * 24 * 60 * 60 * 1_000).toISOString();
-    const [candidateCount, runCount, eventCount] = await this.db.batch([
+    const [candidateCount, runCount, workflowArtifactCount, eventCount] =
+      await this.db.batch([
       this.db
         .prepare(
           `SELECT COUNT(*) AS count
@@ -1877,6 +1878,18 @@ export class D1BriefingRepository implements BriefingRepository {
         .prepare(
           `SELECT COUNT(*) AS count
           FROM audit_events
+          WHERE created_at <= ?
+            AND event_type IN (
+              'workflow_checkpoint',
+              'workflow_attempt',
+              'workflow_attempt_failed'
+            )`,
+        )
+        .bind(runCutoff),
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS count
+          FROM audit_events
           WHERE created_at <= ? AND event_type = 'diagnostic_log'`,
         )
         .bind(diagnosticCutoff),
@@ -1898,6 +1911,17 @@ export class D1BriefingRepository implements BriefingRepository {
             )`,
         )
         .bind(validNow),
+      this.db
+        .prepare(
+          `DELETE FROM audit_events
+          WHERE created_at <= ?
+            AND event_type IN (
+              'workflow_checkpoint',
+              'workflow_attempt',
+              'workflow_attempt_failed'
+            )`,
+        )
+        .bind(runCutoff),
       this.db
         .prepare(
           `DELETE FROM workflow_runs
@@ -1923,6 +1947,12 @@ export class D1BriefingRepository implements BriefingRepository {
         deletedWorkflowRuns:
           (
             runCount?.results[0] as
+              | { count: number }
+              | undefined
+          )?.count ?? 0,
+        deletedWorkflowArtifacts:
+          (
+            workflowArtifactCount?.results[0] as
               | { count: number }
               | undefined
           )?.count ?? 0,

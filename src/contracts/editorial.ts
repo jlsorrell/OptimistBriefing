@@ -163,6 +163,7 @@ export const EditionWithEntriesSchema = EditionSchema.extend({
 export const RetentionReportSchema = z.object({
   deletedUnselectedCandidates: z.number().int().nonnegative(),
   deletedWorkflowRuns: z.number().int().nonnegative(),
+  deletedWorkflowArtifacts: z.number().int().nonnegative(),
   deletedDiagnosticLogs: z.number().int().nonnegative(),
 });
 
