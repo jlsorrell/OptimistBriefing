@@ -219,13 +219,16 @@ function splitMaterialCoordination(candidate: string): string[] {
       .slice(boundary.index + boundary[0].length)
       .trim();
 
-    return MATERIAL_PREDICATE.test(left) &&
-      MATERIAL_PREDICATE.test(right) &&
-      !PRONOUN_SUBJECT.test(right) &&
-      (
-        EXPLICIT_ORGANIZATION_OWNER.test(right) ||
-        EXPLICIT_EVENT_OBJECT_OWNER.test(right)
-      );
+    if (
+      !MATERIAL_PREDICATE.test(left) ||
+      !MATERIAL_PREDICATE.test(right)
+    ) {
+      return false;
+    }
+
+    return PRONOUN_SUBJECT.test(right) ||
+      EXPLICIT_ORGANIZATION_OWNER.test(right) ||
+      EXPLICIT_EVENT_OBJECT_OWNER.test(right);
   });
 
   if (boundaries.length === 0) {

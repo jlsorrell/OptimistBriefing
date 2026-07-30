@@ -245,6 +245,28 @@ describe("news event clause integration", () => {
     );
   });
 
+  it("keeps an exact-object status without a pronoun-led date", () => {
+    const result = signals({
+      title:
+        "Evaluation Agency proposes Frontier Evaluation Standard",
+      abstract:
+        "Frontier Evaluation Standard was adopted, and " +
+        "it takes effect July 1, 2027",
+    });
+
+    expect(result.scopedMaterialFacts).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "proposed" }),
+        expect.objectContaining({ value: "adopted" }),
+      ]),
+    );
+    expect(result.scopedMaterialFacts).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ value: "2027-07-01" }),
+      ]),
+    );
+  });
+
   it("fails open for a trailing event after an organization-led headline", () => {
     const result = signals({
       title:

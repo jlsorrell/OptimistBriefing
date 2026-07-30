@@ -38,7 +38,7 @@ const materialStatusSemantics: EventClauseSemantics = {
   ...semantics,
   materialFacts(clauseText) {
     const status =
-      /\b(delayed|postponed|blocked|rejected|withdrawn|repealed)\b/i
+      /\b(adopted|delayed|postponed|blocked|rejected|withdrawn|repealed)\b/i
         .exec(clauseText)?.[1]
         ?.toLocaleLowerCase("en-US");
 
@@ -229,6 +229,29 @@ describe("parseEventClauses", () => {
       kind: "date",
       key: "effective-date",
       value: "2027-07-01",
+    }]);
+  });
+
+  it("drops a pronoun-led date after an exact-object status", () => {
+    const parsed = parseEventFactClauses({
+      text: {
+        title:
+          "Frontier Evaluation Standard was adopted, and " +
+          "it takes effect July 1, 2027",
+      },
+      eventFamilies: ["evaluation-standards"],
+      eventInstance: {
+        subject: "model-institute",
+        domain: "governance-event",
+        object: "frontier-evaluation-standard",
+      },
+      semantics: materialStatusSemantics,
+    });
+
+    expect(parsed.flatMap(({ facts }) => facts)).toEqual([{
+      kind: "status",
+      key: "event-status",
+      value: "adopted",
     }]);
   });
 
