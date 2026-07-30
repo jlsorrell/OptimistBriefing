@@ -14,6 +14,7 @@ const GROUNDING_SYSTEM_PROMPT = `Use only the supplied source packet.
 Every factual claim must cite one or more supplied source IDs.
 State uncertainty and disagreement.
 Do not imply full-paper access when access_level is abstract or metadata.
+Copy concise supported wording exactly from cited source titles or excerpts for every factual claim and prominent field.
 Return only data matching the supplied JSON schema.`;
 
 const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
@@ -29,9 +30,24 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
     "provenance",
   ],
   properties: {
-    title: { type: "string", minLength: 1 },
-    oneSentence: { type: "string", minLength: 1 },
-    whyItMatters: { type: "string", minLength: 1 },
+    title: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Copy a concise exact substring from a cited source title or excerpt.",
+    },
+    oneSentence: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Copy one concise supported sentence exactly from a cited source excerpt.",
+    },
+    whyItMatters: {
+      type: "string",
+      minLength: 1,
+      description:
+        "Copy concise supported wording exactly from a cited source excerpt.",
+    },
     uncertainty: { type: "string", minLength: 1 },
     claims: {
       type: "array",
@@ -41,7 +57,12 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
         additionalProperties: false,
         required: ["text", "sourceIds", "evidenceExcerpt"],
         properties: {
-          text: { type: "string", minLength: 1 },
+          text: {
+            type: "string",
+            minLength: 1,
+            description:
+              "Copy the factual assertion exactly from its cited evidence excerpt or source.",
+          },
           sourceIds: {
             type: "array",
             minItems: 1,

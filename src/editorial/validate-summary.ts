@@ -92,7 +92,7 @@ const SafeUrlSchema = z
   });
 
 const CREDENTIAL_MARKER =
-  /(?:^|[^a-z0-9])(?:api[-_.]?key|access[-_.]?token|auth(?:orization)?|auth[-_.]?token|password|passwd|pwd|secret|credential(?:s)?|signature|sig)(?:$|[^a-z0-9])/iu;
+  /(?:^|[^a-z0-9])(?:api[-_.]?key|key|token|session|jwt|id[-_.]?token|access[-_.]?token|auth(?:orization)?|auth[-_.]?token|password|passwd|pwd|secret|credential(?:s)?|signature|signed|sig)(?:$|[^a-z0-9])/iu;
 
 function credentialMarker(value: string): boolean {
   return CREDENTIAL_MARKER.test(value);
@@ -107,18 +107,12 @@ function decodedOrOriginal(value: string): string {
 }
 
 function credentialBearingUrl(url: URL): boolean {
+  if (url.hash.length > 0) return true;
   for (const [key, value] of url.searchParams) {
     if (
       credentialMarker(key) ||
       credentialMarker(decodedOrOriginal(value))
     ) {
-      return true;
-    }
-  }
-  const fragment = decodedOrOriginal(url.hash.slice(1));
-  if (credentialMarker(fragment)) return true;
-  for (const [key, value] of new URLSearchParams(fragment)) {
-    if (credentialMarker(key) || credentialMarker(value)) {
       return true;
     }
   }
@@ -271,9 +265,13 @@ function primaryPacketSources(
 function accessAuthorizationSources(
   packet: SourcePacket,
   citedSources: readonly PacketSource[],
+  accessLevel: StructuredSummary["accessLevel"],
 ): readonly PacketSource[] {
-  const primarySources = primaryPacketSources(packet);
-  return primarySources.length > 0 ? primarySources : citedSources;
+  if (accessLevel === "full_text") {
+    const primarySources = primaryPacketSources(packet);
+    if (primarySources.length > 0) return primarySources;
+  }
+  return citedSources;
 }
 
 function allRelevantSourcesHaveAccess(
@@ -283,6 +281,13 @@ function allRelevantSourcesHaveAccess(
   if (accessLevel === "metadata") return sources.length > 0;
   const relevant = relevantAccessSources(sources);
   if (relevant.length === 0) return false;
+  if (accessLevel === "secondary") {
+    return sources.some(
+      (source) =>
+        source.accessLevel === "secondary" ||
+        source.accessLevel === "full_text",
+    );
+  }
   if (accessLevel === "full_text") {
     return relevant.every(
       (source) => source.accessLevel === "full_text",
@@ -301,7 +306,11 @@ function permitsAccessLevel(
   citedSources: readonly PacketSource[],
 ): boolean {
   return allRelevantSourcesHaveAccess(
-    accessAuthorizationSources(packet, citedSources),
+    accessAuthorizationSources(
+      packet,
+      citedSources,
+      summary.accessLevel,
+    ),
     summary.accessLevel,
   );
 }
@@ -349,55 +358,25 @@ function proseAccessSources(
   return matchingSources.length > 0 ? matchingSources : citedSources;
 }
 
-const CONTENT_STOP_WORDS = new Set([
-  "a",
-  "an",
-  "and",
-  "are",
-  "as",
-  "at",
-  "be",
-  "by",
-  "for",
-  "from",
-  "in",
-  "is",
-  "it",
-  "of",
-  "on",
-  "or",
-  "that",
-  "the",
-  "this",
-  "to",
-  "was",
-  "were",
-  "with",
-]);
-
-function contentTokens(value: string): Set<string> {
-  return new Set(
-    (normalizedText(value).match(/[\p{L}\p{N}]+/gu) ?? []).filter(
-      (token) =>
-        token.length >= 3 && !CONTENT_STOP_WORDS.has(token),
-    ),
-  );
-}
-
-function evidenceSupportsProse(
-  prose: string,
+function extractivelySupports(
+  assertion: string,
   evidenceExcerpt: string,
+  citedSources: readonly PacketSource[],
 ): boolean {
-  const proseTokens = contentTokens(prose);
-  const evidenceTokens = contentTokens(evidenceExcerpt);
-  if (proseTokens.size === 0 || evidenceTokens.size === 0) {
-    return false;
+  const normalizedAssertion = normalizedText(assertion);
+  if (normalizedAssertion.length === 0) return false;
+  if (
+    normalizedText(evidenceExcerpt).includes(normalizedAssertion)
+  ) {
+    return true;
   }
-  const overlap = [...proseTokens].filter((token) =>
-    evidenceTokens.has(token),
-  ).length;
-  if (proseTokens.size <= 2) return overlap === proseTokens.size;
-  return overlap >= 2 && overlap / proseTokens.size >= 0.6;
+  return citedSources.some((source) =>
+    [source.title, ...source.excerpts.map((excerpt) => excerpt.text)]
+      .map(normalizedText)
+      .some((sourceText) =>
+        sourceText.includes(normalizedAssertion),
+      ),
+  );
 }
 
 export function validateSummary(
@@ -451,10 +430,23 @@ export function validateSummary(
       errors.push(`EVIDENCE_NOT_FOUND:${claimIndex}`);
     }
     if (
+      !extractivelySupports(
+        claim.text,
+        claim.evidenceExcerpt,
+        citedSources,
+      )
+    ) {
+      errors.push(`UNGROUNDED_CLAIM:${claimIndex}`);
+    }
+    if (
       (impliesFullTextAccess(claim.text) ||
         impliesFullTextAccess(claim.evidenceExcerpt)) &&
       !allRelevantSourcesHaveAccess(
-        accessAuthorizationSources(packet, citedSources),
+        accessAuthorizationSources(
+          packet,
+          citedSources,
+          "full_text",
+        ),
         "full_text",
       )
     ) {
@@ -493,7 +485,11 @@ export function validateSummary(
     );
     if (
       evidenceSources.length === 0 ||
-      !evidenceSupportsProse(prose, provenance.evidenceExcerpt)
+      !extractivelySupports(
+        prose,
+        provenance.evidenceExcerpt,
+        citedSources,
+      )
     ) {
       errors.push(`UNGROUNDED_PROSE:${field}`);
     }

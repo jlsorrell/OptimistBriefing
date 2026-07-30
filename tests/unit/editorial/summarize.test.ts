@@ -49,7 +49,7 @@ function validSummary(
     uncertainty: "The durability of the result remains uncertain.",
     claims: [
       {
-        text: "The measured outcome improved.",
+        text: "The measured outcome improved during the trial.",
         sourceIds: ["source-1"],
         evidenceExcerpt: "measured outcome improved during the trial",
       },
@@ -140,6 +140,9 @@ describe("summarizeItem", () => {
     );
     expect(request?.system).toContain(
       "Return only data matching the supplied JSON schema.",
+    );
+    expect(request?.system).toContain(
+      "Copy concise supported wording exactly from cited source titles or excerpts",
     );
     expect(request?.sourcePacket).toContain("source_id: source-1");
     expect(request?.sourcePacket).toContain("role: reporting");

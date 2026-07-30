@@ -58,7 +58,7 @@ function summaryFixture(
     uncertainty: "The durability of the result remains uncertain.",
     claims: [
       {
-        text: "The measured outcome improved.",
+        text: "The measured outcome improved during the trial.",
         sourceIds: ["source-1"],
         evidenceExcerpt: "measured outcome improved during the trial",
       },
@@ -346,7 +346,7 @@ describe("validateSummary", () => {
     );
   });
 
-  it("allows a cited paraphrase with meaningful evidence overlap", () => {
+  it("rejects a cited paraphrase that is not extractively supported", () => {
     const result = validateSummary(
       summaryFixture({
         oneSentence:
@@ -363,9 +363,48 @@ describe("validateSummary", () => {
       sourcePacketFixture(),
     );
 
-    expect(result.errors).not.toContain(
+    expect(result.errors).toContain(
       "UNGROUNDED_PROSE:oneSentence",
     );
+  });
+
+  it("rejects contradictory prominent prose despite high token overlap", () => {
+    const result = validateSummary(
+      summaryFixture({
+        oneSentence: "Measured trial outcome worsened.",
+        provenance: {
+          ...summaryFixture().provenance,
+          oneSentence: {
+            sourceIds: ["source-1"],
+            evidenceExcerpt:
+              "The measured outcome improved during the trial.",
+          },
+        },
+      }),
+      sourcePacketFixture(),
+    );
+
+    expect(result.errors).toContain(
+      "UNGROUNDED_PROSE:oneSentence",
+    );
+  });
+
+  it("rejects a contradictory factual claim despite high token overlap", () => {
+    const result = validateSummary(
+      summaryFixture({
+        claims: [
+          {
+            text: "The measured outcome worsened during the trial.",
+            sourceIds: ["source-1"],
+            evidenceExcerpt:
+              "The measured outcome improved during the trial.",
+          },
+        ],
+      }),
+      sourcePacketFixture(),
+    );
+
+    expect(result.errors).toContain("UNGROUNDED_CLAIM:0");
   });
 
   it("recognizes complete-manuscript wording as a full-text assertion", () => {
@@ -379,6 +418,66 @@ describe("validateSummary", () => {
     );
 
     expect(result.errors).toContain("ACCESS_LEVEL_OVERCLAIM");
+  });
+
+  it("allows secondary synthesis from cited reporting despite an uncited metadata primary", () => {
+    const reportProvenance = {
+      title: {
+        sourceIds: ["report"],
+        evidenceExcerpt: "A measured outcome improved.",
+      },
+      oneSentence: {
+        sourceIds: ["report"],
+        evidenceExcerpt:
+          "The measured outcome improved during the trial.",
+      },
+      whyItMatters: {
+        sourceIds: ["report"],
+        evidenceExcerpt:
+          "The result may improve an important outcome.",
+      },
+    };
+    const result = validateSummary(
+      summaryFixture({
+        accessLevel: "secondary",
+        claims: [
+          {
+            text:
+              "The measured outcome improved during the trial.",
+            sourceIds: ["report"],
+            evidenceExcerpt:
+              "The measured outcome improved during the trial.",
+          },
+        ],
+        provenance: reportProvenance,
+      }),
+      sourcePacketFixture({
+        sources: [
+          {
+            sourceId: "paper",
+            role: "primary",
+            title: "Paper metadata",
+            url: "https://example.com/paper",
+            retrievedAt: "2026-07-29T09:00:00.000Z",
+            accessLevel: "metadata",
+            excerpts: [
+              { number: 1, text: "Paper metadata only." },
+            ],
+          },
+          {
+            sourceId: "report",
+            role: "reporting",
+            title: "A measured outcome improved",
+            url: "https://example.com/report",
+            retrievedAt: "2026-07-29T09:05:00.000Z",
+            accessLevel: "full_text",
+            excerpts: [{ number: 1, text: GROUNDED_TEXT }],
+          },
+        ],
+      }),
+    );
+
+    expect(result).toEqual({ ok: true, errors: [] });
   });
 
   it.each([
@@ -635,6 +734,41 @@ describe("SourcePacketSchema", () => {
       },
     ],
     [
+      "bare token query",
+      {
+        ...source,
+        url: "https://example.com/report?token=opaque-value",
+      },
+    ],
+    [
+      "session query",
+      {
+        ...source,
+        url: "https://example.com/report?session=opaque-value",
+      },
+    ],
+    [
+      "JWT query",
+      {
+        ...source,
+        url: "https://example.com/report?jwt=abc.def.ghi",
+      },
+    ],
+    [
+      "ID token query",
+      {
+        ...source,
+        url: "https://example.com/report?id_token=opaque-value",
+      },
+    ],
+    [
+      "bare key query",
+      {
+        ...source,
+        url: "https://example.com/report?key=opaque-value",
+      },
+    ],
+    [
       "credential-bearing query value",
       {
         ...source,
@@ -646,6 +780,13 @@ describe("SourcePacketSchema", () => {
       {
         ...source,
         url: "https://example.com/report#signature=secret",
+      },
+    ],
+    [
+      "ordinary fragment",
+      {
+        ...source,
+        url: "https://example.com/report#methods",
       },
     ],
     [
@@ -678,6 +819,20 @@ describe("SourcePacketSchema", () => {
       SourcePacketSchema.safeParse({
         itemKind: "article",
         sources: [{ ...source, title: "Measured outcome 📈" }],
+      }).success,
+    ).toBe(true);
+  });
+
+  it("allows an ordinary non-sensitive query URL", () => {
+    expect(
+      SourcePacketSchema.safeParse({
+        itemKind: "article",
+        sources: [
+          {
+            ...source,
+            url: "https://example.com/report?page=2&lang=en",
+          },
+        ],
       }).success,
     ).toBe(true);
   });
