@@ -26,6 +26,7 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
     "uncertainty",
     "claims",
     "accessLevel",
+    "provenance",
   ],
   properties: {
     title: { type: "string", minLength: 1 },
@@ -57,6 +58,76 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
     accessLevel: {
       type: "string",
       enum: ["metadata", "abstract", "full_text", "secondary"],
+    },
+    provenance: {
+      type: "object",
+      additionalProperties: false,
+      required: ["title", "oneSentence", "whyItMatters"],
+      properties: {
+        title: {
+          type: "object",
+          additionalProperties: false,
+          required: ["sourceIds", "evidenceExcerpt"],
+          properties: {
+            sourceIds: {
+              type: "array",
+              minItems: 1,
+              items: {
+                type: "string",
+                minLength: 1,
+                maxLength: 200,
+              },
+            },
+            evidenceExcerpt: {
+              type: "string",
+              minLength: 1,
+              maxLength: 800,
+            },
+          },
+        },
+        oneSentence: {
+          type: "object",
+          additionalProperties: false,
+          required: ["sourceIds", "evidenceExcerpt"],
+          properties: {
+            sourceIds: {
+              type: "array",
+              minItems: 1,
+              items: {
+                type: "string",
+                minLength: 1,
+                maxLength: 200,
+              },
+            },
+            evidenceExcerpt: {
+              type: "string",
+              minLength: 1,
+              maxLength: 800,
+            },
+          },
+        },
+        whyItMatters: {
+          type: "object",
+          additionalProperties: false,
+          required: ["sourceIds", "evidenceExcerpt"],
+          properties: {
+            sourceIds: {
+              type: "array",
+              minItems: 1,
+              items: {
+                type: "string",
+                minLength: 1,
+                maxLength: 200,
+              },
+            },
+            evidenceExcerpt: {
+              type: "string",
+              minLength: 1,
+              maxLength: 800,
+            },
+          },
+        },
+      },
     },
   },
 };

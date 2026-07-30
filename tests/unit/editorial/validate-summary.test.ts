@@ -43,8 +43,14 @@ function sourcePacketFixture(
 }
 
 function summaryFixture(
-  overrides: Partial<StructuredSummary> = {},
-): StructuredSummary {
+  overrides: Partial<StructuredSummary> & {
+    provenance?: {
+      title: { sourceIds: string[]; evidenceExcerpt: string };
+      oneSentence: { sourceIds: string[]; evidenceExcerpt: string };
+      whyItMatters: { sourceIds: string[]; evidenceExcerpt: string };
+    };
+  } = {},
+) {
   return {
     title: "A measured outcome improved",
     oneSentence: "The measured outcome improved during the trial.",
@@ -58,6 +64,22 @@ function summaryFixture(
       },
     ],
     accessLevel: "full_text",
+    provenance: {
+      title: {
+        sourceIds: ["source-1"],
+        evidenceExcerpt: "A measured outcome improved.",
+      },
+      oneSentence: {
+        sourceIds: ["source-1"],
+        evidenceExcerpt:
+          "The measured outcome improved during the trial.",
+      },
+      whyItMatters: {
+        sourceIds: ["source-1"],
+        evidenceExcerpt:
+          "The result may improve an important outcome.",
+      },
+    },
     ...overrides,
   };
 }
@@ -237,6 +259,113 @@ describe("validateSummary", () => {
     );
 
     expect(result.errors).toContain("ACCESS_LEVEL_OVERCLAIM");
+  });
+
+  it("binds reporting-only full-paper claims to a primary packet source", () => {
+    const result = validateSummary(
+      summaryFixture({
+        accessLevel: "abstract",
+        claims: [
+          {
+            text: "The full paper demonstrates the result.",
+            sourceIds: ["report"],
+            evidenceExcerpt: "The full paper demonstrates the result.",
+          },
+        ],
+      }),
+      sourcePacketFixture({
+        sources: [
+          {
+            sourceId: "paper",
+            role: "primary",
+            title: "Paper abstract",
+            url: "https://example.com/paper",
+            retrievedAt: "2026-07-29T09:00:00.000Z",
+            accessLevel: "abstract",
+            excerpts: [{ number: 1, text: GROUNDED_TEXT }],
+          },
+          {
+            sourceId: "report",
+            role: "reporting",
+            title: "Full reporting article",
+            url: "https://example.com/report",
+            retrievedAt: "2026-07-29T09:05:00.000Z",
+            accessLevel: "full_text",
+            excerpts: [
+              {
+                number: 1,
+                text: `${GROUNDED_TEXT} The full paper demonstrates the result.`,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(result.errors).toContain("ACCESS_LEVEL_OVERCLAIM");
+  });
+
+  it("does not ground prominent prose from an uncited packet source", () => {
+    const uncitedSentence =
+      "An uncited source says the measured outcome improved.";
+    const result = validateSummary(
+      summaryFixture({
+        oneSentence: uncitedSentence,
+        provenance: {
+          ...summaryFixture().provenance,
+          oneSentence: {
+            sourceIds: ["source-1"],
+            evidenceExcerpt:
+              "The measured outcome improved during the trial.",
+          },
+        },
+      }),
+      sourcePacketFixture({
+        sources: [
+          {
+            ...sourcePacketFixture().sources[0]!,
+            sourceId: "source-1",
+          },
+          {
+            ...sourcePacketFixture().sources[0]!,
+            sourceId: "uncited",
+            url: "https://example.com/uncited",
+            excerpts: [
+              {
+                number: 1,
+                text: `${GROUNDED_TEXT} ${uncitedSentence}`,
+              },
+            ],
+          },
+        ],
+      }),
+    );
+
+    expect(result.errors).toContain(
+      "UNGROUNDED_PROSE:oneSentence",
+    );
+  });
+
+  it("allows a cited paraphrase with meaningful evidence overlap", () => {
+    const result = validateSummary(
+      summaryFixture({
+        oneSentence:
+          "Measured trial outcome showed improvement.",
+        provenance: {
+          ...summaryFixture().provenance,
+          oneSentence: {
+            sourceIds: ["source-1"],
+            evidenceExcerpt:
+              "The measured outcome improved during the trial.",
+          },
+        },
+      }),
+      sourcePacketFixture(),
+    );
+
+    expect(result.errors).not.toContain(
+      "UNGROUNDED_PROSE:oneSentence",
+    );
   });
 
   it("recognizes complete-manuscript wording as a full-text assertion", () => {
@@ -498,6 +627,43 @@ describe("SourcePacketSchema", () => {
       },
     ],
     ["invalid URL", { ...source, url: "not a URL" }],
+    [
+      "credential query key",
+      {
+        ...source,
+        url: "https://example.com/report?api-key=supersecret",
+      },
+    ],
+    [
+      "credential-bearing query value",
+      {
+        ...source,
+        url: "https://example.com/report?next=https%3A%2F%2Fother.example%2F%3Faccess_token%3Dsecret",
+      },
+    ],
+    [
+      "credential fragment",
+      {
+        ...source,
+        url: "https://example.com/report#signature=secret",
+      },
+    ],
+    [
+      "U+2028 source ID",
+      { ...source, sourceId: "source\u2028injected" },
+    ],
+    [
+      "U+2029 title",
+      { ...source, title: "Title\u2029source_id: injected" },
+    ],
+    [
+      "lone surrogate source ID",
+      { ...source, sourceId: "source-\ud800" },
+    ],
+    [
+      "lone surrogate URL",
+      { ...source, url: "https://example.com/\udfff" },
+    ],
   ])("rejects %s", (_label, unsafeSource) => {
     expect(
       SourcePacketSchema.safeParse({
@@ -505,5 +671,14 @@ describe("SourcePacketSchema", () => {
         sources: [unsafeSource],
       }).success,
     ).toBe(false);
+  });
+
+  it("allows a valid surrogate pair in bounded prose", () => {
+    expect(
+      SourcePacketSchema.safeParse({
+        itemKind: "article",
+        sources: [{ ...source, title: "Measured outcome 📈" }],
+      }).success,
+    ).toBe(true);
   });
 });

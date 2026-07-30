@@ -93,17 +93,17 @@ function suppliedAccessLevel(
     candidate.content !== null && candidate.content.trim().length > 0;
   const hasAbstract =
     candidate.abstract !== null && candidate.abstract.trim().length > 0;
-  if (candidate.accessLevel === "full_text" && hasContent) {
-    return "full_text";
+  switch (candidate.accessLevel) {
+    case "full_text":
+      if (hasContent) return "full_text";
+      return hasAbstract ? "abstract" : "metadata";
+    case "abstract":
+      return hasAbstract ? "abstract" : "metadata";
+    case "secondary":
+      return hasContent || hasAbstract ? "secondary" : "metadata";
+    case "metadata":
+      return "metadata";
   }
-  if (
-    candidate.accessLevel === "secondary" &&
-    (hasContent || hasAbstract)
-  ) {
-    return "secondary";
-  }
-  if (hasAbstract) return "abstract";
-  return "metadata";
 }
 
 const StrictResearchAssessmentSchema =
