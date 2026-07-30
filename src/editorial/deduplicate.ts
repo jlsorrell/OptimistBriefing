@@ -6,6 +6,7 @@ import {
 } from "../contracts/editorial";
 import {
   type NewsMaterialFact,
+  type ScopedNewsMaterialFact,
 } from "../sources/types";
 import {
   editorialSignalKey,
@@ -224,6 +225,20 @@ function mergeGroup(group: readonly Item[]): Item {
       ),
     ),
   ].sort((left, right) => left.localeCompare(right));
+  const eventInstanceMap = new Map(
+    corroboratingSignals
+      .flatMap((signal) => signal.eventInstances)
+      .map((instance) => [
+        `${instance.subject}\u0000${instance.domain}\u0000${instance.object}`,
+        instance,
+      ]),
+  );
+  const eventInstances = [...eventInstanceMap.values()].sort(
+    (left, right) =>
+      left.subject.localeCompare(right.subject) ||
+      left.domain.localeCompare(right.domain) ||
+      left.object.localeCompare(right.object),
+  );
   const primarySections = [
     ...new Set(
       group.flatMap((item) => [
@@ -245,6 +260,37 @@ function mergeGroup(group: readonly Item[]): Item {
   }
   const materialFacts = [...materialFactMap.values()].sort(
     (left, right) =>
+      left.kind.localeCompare(right.kind) ||
+      left.key.localeCompare(right.key) ||
+      left.value.localeCompare(right.value),
+  );
+  const scopedFactMap = new Map<string, ScopedNewsMaterialFact>();
+  for (const fact of corroboratingSignals.flatMap(
+    (signal) => signal.scopedMaterialFacts,
+  )) {
+    scopedFactMap.set(
+      [
+        fact.eventInstance.subject,
+        fact.eventInstance.domain,
+        fact.eventInstance.object,
+        fact.kind,
+        fact.key,
+        fact.value,
+      ].join("\u0000"),
+      fact,
+    );
+  }
+  const structuredScopedFacts = [...scopedFactMap.values()].sort(
+    (left, right) =>
+      left.eventInstance.subject.localeCompare(
+        right.eventInstance.subject,
+      ) ||
+      left.eventInstance.domain.localeCompare(
+        right.eventInstance.domain,
+      ) ||
+      left.eventInstance.object.localeCompare(
+        right.eventInstance.object,
+      ) ||
       left.kind.localeCompare(right.kind) ||
       left.key.localeCompare(right.key) ||
       left.value.localeCompare(right.value),
@@ -271,7 +317,9 @@ function mergeGroup(group: readonly Item[]): Item {
       primaryDocumentUrls,
       eventFamilies,
       allEventFamilies,
+      eventInstances,
       materialFacts,
+      scopedMaterialFacts: structuredScopedFacts,
       editorialSignals: structuredSignals,
       primarySections,
       canCorroborateFacts: group.some(

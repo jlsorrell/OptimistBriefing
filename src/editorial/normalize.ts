@@ -4,14 +4,18 @@ import {
   normalizeDoi,
 } from "../sources/identifiers";
 import {
+  CanonicalEventInstanceSchema,
   EditorialSignalRecordSchema,
-  NewsMaterialFactSchema,
+  ScopedNewsMaterialFactSchema,
+  type CanonicalEventInstance,
   RawItemSchema,
-  type NewsMaterialFact,
+  type ScopedNewsMaterialFact,
 } from "../sources/types";
 import {
+  deriveCanonicalEventInstances,
   deriveEventFamilies,
-  deriveMaterialFacts,
+  deriveNamedEntities,
+  deriveScopedMaterialFacts,
 } from "../sources/news-signals";
 import { mapResearchTopicIds } from "./research-topics";
 
@@ -87,10 +91,20 @@ function stringArray(value: unknown): string[] {
     : [];
 }
 
-function materialFacts(value: unknown): NewsMaterialFact[] {
+function eventInstances(value: unknown): CanonicalEventInstance[] {
   if (!Array.isArray(value)) return [];
-  return value.flatMap((entry): NewsMaterialFact[] => {
-    const parsed = NewsMaterialFactSchema.safeParse(entry);
+  return value.flatMap((entry): CanonicalEventInstance[] => {
+    const parsed = CanonicalEventInstanceSchema.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+function scopedMaterialFacts(
+  value: unknown,
+): ScopedNewsMaterialFact[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): ScopedNewsMaterialFact[] => {
+    const parsed = ScopedNewsMaterialFactSchema.safeParse(entry);
     return parsed.success ? [parsed.data] : [];
   });
 }
@@ -175,9 +189,17 @@ export function normalizeCandidate(raw: unknown): Item {
   const sectionEligibility = stringArray(
     input.sectionEligibility ?? candidate.metadata.sectionEligibility,
   );
-  const namedEntities = stringArray(
-    input.namedEntities ?? candidate.metadata.namedEntities,
-  );
+  const materialText = [
+    title,
+    candidate.abstract,
+    candidate.content,
+  ];
+  const namedEntities = uniqueSorted([
+    ...stringArray(
+      input.namedEntities ?? candidate.metadata.namedEntities,
+    ),
+    ...deriveNamedEntities(materialText, candidate.metadata),
+  ]);
   const primaryDocumentUrl =
     typeof (input.primaryDocumentUrl ??
       candidate.metadata.primaryDocumentUrl) === "string"
@@ -200,32 +222,84 @@ export function normalizeCandidate(raw: unknown): Item {
     [
       ...explicitEventFamilies,
       ...deriveEventFamilies(
-        [title, candidate.abstract, candidate.content],
+        materialText,
         candidate.metadata,
       ),
     ],
   );
-  const explicitMaterialFacts = materialFacts(
-    input.materialFacts ?? candidate.metadata.materialFacts,
+  const explicitEventInstances = eventInstances(
+    input.eventInstances ??
+      candidate.metadata.eventInstances,
   );
-  const materialFactMap = new Map<string, NewsMaterialFact>();
+  const derivedEventInstances =
+    explicitEventInstances.length > 0
+      ? explicitEventInstances
+      : deriveCanonicalEventInstances(
+          materialText,
+          candidate.metadata,
+          namedEntities,
+          eventFamilies,
+        );
+  const canonicalEventInstances = [
+    ...new Map(
+      derivedEventInstances.map((instance) => [
+        `${instance.subject}\u0000${instance.domain}\u0000${instance.object}`,
+        instance,
+      ]),
+    ).values(),
+  ].sort(
+    (left, right) =>
+      left.subject.localeCompare(right.subject) ||
+      left.domain.localeCompare(right.domain) ||
+      left.object.localeCompare(right.object),
+  );
+  const explicitScopedFacts = scopedMaterialFacts(
+    input.scopedMaterialFacts ??
+      candidate.metadata.scopedMaterialFacts,
+  );
+  const {
+    materialFacts: _unscopedMaterialFacts,
+    scopedMaterialFacts: _upstreamScopedMaterialFacts,
+    ...factDerivationMetadata
+  } = candidate.metadata;
+  const scopedFactMap = new Map<string, ScopedNewsMaterialFact>();
   for (const fact of [
-    ...explicitMaterialFacts,
-    ...deriveMaterialFacts(
-      [title, candidate.abstract, candidate.content],
-      candidate.metadata,
+    ...explicitScopedFacts,
+    ...deriveScopedMaterialFacts(
+      materialText,
+      factDerivationMetadata,
+      canonicalEventInstances,
     ),
   ]) {
-    materialFactMap.set(
-      `${fact.kind}\u0000${fact.key}\u0000${fact.value}`,
+    scopedFactMap.set(
+      [
+        fact.eventInstance.subject,
+        fact.eventInstance.domain,
+        fact.eventInstance.object,
+        fact.kind,
+        fact.key,
+        fact.value,
+      ].join("\u0000"),
       fact,
     );
   }
-  const structuredMaterialFacts = [...materialFactMap.values()].sort(
+  const structuredScopedFacts = [...scopedFactMap.values()].sort(
     (left, right) =>
+      left.eventInstance.subject.localeCompare(
+        right.eventInstance.subject,
+      ) ||
+      left.eventInstance.domain.localeCompare(
+        right.eventInstance.domain,
+      ) ||
+      left.eventInstance.object.localeCompare(
+        right.eventInstance.object,
+      ) ||
       left.kind.localeCompare(right.kind) ||
       left.key.localeCompare(right.key) ||
       left.value.localeCompare(right.value),
+  );
+  const instanceMaterialFacts = structuredScopedFacts.map(
+    ({ eventInstance: _eventInstance, ...fact }) => fact,
   );
   const section =
     typeof candidate.metadata.primarySection === "string"
@@ -308,7 +382,9 @@ export function normalizeCandidate(raw: unknown): Item {
       primaryDocumentUrl,
       primaryDocumentUrls,
       eventFamilies,
-      materialFacts: structuredMaterialFacts,
+      eventInstances: canonicalEventInstances,
+      materialFacts: instanceMaterialFacts,
+      scopedMaterialFacts: structuredScopedFacts,
       editorialSignals: [
         EditorialSignalRecordSchema.parse({
           itemId: id,
@@ -323,7 +399,9 @@ export function normalizeCandidate(raw: unknown): Item {
           namedEntities: uniqueSorted(namedEntities),
           primaryDocumentUrls: signalPrimaryDocumentUrls,
           eventFamilies,
-          materialFacts: structuredMaterialFacts,
+          eventInstances: canonicalEventInstances,
+          materialFacts: instanceMaterialFacts,
+          scopedMaterialFacts: structuredScopedFacts,
         }),
       ],
       relatedPaperIds: uniqueSorted(

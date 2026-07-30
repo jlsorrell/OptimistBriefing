@@ -3,8 +3,12 @@ import type {
   ItemKind,
 } from "../contracts/editorial";
 import {
+  CanonicalEventInstanceSchema,
   NewsMaterialFactSchema,
+  type CanonicalEventDomain,
+  type CanonicalEventInstance,
   type NewsMaterialFact,
+  type ScopedNewsMaterialFact,
 } from "./types";
 
 const ENTITY_PATTERNS: readonly [string, RegExp][] = [
@@ -56,6 +60,78 @@ function combinedText(input: MaterialTextInput): string {
     .join(". ");
 }
 
+function materialParts(input: MaterialTextInput): string[] {
+  return (typeof input === "string" ? [input] : input)
+    .filter((value): value is string => typeof value === "string")
+    .map((value) => value.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+}
+
+function sentences(input: MaterialTextInput): string[] {
+  return materialParts(input).flatMap(
+    (part) =>
+      part
+        .split(/(?<=[!?])\s+|(?<=\.)\s+(?=[A-Z])/)
+        .map((sentence) => sentence.trim())
+        .filter(Boolean),
+  );
+}
+
+function normalizedIdentityPart(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/^(?:the|a|an)\s+/, "")
+    .replace(/['’]s\b/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function withoutDiscourseMarker(value: string): string {
+  return value.replace(
+    /^(?:(?:meanwhile|separately|however|previously|earlier|elsewhere|in contrast|by contrast|for context|in a statement|according to [^,]+),?\s+)+/i,
+    "",
+  );
+}
+
+function normalizedEventObject(
+  value: string,
+  subject: string,
+): string {
+  let normalized = value.startsWith(`${subject}-`)
+    ? value.slice(subject.length + 1)
+    : value;
+  const predicate =
+    "(?:proposes?|proposed|introduces?|introduced|adopts?|adopted|approves?|approved|launches?|launched|releases?|released|unveils?|unveiled|publishes?|published|issues?|issued|confirms?|confirmed|announces?|announced|details?|detailed|updates?|updated|reports?|reported|says?|said)";
+  normalized = normalized.replace(
+    new RegExp(`^.*-${predicate}-`),
+    "",
+  );
+  let previous = "";
+  while (previous !== normalized) {
+    previous = normalized;
+    normalized = normalized
+      .replace(
+        /^(?:(?:the|a|an|its|current|earlier|previous|new|later)-)+/,
+        "",
+      )
+      .replace(new RegExp(`^(?:${predicate}-)+`), "")
+      .replace(/^\d+(?:-model)?-/, "");
+  }
+  if (normalized === "governance-rule") {
+    return "generic-governance-instrument";
+  }
+  return /^(?:(?:ai|model)-)?(?:evaluation|safety|security)-(?:standard|framework|requirements?)$/.test(
+    normalized,
+  )
+    ? "model-evaluation-standard"
+    : /^frontier-(?:model-)?evaluation-(?:standard|framework|proposal|requirements?)$/.test(
+          normalized,
+        )
+      ? "frontier-evaluation-standard"
+      : normalized;
+}
+
 function sentenceAround(value: string, index: number): string {
   const starts = [
     value.lastIndexOf(". ", index),
@@ -77,6 +153,22 @@ function normalizeNumberFact(value: string): string {
   return Number.isFinite(normalized)
     ? normalized.toString()
     : value.replace(/,/g, "");
+}
+
+function normalizeAmountFact(
+  value: string,
+  magnitude: string | undefined,
+): string {
+  const amount = Number(value.replace(/,/g, ""));
+  const multiplier =
+    magnitude?.toLocaleLowerCase("en-US").startsWith("b") === true
+      ? 1_000_000_000
+      : magnitude?.toLocaleLowerCase("en-US").startsWith("m") === true
+        ? 1_000_000
+        : 1;
+  return Number.isFinite(amount)
+    ? Math.round(amount * multiplier).toString()
+    : value;
 }
 
 const MONTH_NUMBERS: Readonly<Record<string, string>> = {
@@ -157,6 +249,284 @@ const EVENT_FAMILY_PATTERNS: readonly [string, RegExp][] = [
   ],
 ];
 
+const GENERIC_INSTANCE_SUBJECTS = new Set([
+  "ai",
+  "artificial-intelligence",
+  "united-states",
+  "congress",
+  "federal-register",
+  "baltimore",
+  "maryland",
+  "virginia",
+  "washington-d-c",
+  "agency",
+  "institute",
+  "university",
+  "department",
+  "commission",
+  "administration",
+  "company",
+  "laboratory",
+  "lab",
+]);
+
+const EVENT_OBJECT_SUFFIX =
+  "(?:Act|Bill|Rule|Standard|Framework|Guidance|Order|Program|Initiative|Fund|Round|Assistant|App|Tool|Service|Product|Model|Benchmark)";
+
+function eventDomainForObject(
+  object: string,
+  eventFamilies: readonly string[],
+): CanonicalEventDomain | null {
+  const families = new Set(eventFamilies);
+  if (/(?:program|initiative|fund|round)$/.test(object)) {
+    return "funding-event";
+  }
+  if (/(?:assistant|app|tool|service|product|model)$/.test(object)) {
+    return "product-event";
+  }
+  if (/benchmark$/.test(object)) {
+    return "evaluation-event";
+  }
+  if (
+    /(?:act|bill|rule|standard|framework|guidance|order)$/.test(
+      object,
+    )
+  ) {
+    return "governance-event";
+  }
+  if (families.has("funding-budget")) return "funding-event";
+  if (families.has("product-release")) return "product-event";
+  if (families.has("evaluation-benchmark")) {
+    return "evaluation-event";
+  }
+  if (
+    [...families].some((family) =>
+      [
+        "legislation",
+        "guidance-rule",
+        "evaluation-standards",
+      ].includes(family),
+    )
+  ) {
+    return "governance-event";
+  }
+  return null;
+}
+
+function eventObjectCandidates(
+  text: string,
+  eventFamilies: readonly string[],
+): { object: string; domain: CanonicalEventDomain }[] {
+  const candidateText = withoutDiscourseMarker(text.trim());
+  const candidates = new Map<
+    string,
+    { object: string; domain: CanonicalEventDomain }
+  >();
+  const namedPatterns = [
+    new RegExp(
+      `\\b(?:[A-Z][A-Za-z0-9&.-]*\\s+){0,5}${EVENT_OBJECT_SUFFIX}\\b`,
+      "g",
+    ),
+    new RegExp(
+      `\\b(?:[A-Z0-9&.-]+\\s+){0,5}${EVENT_OBJECT_SUFFIX.toUpperCase()}\\b`,
+      "g",
+    ),
+  ];
+  for (const pattern of namedPatterns) {
+    for (const match of candidateText.matchAll(pattern)) {
+      const raw = match[0];
+      if (raw === undefined) continue;
+      const object = normalizedIdentityPart(raw);
+      const domain = eventDomainForObject(object, eventFamilies);
+      if (object.length > 0 && domain !== null) {
+        candidates.set(`${domain}\u0000${object}`, { object, domain });
+      }
+    }
+  }
+  if (candidates.size > 0) return [...candidates.values()];
+
+  const leadingDescription = new RegExp(
+    `^(?:the\\s+)?(?<object>(?:[A-Za-z0-9&.-]+\\s+){1,6}${EVENT_OBJECT_SUFFIX})\\b`,
+    "i",
+  ).exec(candidateText)?.groups?.object;
+  if (leadingDescription !== undefined) {
+    const object = normalizedEventObject(
+      normalizedIdentityPart(leadingDescription),
+      "",
+    );
+    if (object.split("-").length > 1) {
+      const domain = eventDomainForObject(object, eventFamilies);
+      if (domain !== null) {
+        candidates.set(`${domain}\u0000${object}`, {
+          object,
+          domain,
+        });
+      }
+    }
+  }
+  if (candidates.size > 0) return [...candidates.values()];
+
+  for (const match of candidateText.matchAll(
+    /\b((?:(?:ai|model|frontier|compute|safety|security|data|privacy|transparency|evaluation)\s+){1,4}(?:act|bill|rule|standard|framework|guidance|order|program|initiative|fund|round|assistant|app|tool|service|product|model|benchmark))\b/gi,
+  )) {
+    const raw = match[1];
+    if (raw === undefined) continue;
+    const object = normalizedEventObject(
+      normalizedIdentityPart(raw),
+      "",
+    );
+    const domain = eventDomainForObject(object, eventFamilies);
+    if (object.length > 0 && domain !== null) {
+      candidates.set(`${domain}\u0000${object}`, { object, domain });
+    }
+  }
+  if (candidates.size > 0) return [...candidates.values()];
+
+  const genericPatterns: readonly [
+    string,
+    CanonicalEventDomain,
+    RegExp,
+  ][] = [
+    [
+      "frontier-evaluation-standard",
+      "governance-event",
+      /\bfrontier(?:-|\s+)(?:model\s+)?evaluation\s+(?:standard|framework|proposal|requirements?)\b/i,
+    ],
+    [
+      "model-evaluation-standard",
+      "governance-event",
+      /\b(?:AI\s+)?(?:evaluation|safety|security)\s+(?:standard|framework|requirements?)\b/i,
+    ],
+    [
+      "generic-governance-instrument",
+      "governance-event",
+      /\b(?:governance|policy)\s+(?:rule|guidance|proposal|instrument)\b/i,
+    ],
+    [
+      "generic-evaluation-benchmark",
+      "evaluation-event",
+      /\b(?:evaluation|safety|security)\s+benchmark\b/i,
+    ],
+  ];
+  for (const [object, domain, pattern] of genericPatterns) {
+    if (pattern.test(candidateText)) {
+      candidates.set(`${domain}\u0000${object}`, { object, domain });
+    }
+  }
+  return [...candidates.values()];
+}
+
+function canonicalSubjectCandidates(
+  entities: readonly string[],
+): string[] {
+  const candidates = unique(entities)
+    .map((entity) => ({
+      raw: entity,
+      normalized: normalizedIdentityPart(entity),
+    }))
+    .filter(
+      ({ normalized }) =>
+        normalized.length > 0 &&
+        !GENERIC_INSTANCE_SUBJECTS.has(normalized) &&
+        !/(?:act|bill|rule|standard|framework|guidance|order|program|initiative|fund|round|assistant|app|tool|service|product|model|benchmark)$/.test(
+          normalized,
+        ),
+    )
+    .map(({ normalized }) => normalized);
+  const organizations = [
+    ...new Set(
+      candidates.filter((candidate) =>
+        /(?:agency|institute|university|department|commission|administration|company|laboratory|lab)$/.test(
+          candidate,
+        ),
+      ),
+    ),
+  ];
+  if (organizations.length > 0) return organizations;
+  const uniqueCandidates = [...new Set(candidates)];
+  return uniqueCandidates;
+}
+
+function canonicalInstanceSubject(
+  entities: readonly string[],
+): string | null {
+  const candidates = canonicalSubjectCandidates(entities);
+  return candidates.length === 1 ? candidates[0] ?? null : null;
+}
+
+export function deriveCanonicalEventInstances(
+  input: MaterialTextInput,
+  metadata: Readonly<Record<string, unknown>>,
+  namedEntities: readonly string[],
+  eventFamilies: readonly string[],
+): CanonicalEventInstance[] {
+  const explicit = Array.isArray(metadata.eventInstances)
+    ? metadata.eventInstances.flatMap(
+        (entry): CanonicalEventInstance[] => {
+          const parsed = CanonicalEventInstanceSchema.safeParse(entry);
+          return parsed.success ? [parsed.data] : [];
+        },
+      )
+    : [];
+  if (explicit.length > 0) {
+    return [...new Map(
+      explicit.map((instance) => [
+        `${instance.subject}\u0000${instance.domain}\u0000${instance.object}`,
+        instance,
+      ]),
+    ).values()];
+  }
+
+  const parts = materialParts(input);
+  let subject: string | null = null;
+  for (const part of parts) {
+    const candidates = canonicalSubjectCandidates(
+      deriveNamedEntities(part, {}),
+    );
+    if (candidates.length > 1) return [];
+    if (candidates.length === 1) {
+      subject = candidates[0] ?? null;
+      break;
+    }
+  }
+  subject ??= canonicalInstanceSubject(namedEntities);
+  if (subject === null) return [];
+  let selected:
+    | { object: string; domain: CanonicalEventDomain }
+    | undefined;
+  candidateSearch: for (const part of parts) {
+    for (const sentence of sentences(part)) {
+      const candidates = eventObjectCandidates(
+        sentence,
+        eventFamilies,
+      );
+      if (candidates.length === 0) continue;
+      if (candidates.length !== 1) return [];
+      const candidate = candidates[0];
+      if (candidate !== undefined) {
+        selected = {
+          ...candidate,
+          object: normalizedEventObject(candidate.object, subject),
+        };
+      }
+      break candidateSearch;
+    }
+  }
+  if (
+    selected === undefined ||
+    selected.object === "generic-governance-instrument"
+  ) {
+    return [];
+  }
+  return [
+    CanonicalEventInstanceSchema.parse({
+      subject,
+      domain: selected.domain,
+      object: selected.object,
+    }),
+  ];
+}
+
 function explicitMaterialFacts(
   metadata: Readonly<Record<string, unknown>>,
 ): NewsMaterialFact[] {
@@ -166,6 +536,37 @@ function explicitMaterialFacts(
     const parsed = NewsMaterialFactSchema.safeParse(entry);
     return parsed.success ? [parsed.data] : [];
   });
+}
+
+function regexPhrase(value: string): RegExp {
+  return new RegExp(
+    `\\b${value
+      .split("-")
+      .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join("\\s+")}\\b`,
+    "i",
+  );
+}
+
+function referencesEventInstance(
+  sentence: string,
+  eventInstance: CanonicalEventInstance,
+): boolean {
+  if (regexPhrase(eventInstance.subject).test(sentence)) return true;
+  if (regexPhrase(eventInstance.object).test(sentence)) return true;
+  const aliases: Record<CanonicalEventDomain, RegExp> = {
+    "governance-event":
+      eventInstance.object.endsWith("rule")
+        ? /\b(?:rule|regulation|policy)\b/i
+        : /\b(?:standard|framework|requirements?|measure)\b/i,
+    "evaluation-event":
+      /\b(?:benchmark|evaluation|test)\b/i,
+    "product-event":
+      /\b(?:product|assistant|app|tool|service|model|release)\b/i,
+    "funding-event":
+      /\b(?:funding|budget|appropriation|program|initiative|fund|round|grant)\b/i,
+  };
+  return aliases[eventInstance.domain].test(sentence);
 }
 
 export function deriveEventFamilies(
@@ -184,11 +585,58 @@ export function deriveEventFamilies(
 export function deriveMaterialFacts(
   text: MaterialTextInput,
   metadata: Readonly<Record<string, unknown>>,
+  eventInstance: CanonicalEventInstance | null = null,
 ): NewsMaterialFact[] {
-  const sourceText = combinedText(text);
+  const eventFamilies = deriveEventFamilies(text, metadata);
+  const sourceText =
+    eventInstance === null
+      ? combinedText(text)
+      : sentences(text)
+          .filter((sentence) => {
+            const candidates = eventObjectCandidates(
+              sentence,
+              eventFamilies,
+            ).map((candidate) => ({
+              ...candidate,
+              object: normalizedEventObject(
+                candidate.object,
+                eventInstance.subject,
+              ),
+            })).filter(
+              (candidate) =>
+                candidate.object === eventInstance.object ||
+                candidate.object.split("-").length > 1,
+            );
+            if (
+              candidates.some(
+                (candidate) =>
+                  candidate.object === eventInstance.object &&
+                  candidate.domain === eventInstance.domain,
+              )
+            ) {
+              return true;
+            }
+            if (candidates.length > 0) return false;
+            if (
+              /^(?:it|this|that|they|these|those|he|she)\b/i.test(
+                sentence.trim(),
+              )
+            ) {
+              return false;
+            }
+            if (
+              /\b(?:earlier|previous|formerly|prior|unrelated|separate)\b/i.test(
+                sentence,
+              )
+            ) {
+              return false;
+            }
+            return referencesEventInstance(sentence, eventInstance);
+          })
+          .join(". ");
   const facts = [...explicitMaterialFacts(metadata)];
   const materialContext =
-    /\b(?:standard|framework|requirements?|policy|rule|bill|law|measure|guidance|document|order|program|system|model)\b/i;
+    /\b(?:standard|framework|requirements?|policy|rule|bill|law|measure|guidance|document|order|program|system|model|funding|budget|appropriation|initiative|fund|round|grant|product|assistant|app|tool|service)\b/i;
   const statusPatterns: readonly [string, RegExp][] = [
     ["proposed", /\b(?:propos(?:e|es|ed)|introduc(?:e|es|ed))\b/i],
     ["adopted", /\b(?:approv(?:e|es|ed)|adopt(?:s|ed)?|pass(?:es|ed)?)\b/i],
@@ -295,6 +743,27 @@ export function deriveMaterialFacts(
       });
     }
   }
+  for (const match of sourceText.matchAll(
+    /\$\s*(\d+(?:,\d{3})*(?:\.\d+)?)\s*(billion|million|bn|m|b)?\b/gi,
+  )) {
+    const value = match[1];
+    const magnitude = match[2];
+    const index = match.index;
+    if (
+      value === undefined ||
+      index === undefined ||
+      !/\b(?:funding|budget|appropriation|program|initiative|fund|round|grant)\b/i.test(
+        sentenceAround(sourceText, index),
+      )
+    ) {
+      continue;
+    }
+    facts.push({
+      kind: "amount",
+      key: "funding-amount:usd",
+      value: normalizeAmountFact(value, magnitude),
+    });
+  }
   const datePattern =
     "(?:20\\d{2}-\\d{2}-\\d{2}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\s+\\d{1,2}(?:,\\s+20\\d{2})?)";
   for (const match of sourceText.matchAll(
@@ -322,6 +791,8 @@ export function deriveMaterialFacts(
       value:
         fact.kind === "number"
           ? normalizeNumberFact(fact.value)
+          : fact.kind === "amount"
+            ? normalizeNumberFact(fact.value)
           : fact.kind === "date"
             ? normalizeDateFact(fact.value)
             : fact.value.toLocaleLowerCase("en-US").trim(),
@@ -339,22 +810,84 @@ export function deriveMaterialFacts(
   );
 }
 
+export function deriveScopedMaterialFacts(
+  text: MaterialTextInput,
+  metadata: Readonly<Record<string, unknown>>,
+  eventInstances: readonly CanonicalEventInstance[],
+): ScopedNewsMaterialFact[] {
+  if (eventInstances.length !== 1) return [];
+  const eventInstance = eventInstances[0];
+  if (eventInstance === undefined) return [];
+  return deriveMaterialFacts(text, metadata, eventInstance).map(
+    (fact) => ({ ...fact, eventInstance }),
+  );
+}
+
 export function deriveNamedEntities(
-  title: string,
+  text: MaterialTextInput,
   metadata: Readonly<Record<string, unknown>>,
 ): string[] {
+  const sourceText = combinedText(text);
   const explicit = strings(
     metadata.namedEntities ?? metadata.entities,
   );
   const derived = ENTITY_PATTERNS.flatMap(([name, pattern]) =>
-    pattern.test(title) ? [name] : [],
+    pattern.test(sourceText) ? [name] : [],
   );
-  const capitalizedPhrases = [
-    ...title.matchAll(
+  const rawPredicateEntities = sentences(text).flatMap((sentence) => {
+    const active =
+      /^(?<subject>[A-Za-z0-9&.,'’-]+(?:\s+[A-Za-z0-9&.,'’-]+){0,5})\s+(?:propos(?:e|es|ed)|introduc(?:e|es|ed)|adopt(?:s|ed)?|approv(?:e|es|ed)|launch(?:es|ed)?|releas(?:e|es|ed)|unveil(?:s|ed)?|publish(?:es|ed)|issu(?:e|es|ed)|confirm(?:s|ed)?|announc(?:e|es|ed)|detail(?:s|ed)?|updat(?:es|ed)|report(?:s|ed)|says?|said)\b/i.exec(
+        sentence,
+      )?.groups?.subject;
+    const passive =
+      /\b(?:proposed|introduced|adopted|approved|launched|released|unveiled|published|issued)\s+by\s+(?<subject>[A-Z][A-Za-z0-9&,'’-]*(?:\s+[A-Z][A-Za-z0-9&,'’-]*){0,4})/.exec(
+        sentence,
+      )?.groups?.subject;
+    return [active, passive]
+      .filter((value): value is string => value !== undefined)
+      .filter(
+        (value) =>
+          !GENERIC_INSTANCE_SUBJECTS.has(
+            normalizedIdentityPart(value),
+          ),
+      );
+  });
+  const organizationEntities = sentences(text).flatMap((sentence) =>
+    [
+      /\b(?:[A-Z][A-Za-z0-9&.-]*\s+){1,4}(?:Agency|Institute|University|Department|Commission|Administration|Company|Laboratory|Lab)\b/g,
+      /\b(?:[A-Z0-9&.-]+\s+){1,4}(?:AGENCY|INSTITUTE|UNIVERSITY|DEPARTMENT|COMMISSION|ADMINISTRATION|COMPANY|LABORATORY|LAB)\b/g,
+    ].flatMap((pattern) =>
+      [...sentence.matchAll(pattern)].flatMap(
+        (match) => match[0] ?? [],
+      ),
+    ),
+  );
+  const predicateEntities = rawPredicateEntities.map((entity) => {
+    const normalized = normalizedIdentityPart(entity);
+    return [...organizationEntities]
+      .filter((organization) =>
+        normalized.endsWith(
+          normalizedIdentityPart(organization),
+        ),
+      )
+      .sort(
+        (left, right) =>
+          normalizedIdentityPart(right).length -
+          normalizedIdentityPart(left).length,
+      )[0] ?? entity;
+  });
+  const capitalizedPhrases = sentences(text).flatMap((sentence) => [
+    ...sentence.matchAll(
       /\b[A-Z][A-Za-z0-9&.-]*(?:\s+[A-Z][A-Za-z0-9&.-]*){1,4}\b/g,
     ),
-  ].flatMap((match) => match[0] ?? []);
-  return unique([...explicit, ...derived, ...capitalizedPhrases]).sort((left, right) =>
+  ]).flatMap((match) => match[0] ?? []);
+  return unique([
+    ...explicit,
+    ...derived,
+    ...predicateEntities,
+    ...organizationEntities,
+    ...capitalizedPhrases,
+  ]).sort((left, right) =>
     left.localeCompare(right),
   );
 }
@@ -442,11 +975,17 @@ export function deriveNewsSignals(input: {
   primaryDocumentUrl: string | null;
   primaryDocumentUrls: string[];
   eventFamilies: string[];
+  eventInstances: CanonicalEventInstance[];
   materialFacts: NewsMaterialFact[];
+  scopedMaterialFacts: ScopedNewsMaterialFact[];
   metadata: Record<string, unknown>;
 } {
   const sectionEligibility = [...new Set(input.sectionEligibility)];
-  const namedEntities = deriveNamedEntities(input.title, input.metadata);
+  const materialText = [input.title, input.abstract, input.content];
+  const namedEntities = deriveNamedEntities(
+    materialText,
+    input.metadata,
+  );
   const primaryDocumentUrl = derivePrimaryDocumentUrl(
     input.kind,
     input.originalUrl,
@@ -456,10 +995,20 @@ export function deriveNewsSignals(input: {
     ...strings(input.metadata.primaryDocumentUrls),
     ...(primaryDocumentUrl === null ? [] : [primaryDocumentUrl]),
   ]).sort((left, right) => left.localeCompare(right));
-  const materialText = [input.title, input.abstract, input.content];
   const eventFamilies = deriveEventFamilies(
     materialText,
     input.metadata,
+  );
+  const eventInstances = deriveCanonicalEventInstances(
+    materialText,
+    input.metadata,
+    namedEntities,
+    eventFamilies,
+  );
+  const scopedMaterialFacts = deriveScopedMaterialFacts(
+    materialText,
+    input.metadata,
+    eventInstances,
   );
   const materialFacts = deriveMaterialFacts(
     materialText,
@@ -471,7 +1020,9 @@ export function deriveNewsSignals(input: {
     primaryDocumentUrl,
     primaryDocumentUrls,
     eventFamilies,
+    eventInstances,
     materialFacts,
+    scopedMaterialFacts,
     metadata: {
       ...input.metadata,
       primarySection: derivePrimarySection(

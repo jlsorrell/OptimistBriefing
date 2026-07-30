@@ -1,9 +1,13 @@
 import type { Item } from "../contracts/editorial";
 import {
+  CanonicalEventInstanceSchema,
   EditorialSignalRecordSchema,
   NewsMaterialFactSchema,
+  ScopedNewsMaterialFactSchema,
+  type CanonicalEventInstance,
   type EditorialSignalRecord,
   type NewsMaterialFact,
+  type ScopedNewsMaterialFact,
 } from "../sources/types";
 
 function stringArray(value: unknown): string[] {
@@ -16,6 +20,24 @@ function materialFacts(value: unknown): NewsMaterialFact[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((entry): NewsMaterialFact[] => {
     const parsed = NewsMaterialFactSchema.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+function eventInstances(value: unknown): CanonicalEventInstance[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): CanonicalEventInstance[] => {
+    const parsed = CanonicalEventInstanceSchema.safeParse(entry);
+    return parsed.success ? [parsed.data] : [];
+  });
+}
+
+function scopedMaterialFacts(
+  value: unknown,
+): ScopedNewsMaterialFact[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): ScopedNewsMaterialFact[] => {
+    const parsed = ScopedNewsMaterialFactSchema.safeParse(entry);
     return parsed.success ? [parsed.data] : [];
   });
 }
@@ -36,8 +58,16 @@ export function editorialSignalKey(
     signal.namedEntities.join("\u001f"),
     signal.primaryDocumentUrls.join("\u001f"),
     signal.eventFamilies.join("\u001f"),
+    ...signal.eventInstances.map(
+      (instance) =>
+        `${instance.subject}:${instance.domain}:${instance.object}`,
+    ),
     ...signal.materialFacts.map(
       (fact) => `${fact.kind}:${fact.key}:${fact.value}`,
+    ),
+    ...signal.scopedMaterialFacts.map(
+      (fact) =>
+        `${fact.eventInstance.subject}:${fact.eventInstance.domain}:${fact.eventInstance.object}:${fact.kind}:${fact.key}:${fact.value}`,
     ),
   ].join("\u0000");
 }
@@ -67,6 +97,14 @@ export function editorialSignals(item: Item): EditorialSignalRecord[] {
       : []),
     ...(item.kind === "document" ? [item.canonicalUrl] : []),
   ];
+  const itemEventInstances = eventInstances(
+    item.metadata.eventInstances,
+  );
+  const itemMaterialFacts = materialFacts(item.metadata.materialFacts);
+  const itemScopedFacts = scopedMaterialFacts(
+    item.metadata.scopedMaterialFacts,
+  );
+  const boundFacts = itemScopedFacts;
   return item.sourceRefs
     .map((source) =>
       EditorialSignalRecordSchema.parse({
@@ -87,7 +125,9 @@ export function editorialSignals(item: Item): EditorialSignalRecord[] {
         namedEntities: stringArray(item.metadata.namedEntities),
         primaryDocumentUrls,
         eventFamilies: stringArray(item.metadata.eventFamilies),
-        materialFacts: materialFacts(item.metadata.materialFacts),
+        eventInstances: itemEventInstances,
+        materialFacts: itemMaterialFacts,
+        scopedMaterialFacts: boundFacts,
       }),
     )
     .sort((left, right) =>

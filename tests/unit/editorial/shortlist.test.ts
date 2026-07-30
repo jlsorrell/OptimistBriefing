@@ -183,16 +183,54 @@ describe("shortlist", () => {
       section: "ai_policy",
       primaryDocumentUrl: "https://agency.gov/framework",
       eventFamilies: ["guidance-rule"],
+      eventInstances: [
+        {
+          subject: "evaluation-agency",
+          domain: "governance-event",
+          object: "secure-ai-framework",
+        },
+      ],
       materialFacts: [
         { kind: "status", key: "event-status", value: "adopted" },
+      ],
+      scopedMaterialFacts: [
+        {
+          kind: "status",
+          key: "event-status",
+          value: "adopted",
+          eventInstance: {
+            subject: "evaluation-agency",
+            domain: "governance-event",
+            object: "secure-ai-framework",
+          },
+        },
       ],
     });
     const changed = item("changed", "ai_policy", "article", {
       section: "ai_policy",
       primaryDocumentUrl: "https://agency.gov/evaluation-rule",
       eventFamilies: ["guidance-rule"],
+      eventInstances: [
+        {
+          subject: "evaluation-agency",
+          domain: "governance-event",
+          object: "evaluation-rule",
+        },
+      ],
       materialFacts: [
         { kind: "status", key: "event-status", value: "adopted" },
+      ],
+      scopedMaterialFacts: [
+        {
+          kind: "status",
+          key: "event-status",
+          value: "adopted",
+          eventInstance: {
+            subject: "evaluation-agency",
+            domain: "governance-event",
+            object: "evaluation-rule",
+          },
+        },
       ],
     });
     const changedPreviously = item(
@@ -203,11 +241,30 @@ describe("shortlist", () => {
         section: "ai_policy",
         primaryDocumentUrl: "https://agency.gov/evaluation-rule",
         eventFamilies: ["guidance-rule"],
+        eventInstances: [
+          {
+            subject: "evaluation-agency",
+            domain: "governance-event",
+            object: "evaluation-rule",
+          },
+        ],
         materialFacts: [
           {
             kind: "status",
             key: "event-status",
             value: "proposed",
+          },
+        ],
+        scopedMaterialFacts: [
+          {
+            kind: "status",
+            key: "event-status",
+            value: "proposed",
+            eventInstance: {
+              subject: "evaluation-agency",
+              domain: "governance-event",
+              object: "evaluation-rule",
+            },
           },
         ],
       },

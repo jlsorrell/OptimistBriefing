@@ -68,10 +68,28 @@ export const RawResearchCandidateSchema = RawItemSchema.extend({
 });
 
 export const NewsMaterialFactSchema = z.object({
-  kind: z.enum(["status", "number", "date"]),
+  kind: z.enum(["status", "number", "date", "amount"]),
   key: z.string().min(1),
   value: z.string().min(1),
 });
+
+export const CanonicalEventDomainSchema = z.enum([
+  "funding-event",
+  "product-event",
+  "governance-event",
+  "evaluation-event",
+]);
+
+export const CanonicalEventInstanceSchema = z.object({
+  subject: z.string().min(1),
+  domain: CanonicalEventDomainSchema,
+  object: z.string().min(1),
+});
+
+export const ScopedNewsMaterialFactSchema =
+  NewsMaterialFactSchema.extend({
+    eventInstance: CanonicalEventInstanceSchema,
+  });
 
 export const EditorialSignalRecordSchema = z.object({
   itemId: z.string().min(1),
@@ -86,7 +104,9 @@ export const EditorialSignalRecordSchema = z.object({
   namedEntities: z.array(z.string().min(1)),
   primaryDocumentUrls: z.array(z.string().url()),
   eventFamilies: z.array(z.string().min(1)),
+  eventInstances: z.array(CanonicalEventInstanceSchema),
   materialFacts: z.array(NewsMaterialFactSchema),
+  scopedMaterialFacts: z.array(ScopedNewsMaterialFactSchema),
 });
 
 export const RawNewsCandidateSchema = RawItemSchema.extend({
@@ -98,6 +118,10 @@ export const RawNewsCandidateSchema = RawItemSchema.extend({
   primaryDocumentUrls: z.array(z.string().url()).default([]),
   eventFamilies: z.array(z.string().min(1)).default([]),
   materialFacts: z.array(NewsMaterialFactSchema).default([]),
+  eventInstances: z.array(CanonicalEventInstanceSchema).optional(),
+  scopedMaterialFacts: z
+    .array(ScopedNewsMaterialFactSchema)
+    .optional(),
 }).superRefine((candidate, context) => {
   if (
     candidate.canCorroborateFacts &&
@@ -140,6 +164,15 @@ export type RawResearchCandidate = z.infer<
 >;
 export type RawNewsCandidate = z.infer<typeof RawNewsCandidateSchema>;
 export type NewsMaterialFact = z.infer<typeof NewsMaterialFactSchema>;
+export type CanonicalEventDomain = z.infer<
+  typeof CanonicalEventDomainSchema
+>;
+export type CanonicalEventInstance = z.infer<
+  typeof CanonicalEventInstanceSchema
+>;
+export type ScopedNewsMaterialFact = z.infer<
+  typeof ScopedNewsMaterialFactSchema
+>;
 export type EditorialSignalRecord = z.infer<
   typeof EditorialSignalRecordSchema
 >;

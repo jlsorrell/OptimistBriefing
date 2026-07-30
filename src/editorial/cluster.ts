@@ -10,8 +10,10 @@ import {
   type SourceRef,
 } from "../contracts/editorial";
 import {
+  CanonicalEventInstanceSchema,
   EditorialSignalRecordSchema,
   NewsMaterialFactSchema,
+  type CanonicalEventInstance,
   type EditorialSignalRecord,
   type NewsMaterialFact,
 } from "../sources/types";
@@ -76,6 +78,7 @@ export const NewsDevelopmentSchema = z.object({
   materialFacts: z.array(NewsMaterialFactSchema),
   sectionEligibility: z.array(EditionSectionSchema),
   primarySection: NewsSectionSchema,
+  eventInstance: CanonicalEventInstanceSchema.nullable(),
   developmentKey: z.string().min(1),
   repeatable: z.boolean(),
   materialFactsFingerprint: z.string().min(1),
@@ -358,91 +361,61 @@ function primarySection(items: readonly Item[]): NewsDevelopment["primarySection
   )[0] ?? "world";
 }
 
-function eventDomainForFamilies(
-  eventFamilies: readonly string[],
-): string | null {
-  const values = new Set(eventFamilies);
-  const domains = new Set<string>();
-  if (values.has("funding-budget")) domains.add("funding-event");
-  if (values.has("product-release")) domains.add("product-event");
-  if (
-    values.has("legislation") ||
-    values.has("guidance-rule") ||
-    values.has("evaluation-standards")
-  ) {
-    domains.add("governance-event");
-  }
-  if (values.has("evaluation-benchmark")) {
-    domains.add("evaluation-event");
-  }
-  return domains.size === 1 ? [...domains][0] ?? null : null;
-}
-
-function canonicalSubject(
-  entities: readonly string[],
-): string | null {
-  return [...normalizedEntityValues(entities).keys()]
-    .filter((entity) => !GENERIC_IDENTITY_ENTITIES.has(entity))
-    .sort((left, right) => {
-      const leftOrganization =
-        /\b(?:agency|institute|university|department|commission|administration|company|laboratory|lab)\b/.test(
-          left,
-        )
-          ? 1
-          : 0;
-      const rightOrganization =
-        /\b(?:agency|institute|university|department|commission|administration|company|laboratory|lab)\b/.test(
-          right,
-        )
-          ? 1
-          : 0;
-      return (
-        rightOrganization - leftOrganization ||
-        right.split(/\s+/).length - left.split(/\s+/).length ||
-        left.localeCompare(right)
-      );
-    })[0] ?? null;
-}
-
-function stableStructuredIdentity(
+function resolvedEventInstance(
   signals: readonly EditorialSignalRecord[],
-): { subject: string; eventDomain: string } | null {
-  const subjects = new Set(
-    signals
-      .filter((signal) => signal.canCorroborateFacts)
-      .flatMap(
-        (signal) =>
-          canonicalSubject(signal.namedEntities) ?? [],
-      ),
-  );
-  const eventDomain = stableEventDomain(signals);
-  if (subjects.size !== 1 || eventDomain === null) return null;
-  const subject = [...subjects][0];
-  return subject === undefined ? null : { subject, eventDomain };
-}
-
-function stableEventDomain(
-  signals: readonly EditorialSignalRecord[],
-): string | null {
+): CanonicalEventInstance | null {
   const corroboratingSignals = signals.filter(
     (signal) => signal.canCorroborateFacts,
   );
-  const authoritativeSignals = corroboratingSignals.filter(
-    (signal) => signal.sourceRole === "primary",
-  );
-  const candidateSignals =
-    authoritativeSignals.length > 0
-      ? authoritativeSignals
-      : corroboratingSignals;
-  const eventDomains = new Set(
-    candidateSignals.flatMap(
-      (signal) =>
-        eventDomainForFamilies(
-          signal.eventFamilies,
-        ) ?? [],
+  if (
+    corroboratingSignals.length === 0 ||
+    corroboratingSignals.some(
+      (signal) => signal.eventInstances.length !== 1,
+    )
+  ) {
+    return null;
+  }
+  const instances = new Map(
+    corroboratingSignals.flatMap((signal) =>
+      signal.eventInstances.map((instance) => [
+        [
+          instance.subject,
+          instance.domain,
+          instance.object,
+        ].join("\u0000"),
+        instance,
+      ]),
     ),
   );
-  return eventDomains.size === 1 ? [...eventDomains][0] ?? null : null;
+  return instances.size === 1
+    ? [...instances.values()][0] ?? null
+    : null;
+}
+
+function nonRepeatableDomain(
+  signals: readonly EditorialSignalRecord[],
+): string {
+  const families = new Set(
+    signals
+      .filter((signal) => signal.canCorroborateFacts)
+      .flatMap((signal) => signal.eventFamilies),
+  );
+  const domains = new Set<string>();
+  if (families.has("funding-budget")) domains.add("funding-event");
+  if (families.has("product-release")) domains.add("product-event");
+  if (families.has("evaluation-benchmark")) {
+    domains.add("evaluation-event");
+  }
+  if (
+    families.has("legislation") ||
+    families.has("guidance-rule") ||
+    families.has("evaluation-standards")
+  ) {
+    domains.add("governance-event");
+  }
+  return domains.size === 1
+    ? [...domains][0] ?? "unclassified-event"
+    : "unclassified-event";
 }
 
 type FactEvidence = {
@@ -454,8 +427,10 @@ type FactEvidence = {
 
 function reconciledMaterialFacts(
   signals: readonly EditorialSignalRecord[],
-  semantic: string,
+  eventInstance: CanonicalEventInstance | null,
 ): NewsMaterialFact[] {
+  if (eventInstance === null) return [];
+  const semantic = eventInstance.domain;
   const logicalFacts = new Map<
     string,
     Map<string, FactEvidence[]>
@@ -469,7 +444,15 @@ function reconciledMaterialFacts(
       signal.sourceId,
       signal.sourceUrl,
     ].join("\u0000");
-    for (const fact of signal.materialFacts) {
+    for (const scopedFact of signal.scopedMaterialFacts) {
+      if (
+        scopedFact.eventInstance.subject !== eventInstance.subject ||
+        scopedFact.eventInstance.domain !== eventInstance.domain ||
+        scopedFact.eventInstance.object !== eventInstance.object
+      ) {
+        continue;
+      }
+      const { eventInstance: _scope, ...fact } = scopedFact;
       const logicalKey = `${fact.kind}\u0000${fact.key}`;
       const values =
         logicalFacts.get(logicalKey) ??
@@ -498,7 +481,6 @@ function reconciledMaterialFacts(
     .filter(
       ({ kind, logicalKey }) =>
         kind !== "number" ||
-        semantic === "unclassified-event" ||
         (semantic === "governance-event" &&
           logicalKey.includes(
             "\u0000count:governance-instrument:",
@@ -652,23 +634,18 @@ function cluster(items: readonly Item[]): NewsCluster {
       ),
     ),
   ].sort((left, right) => left.localeCompare(right));
-  const structuredIdentity = stableStructuredIdentity(signals);
-  const semantic =
-    stableEventDomain(signals) ?? "unclassified-event";
+  const eventInstance = resolvedEventInstance(signals);
   const section = primarySection(sortedItems);
-  const repeatable =
-    canonicalPrimaryDocuments[0] !== undefined ||
-    structuredIdentity !== null;
+  const repeatable = eventInstance !== null;
   const developmentIdentity =
-    canonicalPrimaryDocuments[0] !== undefined
-      ? `document|${canonicalPrimaryDocuments[0]}`
-      : structuredIdentity === null
-        ? "non-repeatable"
-        : [
-            "subject",
-            structuredIdentity.subject,
-            structuredIdentity.eventDomain,
-          ].join("|");
+    eventInstance === null
+      ? `non-repeatable|${nonRepeatableDomain(signals)}`
+      : [
+          "event-instance",
+          eventInstance.subject,
+          eventInstance.domain,
+          eventInstance.object,
+        ].join("|");
   const developmentKey = `development-${stableHash(
     developmentIdentity,
   )}`;
@@ -677,7 +654,7 @@ function cluster(items: readonly Item[]): NewsCluster {
   // tie-breakers. Context-free dates and numbers never enter this vote.
   const structuredFacts = reconciledMaterialFacts(
     signals,
-    semantic,
+    eventInstance,
   );
   const materialFactsFingerprint = `facts-${stableHash(
     structuredFacts.length > 0
@@ -703,6 +680,7 @@ function cluster(items: readonly Item[]): NewsCluster {
     materialFacts: structuredFacts,
     sectionEligibility,
     primarySection: section,
+    eventInstance,
     developmentKey,
     repeatable,
     materialFactsFingerprint,
