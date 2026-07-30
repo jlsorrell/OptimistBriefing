@@ -685,6 +685,24 @@ it("parses an organization-led headline with an explicit actor and object", () =
   }]);
 });
 
+it("parses an object-led passive headline without an auxiliary", () => {
+  const parsed = parseEventClauses({
+    text: {
+      title:
+        "Frontier Evaluation Standard adopted by Evaluation Agency",
+    },
+    eventFamilies: ["evaluation-standards"],
+    semantics,
+  });
+
+  expect(parsed).toMatchObject([{
+    predicate: "adopted",
+    subject: "evaluation-agency",
+    domain: "governance-event",
+    object: "frontier-evaluation-standard",
+  }]);
+});
+
 it("extracts facts from a clause that names the exact resolved object", () => {
   const parsed = parseEventFactClauses({
     text: {
@@ -753,16 +771,19 @@ Then extend `src/sources/event-clause-parser.ts`:
    in `Agency`, `Institute`, `University`, `Department`, `Commission`,
    `Administration`, `Company`, `Laboratory`, or `Lab`. Keep the existing colon
    headline form.
-3. Match passive, colon headline, organization-led headline, then active.
-4. Reuse the existing bounded field/sentence/clause segmentation for fact
+3. Permit the passive construction's auxiliary (`was`, `is`, `has been`, or
+   `had been`) to be absent only when the clause retains the explicit
+   `<object> <supported passive predicate> by <subject>` ordering.
+4. Match passive, colon headline, organization-led headline, then active.
+5. Reuse the existing bounded field/sentence/clause segmentation for fact
    clauses.
-5. Reject pronoun-led clauses before semantic callbacks.
-6. Call `semantics.eventObjects` with the individual clause. Require exactly one
+6. Reject pronoun-led clauses before semantic callbacks.
+7. Call `semantics.eventObjects` with the individual clause. Require exactly one
    candidate whose `domain` and `object` exactly equal the supplied
    `eventInstance`.
-7. Call `semantics.materialFacts` only after that exact match and return no
+8. Call `semantics.materialFacts` only after that exact match and return no
    record when it produces no facts.
-8. Never use a fact-only clause to create or change a
+9. Never use a fact-only clause to create or change a
    `CanonicalEventInstance`.
 
 Run the focused parser test again. Expected GREEN: all parser tests pass,

@@ -205,6 +205,8 @@ Subject, predicate, and object must be recoverable from the same clause:
   adopted.`
 - Supported organization-led headline form: `Evaluation Agency AI evaluation
   standard adopted.`
+- Supported object-led passive headline form: `100-model safety standard
+  adopted by Evaluation Agency.`
 
 The existing entity and object canonicalization rules may be reused after the
 clause identifies their spans. A generic or missing subject, multiple plausible
