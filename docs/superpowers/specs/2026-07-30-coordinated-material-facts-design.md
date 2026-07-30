@@ -31,7 +31,8 @@ Add a conservative material-coordination boundary. Split at `and` only when:
 
 Recognized material predicates include:
 
-- event identity actions already supported by the parser;
+- event identity actions already supported by the parser, including issuing,
+  announcing, and updating;
 - proposed/introduced;
 - adopted/approved/passed;
 - launched/released/published/unveiled;
@@ -39,7 +40,12 @@ Recognized material predicates include:
 - rejected/blocked;
 - withdrawn/repealed;
 - effective/takes effect;
-- explicit deadline constructions.
+- explicit deadline constructions, including bounded `by DATE` phrases.
+
+Predicate matching is word-bounded so an object name such as `Unblocked Safety
+Rule` cannot manufacture a `blocked` predicate. An explicit organization owner
+may begin with sentence-initial `The` or sentence-internal `the`; organization
+name capitalization and token bounds remain required.
 
 The split happens in the shared bounded segmentation path before event or
 fact-clause parsing. Both parsers therefore see the same clause ownership.
@@ -94,6 +100,12 @@ Tests must be written and observed failing before implementation:
 5. Coordinated distinct actor/object event identities remain ambiguous and
    fail open.
 6. Pronoun-led right clauses do not gain exact-object ownership.
+7. Object names containing predicate substrings, such as `Unblocked Safety
+   Rule`, do not create a coordination boundary.
+8. `issued`, `announced`, and `updated` participate in material coordination.
+9. `by DATE` deadlines participate in forward and reverse coordination.
+10. Sentence-internal `the Evaluation Agency` is recognized as an explicit
+    organization owner without broadening lowercase organization matching.
 
 The focused parser and news-signal suites, full unit suite, Worker suite,
 TypeScript check, production build, and whitespace check must all pass.
@@ -108,4 +120,3 @@ The follow-up is complete only when a fresh reviewer confirms:
 - no new sentence-wide or coreference fallback exists; and
 - the previously open final-review finding is addressed without new
   Critical or Important breakage.
-

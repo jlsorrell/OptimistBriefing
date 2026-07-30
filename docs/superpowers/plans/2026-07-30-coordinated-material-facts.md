@@ -192,11 +192,16 @@ green.
 In `src/sources/event-clause-parser.ts`:
 
 1. Keep the existing supported event-predicate expression unchanged.
-2. Add an internal material-predicate expression covering:
+2. Add word-bounded internal material date and predicate expressions covering:
 
 ```ts
-const MATERIAL_PREDICATE =
-  /(?:propos(?:e|es|ed)|introduc(?:e|es|ed)|adopt(?:s|ed)?|approv(?:e|es|ed)|pass(?:es|ed)?|launch(?:es|ed)?|releas(?:e|es|ed)|publish(?:es|ed)|unveil(?:s|ed)?|delay(?:s|ed)?|postpon(?:e|es|ed)|reject(?:s|ed)?|block(?:s|ed)?|withdraw(?:s|n)?|repeal(?:s|ed)?|effective|takes?\s+effect|deadline(?:\s+is|\s+of)?)/i;
+const MATERIAL_DATE =
+  "(?:20\\d{2}-\\d{2}-\\d{2}|(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\s+\\d{1,2}(?:,\\s+20\\d{2})?)";
+
+const MATERIAL_PREDICATE = new RegExp(
+  `\\b(?:propos(?:e|es|ed)|introduc(?:e|es|ed)|adopt(?:s|ed)?|approv(?:e|es|ed)|pass(?:es|ed)?|launch(?:es|ed)?|releas(?:e|es|ed)|publish(?:es|ed)|unveil(?:s|ed)?|issu(?:e|es|ed)|announc(?:e|es|ed)|updat(?:e|es|ed)|delay(?:s|ed)?|postpon(?:e|es|ed)|reject(?:s|ed)?|block(?:s|ed)?|withdraw(?:s|n)?|repeal(?:s|ed)?|effective|takes?\\s+effect|deadline(?:\\s+is|\\s+of)?|by\\s+${MATERIAL_DATE})\\b`,
+  "i",
+);
 ```
 
 3. At each candidate `and` boundary, require `MATERIAL_PREDICATE` on both the
@@ -212,6 +217,10 @@ const MATERIAL_PREDICATE =
    the original clause, except existing unsafe-coordination rejection remains
    in force.
 7. Apply the existing 16-candidate cap after material coordination.
+
+The optional determiner for an explicit organization owner must accept exactly
+`The` or `the`; the following organization phrase retains its existing
+capitalization and five-token bound.
 
 Do not infer whether a generic phrase refers to the resolved event. Exact
 domain/object matching remains the semantic callback's responsibility.
@@ -255,6 +264,40 @@ git commit -m "fix: isolate coordinated material facts"
 
 ---
 
+## Final Review Amendment
+
+The user approved this amendment after final review found that the original
+literal regex did not fully express the approved design.
+
+Before the final fix wave, add failing parser and real-semantics regressions
+for:
+
+1. `Unblocked Safety Rule` not matching the `blocked` predicate or causing a
+   false split; coordinated distinct objects must remain ambiguous.
+2. Each missing supported action—`issued`, `announced`, and `updated`—on the
+   unrelated side of an exact-object material clause.
+3. Forward and reverse `by July 1, 2027` deadline ownership.
+4. Reverse coordination whose explicit right owner begins with sentence-
+   internal lowercase `the Evaluation Agency`.
+
+Observe the tests fail before implementation. Then:
+
+- replace the unbounded material regex with the word-bounded
+  `MATERIAL_DATE`/`MATERIAL_PREDICATE` definitions above;
+- accept `[Tt]he` only as the optional organization-owner determiner;
+- preserve the existing organization capitalization/token bound and all
+  previous coordination behavior.
+
+Run the focused parser/news-signal/pipeline suites and the complete verification
+matrix. Append the final fix evidence to the task report and commit with:
+
+```bash
+git add src/sources/event-clause-parser.ts tests/unit/sources/event-clause-parser.test.ts tests/unit/sources/news-signals.test.ts
+git commit -m "fix: bound coordinated material grammar"
+```
+
+---
+
 ## Review Gate
 
 A fresh reviewer must inspect the task diff and verdict the previously open
@@ -262,4 +305,3 @@ coordination finding. Critical or Important findings enter the normal
 subagent-driven fix loop. After a clean review and fresh full verification,
 mark the parent Event Clause Parser Recovery and original morning-briefing Task
 7 complete, referencing this follow-up commit.
-
