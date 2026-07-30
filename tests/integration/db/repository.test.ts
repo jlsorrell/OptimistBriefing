@@ -819,6 +819,44 @@ describe("D1BriefingRepository", () => {
     });
   });
 
+  it("prunes only diagnostic events while preserving durable audit and monthly usage history", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind("old-diagnostic", null, "diagnostic_log", "{}", "2026-05-01T00:00:00.000Z"),
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind("old-audit", null, "source_updated", "{}", "2026-05-01T00:00:00.000Z"),
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        "old-model-usage",
+        null,
+        "model_usage",
+        JSON.stringify({
+          provider: "openai",
+          model: "gpt-test",
+          inputTokens: 10,
+          outputTokens: 2,
+          embeddingCount: 0,
+          unitPriceUsd: 0.001,
+          estimatedCostUsd: 0.012,
+        }),
+        "2026-05-01T00:00:00.000Z",
+      ),
+    ]);
+
+    const report = await repo.pruneExpiredData("2026-07-29T10:00:00.000Z");
+    expect(report.deletedDiagnosticLogs).toBe(1);
+    expect((await env.DB.prepare(
+      "SELECT event_type FROM audit_events ORDER BY event_type",
+    ).all<{ event_type: string }>()).results).toEqual([
+      { event_type: "model_usage" },
+      { event_type: "source_updated" },
+    ]);
+  });
+
   it("persists item scores and summaries and searches the archive through FTS", async () => {
     const repo = new D1BriefingRepository(env.DB);
     const item = fixtureItem("searchable");

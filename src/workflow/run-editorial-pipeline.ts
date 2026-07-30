@@ -519,6 +519,16 @@ export type PipelineProviders = {
   assessment: ModelProvider;
 };
 
+export type PipelineRuntime = {
+  providers: PipelineProviders;
+  budgetPolicy?: BudgetPolicy;
+};
+
+export type PipelineRuntimeFactory = (input: {
+  runId: string;
+  editionDate: string;
+}) => Promise<PipelineRuntime>;
+
 export type ProductionPipelineContextOptions = {
   editionDate: string;
   runId: string;
@@ -722,6 +732,27 @@ function selectionReasons(item: Item): readonly string[] {
   );
 }
 
+function applyResearchBudget(
+  items: readonly Item[],
+  policy: BudgetPolicy | undefined,
+): Item[] {
+  if (policy === undefined) return [...items];
+  const maximumRadar = policy.state === "hard_stop"
+    ? 0
+    : policy.state === "degraded"
+      ? 1
+      : READER_PROFILE.sectionBudgets.researchRadar;
+  const maximumFeatured = READER_PROFILE.sectionBudgets.featuredResearch;
+  let researchIndex = 0;
+  return items.flatMap((item) => {
+    if (item.kind !== "paper" && item.kind !== "blog") return [item];
+    const tier = researchIndex < maximumFeatured ? "featured" : "radar";
+    researchIndex += 1;
+    if (researchIndex > maximumFeatured + maximumRadar) return [];
+    return [withWorkflowPayload(item, { researchTier: tier })];
+  });
+}
+
 export function createProductionPipelineContext(
   options: ProductionPipelineContextOptions,
 ): PipelineContext {
@@ -744,13 +775,14 @@ export function createProductionPipelineContext(
       ? {}
       : { persistItems: options.persistItems }),
     enrich: async (items) => {
-      if (items.length === 0) return [];
+      const budgetedItems = applyResearchBudget(items, options.budgetPolicy);
+      if (budgetedItems.length === 0) return [];
       const profileTexts = profileEmbeddingTexts();
       const vectors = z.array(
         z.array(z.number().finite()).min(1).max(4_096),
-      ).length(items.length + profileTexts.length).parse(
+      ).length(budgetedItems.length + profileTexts.length).parse(
         await options.providers.summary.embed([
-          ...items.map(itemEmbeddingText),
+          ...budgetedItems.map(itemEmbeddingText),
           ...profileTexts,
         ]),
       );
@@ -761,8 +793,8 @@ export function createProductionPipelineContext(
       ) {
         throw new Error("INVALID_EMBEDDING_BATCH");
       }
-      const profileVectors = vectors.slice(items.length);
-      return items.map((candidate, index) => {
+      const profileVectors = vectors.slice(budgetedItems.length);
+      return budgetedItems.map((candidate, index) => {
         const item = WorkflowItemSchema.parse(candidate);
         const embedding = vectors[index];
         if (embedding === undefined) throw new Error("MISSING_ITEM_EMBEDDING");
@@ -917,11 +949,20 @@ export function createProductionPipelineContext(
         preferences,
         budgets,
       );
-      const ordered = selected.morningBrief.map((candidate) =>
+      const morning = selected.morningBrief.map((candidate) =>
         "representativeItem" in candidate
           ? { id: candidate.id, section: candidate.primarySection }
           : { id: candidate.id, section: "research" as const }
       );
+      const morningIds = new Set(morning.map(({ id }) => id));
+      const radar = selected.researchRadar
+        .filter((item) =>
+          workflowPayload(item).researchTier === "radar" &&
+          !morningIds.has(item.id)
+        )
+        .slice(0, Math.max(0, 8 - morning.length))
+        .map((item) => ({ id: item.id, section: "research_radar" as const }));
+      const ordered = [...morning, ...radar];
       const byId = new Map(parsed.map((item) => [item.id, item]));
       return ordered.map(({ id, section }) => {
         const item = byId.get(id);
@@ -945,7 +986,12 @@ export function createProductionPipelineContext(
               options.providers.summary,
               options.budgetPolicy === undefined
                 ? {}
-                : { maxOutputTokens: options.budgetPolicy.featuredSummaryTokens },
+                : {
+                    maxOutputTokens:
+                      item.metadata.section === "research_radar"
+                        ? options.budgetPolicy.radarSummaryTokens
+                        : options.budgetPolicy.featuredSummaryTokens,
+                  },
             ),
           };
         } catch (error) {
@@ -1061,16 +1107,32 @@ export function createD1ProductionPipelineContext(
   });
 }
 
-export function createD1WorkflowLauncher(db: D1Database, providers: PipelineProviders): {
+export function createD1WorkflowLauncher(
+  db: D1Database,
+  runtimeSource: PipelineProviders | PipelineRuntimeFactory,
+): {
   start(input: { editionDate: string; actorEmail?: string }): Promise<{ runId: string }>;
   resume(input: { runId: string; actorEmail?: string }): Promise<void>;
 } {
   const store = new D1PipelineStore(db);
+  const runtime = async (runId: string, editionDate: string): Promise<PipelineRuntime> =>
+    typeof runtimeSource === "function"
+      ? runtimeSource({ runId, editionDate })
+      : { providers: runtimeSource };
   return {
     async start(input) {
       const runId = crypto.randomUUID();
       try {
-        await runEditorialPipeline(createD1ProductionPipelineContext(store, input.editionDate, runId, providers));
+        const configured = await runtime(runId, input.editionDate);
+        await runEditorialPipeline(createD1ProductionPipelineContext(
+          store,
+          input.editionDate,
+          runId,
+          configured.providers,
+          configured.budgetPolicy === undefined
+            ? {}
+            : { budgetPolicy: configured.budgetPolicy },
+        ));
       } catch (error) {
         await store.audit(
           error instanceof WorkflowRunAlreadyExistsError ? null : runId,
@@ -1093,7 +1155,16 @@ export function createD1WorkflowLauncher(db: D1Database, providers: PipelineProv
         throw new WorkflowResumeUnavailableError();
       }
       await store.audit(run.id, "manual_run_resumed", input.actorEmail);
-      await runEditorialPipeline(createD1ProductionPipelineContext(store, run.editionDate, run.id, providers));
+      const configured = await runtime(run.id, run.editionDate);
+      await runEditorialPipeline(createD1ProductionPipelineContext(
+        store,
+        run.editionDate,
+        run.id,
+        configured.providers,
+        configured.budgetPolicy === undefined
+          ? {}
+          : { budgetPolicy: configured.budgetPolicy },
+      ));
     },
   };
 }
@@ -1139,16 +1210,31 @@ async function checkpoint<T>(
   execute: () => Promise<unknown>,
   beforeSave?: (output: T) => Promise<void>,
 ): Promise<T> {
-  // The read belongs immediately before every step so a resumed run never repeats it.
-  await context.store.getRun(context.runId);
-  const completed = await context.store.readCheckpoint(context.runId, step);
-  if (completed) {
-    const artifact = await context.store.readArtifact(context.runId, step);
-    if (artifact === null) throw new Error(`MISSING_CHECKPOINT_ARTIFACT:${step}`);
-    return outputSchema.parse(artifact.output);
-  }
-
   const executeCheckpoint = async (): Promise<T> => {
+    // Reconcile inside the retried Workflow operation so a retry after the
+    // checkpoint write cannot repeat external/provider work.
+    const storedBefore = await context.store.getRun(context.runId) ?? run;
+    const completed = await context.store.readCheckpoint(context.runId, step);
+    if (completed) {
+      const artifact = await context.store.readArtifact(context.runId, step);
+      if (artifact === null) throw new Error(`MISSING_CHECKPOINT_ARTIFACT:${step}`);
+      const storedStepIndex = storedBefore.currentStep === null
+        ? -1
+        : PIPELINE_STEPS.indexOf(storedBefore.currentStep);
+      if (storedStepIndex < PIPELINE_STEPS.indexOf(step)) {
+        await context.store.saveRun({
+          ...storedBefore,
+          status: "running",
+          currentStep: step,
+          retryable: false,
+          estimatedCostUsd:
+            storedBefore.estimatedCostUsd + artifact.estimatedCostUsd,
+          updatedAt: context.now(),
+          failureCode: null,
+        });
+      }
+      return outputSchema.parse(artifact.output);
+    }
     const attempt = await context.store.beginAttempt(context.runId, step);
     const startedAt = Date.parse(context.now());
     let output: T;

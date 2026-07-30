@@ -16,7 +16,7 @@ export const ProviderCallRecordSchema = z.object({
 export type ProviderCallRecord = z.infer<typeof ProviderCallRecordSchema>;
 
 const CostLedgerConfigSchema = z.object({
-  monthlyLimitUsd: MoneySchema.positive(),
+  monthlyLimitUsd: MoneySchema.positive().max(30),
   unitPricesUsd: z.record(z.string().min(1).max(200), MoneySchema.positive()),
 }).strict();
 
@@ -57,7 +57,11 @@ export class CostLedger {
     const unitPriceUsd = this.#config.unitPricesUsd[usage.model];
     if (unitPriceUsd === undefined) throw new Error(`UNBUDGETED_MODEL:${usage.model}`);
     const record = ProviderCallRecordSchema.parse({
-      ...usage,
+      provider: usage.provider,
+      model: usage.model,
+      inputTokens: usage.inputTokens,
+      outputTokens: usage.outputTokens,
+      embeddingCount: usage.embeddingCount,
       unitPriceUsd,
       estimatedCostUsd: (usage.inputTokens + usage.outputTokens + usage.embeddingCount) * unitPriceUsd,
     });

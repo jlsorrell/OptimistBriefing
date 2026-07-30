@@ -61,6 +61,7 @@ export const WorkflowItemPayloadSchema = z.object({
   development: NewsDevelopmentSchema.strict().optional(),
   developmentScore: NewsScoreSchema.strict().optional(),
   section: EditionSectionSchema.optional(),
+  researchTier: z.enum(["featured", "radar"]).optional(),
   selectionReasons: z.array(z.string().min(1).max(300)).max(16).optional(),
 }).strict();
 

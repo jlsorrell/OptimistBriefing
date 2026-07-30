@@ -1877,7 +1877,7 @@ export class D1BriefingRepository implements BriefingRepository {
         .prepare(
           `SELECT COUNT(*) AS count
           FROM audit_events
-          WHERE created_at <= ?`,
+          WHERE created_at <= ? AND event_type = 'diagnostic_log'`,
         )
         .bind(diagnosticCutoff),
       this.db
@@ -1907,7 +1907,7 @@ export class D1BriefingRepository implements BriefingRepository {
       this.db
         .prepare(
           `DELETE FROM audit_events
-          WHERE created_at <= ?`,
+          WHERE created_at <= ? AND event_type = 'diagnostic_log'`,
         )
         .bind(diagnosticCutoff),
     ]);

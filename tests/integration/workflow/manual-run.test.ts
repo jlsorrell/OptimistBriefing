@@ -471,6 +471,37 @@ describe("manual editorial run", () => {
     expect(delegated).toEqual(PIPELINE_STEPS);
   });
 
+  it("reconciles a saved D1 checkpoint inside a retried workflow step without repeating provider work", async () => {
+    let synthesisCalls = 0;
+    let failRunSave = true;
+    const context = fixturePipelineContext({
+      synthesize: async (items) => {
+        synthesisCalls += 1;
+        return items.map((item) => ({ item, summary: fixtureSummary(item) }));
+      },
+      checkpointExecutor: async (_checkpoint, execute) => {
+        try {
+          return await execute();
+        } catch {
+          return execute();
+        }
+      },
+    });
+    const saveRun = context.store.saveRun.bind(context.store);
+    context.store.saveRun = async (run) => {
+      if (run.currentStep === "synthesize" && failRunSave) {
+        failRunSave = false;
+        throw new Error("TRANSIENT_RUN_SAVE_FAILURE");
+      }
+      await saveRun(run);
+    };
+
+    await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+      status: "published",
+    });
+    expect(synthesisCalls).toBe(1);
+  });
+
   it("publishes a source-partial edition only when research, nonlocal news, and DMV coverage remain", async () => {
     const context = fixturePipelineContext({
       runId: "run-partial",
@@ -913,6 +944,110 @@ describe("manual editorial run", () => {
     expect(new Set(shortlisted.map((item) => item.metadata.section))).toEqual(
       new Set(["research", "world", "dmv"]),
     );
+  });
+
+  it("constructs manual-run providers and budget policy from the run-scoped runtime factory", async () => {
+    const factoryCalls: Array<{ runId: string; editionDate: string }> = [];
+    const launcher = createD1WorkflowLauncher(
+      env.DB,
+      (async (input: { runId: string; editionDate: string }) => {
+        factoryCalls.push(input);
+        return {
+          providers: {
+            summary: new FakeModelProvider(),
+            assessment: new FakeModelProvider(),
+          },
+          budgetPolicy: {
+            state: "hard_stop" as const,
+            radarSummaryTokens: 0,
+            featuredSummaryTokens: 900,
+          },
+        };
+      }) as unknown as Parameters<typeof createD1WorkflowLauncher>[1],
+    );
+
+    const { runId } = await launcher.start({ editionDate: "2033-03-01" });
+    expect(factoryCalls).toEqual([{ runId, editionDate: "2033-03-01" }]);
+  });
+
+  it("removes hard-stop radar before assessment and gives degraded radar only 120 summary tokens", async () => {
+    const candidates = [
+      rawResearchCandidate("2607.20001", "Interpretability study Alpha for oversight", 100),
+      rawResearchCandidate("2607.20002", "Interpretability study Beta for oversight", 80),
+      rawResearchCandidate("2607.20003", "Interpretability study Gamma for oversight", 60),
+      rawResearchCandidate("2607.20004", "Interpretability study Radar for oversight", 1),
+    ];
+    const assessment = {
+      technicalQuality: 0.9,
+      novelty: 0.8,
+      strengths: ["The abstract describes a concrete method."],
+      limitations: ["Only abstract evidence was supplied."],
+      rationale: "The available abstract supports a strong assessment.",
+      accessLevel: "abstract" as const,
+    };
+    const hardAssessment = new FakeModelProvider({
+      generatedObjects: Array.from({ length: 3 }, () => assessment),
+    });
+    const hard = createProductionPipelineContext({
+      editionDate: "2033-03-02",
+      runId: "hard-budget",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new GroundedProductionProvider(),
+        assessment: hardAssessment,
+      },
+      collectCandidates: async () => candidates,
+      budgetPolicy: {
+        state: "hard_stop",
+        radarSummaryTokens: 0,
+        featuredSummaryTokens: 900,
+      },
+    });
+    const hardNormalized = await hard.normalize(await hard.collect());
+    const hardEnriched = await hard.enrich(hardNormalized);
+    const hardPrefiltered = await hard.prefilter(hardEnriched);
+    await hard.assess(hardPrefiltered);
+    expect(hardPrefiltered).toHaveLength(3);
+    expect(hardAssessment.generateRequests).toHaveLength(3);
+
+    const summary = new GroundedProductionProvider();
+    summary.failNextSummary = false;
+    const degraded = createProductionPipelineContext({
+      editionDate: "2033-03-03",
+      runId: "degraded-budget",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary,
+        assessment: new FakeModelProvider({
+          generatedObjects: Array.from({ length: 4 }, () => assessment),
+        }),
+      },
+      collectCandidates: async () => candidates,
+      budgetPolicy: {
+        state: "degraded",
+        radarSummaryTokens: 120,
+        featuredSummaryTokens: 900,
+      },
+    });
+    const normalized = await degraded.normalize(await degraded.collect());
+    const enriched = await degraded.enrich(normalized);
+    const prefiltered = await degraded.prefilter(enriched);
+    const assessed = await degraded.assess(prefiltered);
+    const scored = await degraded.score(assessed);
+    const clustered = await degraded.cluster(scored);
+    const shortlisted = await degraded.shortlist(clustered);
+    await degraded.synthesize(shortlisted);
+
+    expect(shortlisted.map((item) => item.metadata.section)).toEqual([
+      "research",
+      "research",
+      "research",
+      "research_radar",
+    ]);
+    expect(summary.generateRequests.map(({ maxOutputTokens }) => maxOutputTokens))
+      .toEqual([900, 900, 900, 120]);
   });
 
   it("keeps higher-ranked technology and AI policy in the authoritative morning brief and excludes research radar", async () => {

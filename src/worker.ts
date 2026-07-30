@@ -3,9 +3,11 @@ import { createApp } from "./api/app";
 import { internalErrorResponse } from "./api/errors";
 import { D1BriefingRepository } from "./db/d1-repository";
 import { createD1WorkflowLauncher } from "./workflow/run-editorial-pipeline";
-import { OpenAIModelProvider } from "./models/openai-provider";
 import { shouldRunAt } from "./workflow/schedule";
-import type { RunParams } from "./workflow/daily-briefing-workflow";
+import {
+  createBudgetedPipelineRuntimeFactory,
+  type RunParams,
+} from "./workflow/daily-briefing-workflow";
 export { DailyBriefingWorkflow } from "./workflow/daily-briefing-workflow";
 
 export interface Env {
@@ -35,18 +37,10 @@ export default {
           audience: env.CLOUDFLARE_ACCESS_AUDIENCE,
           allowedEmails: parseAllowedEmails(env.ALLOWED_EMAILS),
         }),
-        workflow: createD1WorkflowLauncher(env.DB, {
-          summary: new OpenAIModelProvider({
-            apiKey: requiredBinding(env.OPENAI_API_KEY, "OPENAI_API_KEY"),
-            generationModel: requiredBinding(env.SUMMARY_MODEL, "SUMMARY_MODEL"),
-            embeddingModel: requiredBinding(env.EMBEDDING_MODEL, "EMBEDDING_MODEL"),
-          }),
-          assessment: new OpenAIModelProvider({
-            apiKey: requiredBinding(env.OPENAI_API_KEY, "OPENAI_API_KEY"),
-            generationModel: requiredBinding(env.ASSESSMENT_MODEL, "ASSESSMENT_MODEL"),
-            embeddingModel: requiredBinding(env.EMBEDDING_MODEL, "EMBEDDING_MODEL"),
-          }),
-        }),
+        workflow: createD1WorkflowLauncher(
+          env.DB,
+          createBudgetedPipelineRuntimeFactory(env),
+        ),
       });
       return app.fetch(request);
     } catch {
@@ -54,7 +48,14 @@ export default {
     }
   },
   async scheduled(_controller, env: Env): Promise<void> {
-    const now = new Date();
+    await coordinateScheduledBriefing(env, new Date());
+  },
+} satisfies ExportedHandler<Env>;
+
+export async function coordinateScheduledBriefing(
+  env: Pick<Env, "DB" | "DAILY_BRIEFING">,
+  now: Date,
+): Promise<void> {
     const initial = shouldRunAt(now, "America/New_York", { status: "missing" });
     if (!initial.run) return;
     const repository = new D1BriefingRepository(env.DB);
@@ -87,8 +88,7 @@ export default {
       params: { editionDate: initial.editionDate, runId: initial.editionDate },
       retention: { successRetention: "90 days", errorRetention: "90 days" },
     });
-  },
-} satisfies ExportedHandler<Env>;
+}
 
 function requiredBinding(value: string, name: string): string {
   if (value.trim().length === 0) throw new Error(`${name} is required`);

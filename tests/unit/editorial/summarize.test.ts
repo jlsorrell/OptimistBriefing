@@ -12,6 +12,7 @@ import {
 import type { SourcePacket } from "../../../src/editorial/validate-summary";
 import { FakeModelProvider } from "../../../src/models/fake-provider";
 import { OpenAIModelProvider } from "../../../src/models/openai-provider";
+import { CostLedger } from "../../../src/models/cost-ledger";
 import type { RawResearchCandidate } from "../../../src/sources/types";
 
 const packet: SourcePacket = {
@@ -595,6 +596,11 @@ describe("OpenAIModelProvider", () => {
     let calls = 0;
     const waits: number[] = [];
     const usage: unknown[] = [];
+    const ledgerRecords: unknown[] = [];
+    const ledger = new CostLedger({
+      monthlyLimitUsd: 30,
+      unitPricesUsd: { "test-generation-model": 0.002 },
+    });
     const provider = new OpenAIModelProvider({
       apiKey: "test-key",
       generationModel: "test-generation-model",
@@ -605,6 +611,7 @@ describe("OpenAIModelProvider", () => {
       },
       onUsage: (record) => {
         usage.push(record);
+        ledgerRecords.push(ledger.record(record));
       },
       fetch: async () => {
         calls += 1;
@@ -663,6 +670,15 @@ describe("OpenAIModelProvider", () => {
         embeddingCount: 0,
       },
     ]);
+    expect(ledgerRecords).toEqual([{
+      provider: "openai",
+      model: "test-generation-model",
+      inputTokens: 10,
+      outputTokens: 4,
+      embeddingCount: 0,
+      unitPriceUsd: 0.002,
+      estimatedCostUsd: 0.028,
+    }]);
   });
 
   it("does not retry client errors", async () => {
