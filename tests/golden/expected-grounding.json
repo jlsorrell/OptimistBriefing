@@ -1,0 +1,118 @@
+{
+  "cases": [
+    {
+      "caseId": "grounded-abstract-summary",
+      "shouldAccept": true,
+      "packet": {
+        "itemKind": "paper",
+        "sources": [
+          {
+            "sourceId": "paper-abstract",
+            "role": "primary",
+            "title": "Verifiable ML Inference",
+            "url": "https://arxiv.org/abs/2607.10005",
+            "retrievedAt": "2026-07-30T04:00:00.000Z",
+            "accessLevel": "abstract",
+            "excerpts": [
+              {
+                "number": 1,
+                "text": "The abstract describes zero-knowledge proofs for verifiable private machine learning inference."
+              },
+              {
+                "number": 2,
+                "text": "Evidence is limited to the abstract."
+              }
+            ]
+          }
+        ]
+      },
+      "summary": {
+        "title": "Verifiable private machine learning inference",
+        "oneSentence": "The abstract describes zero-knowledge proofs for verifiable private machine learning inference.",
+        "whyItMatters": "The abstract describes zero-knowledge proofs for verifiable private machine learning inference.",
+        "uncertainty": "Evidence is limited to the abstract.",
+        "claims": [
+          {
+            "text": "The abstract describes zero-knowledge proofs for verifiable private machine learning inference.",
+            "sourceIds": ["paper-abstract"],
+            "evidenceExcerpt": "The abstract describes zero-knowledge proofs for verifiable private machine learning inference."
+          }
+        ],
+        "accessLevel": "abstract",
+        "provenance": {
+          "title": {
+            "sourceIds": ["paper-abstract"],
+            "evidenceExcerpt": "The abstract describes zero-knowledge proofs for verifiable private machine learning inference."
+          },
+          "oneSentence": {
+            "sourceIds": ["paper-abstract"],
+            "evidenceExcerpt": "The abstract describes zero-knowledge proofs for verifiable private machine learning inference."
+          },
+          "whyItMatters": {
+            "sourceIds": ["paper-abstract"],
+            "evidenceExcerpt": "The abstract describes zero-knowledge proofs for verifiable private machine learning inference."
+          },
+          "uncertainty": {
+            "sourceIds": ["paper-abstract"],
+            "evidenceExcerpt": "Evidence is limited to the abstract."
+          }
+        }
+      }
+    },
+    {
+      "caseId": "summary-with-unknown-source",
+      "shouldAccept": false,
+      "packet": {
+        "itemKind": "article",
+        "sources": [
+          {
+            "sourceId": "reuters-report",
+            "role": "reporting",
+            "title": "Agency adopts evaluation rules",
+            "url": "https://reuters.example/evaluation-rules",
+            "retrievedAt": "2026-07-30T04:00:00.000Z",
+            "accessLevel": "full_text",
+            "excerpts": [
+              {
+                "number": 1,
+                "text": "The agency adopted evaluation rules on Wednesday."
+              }
+            ]
+          }
+        ]
+      },
+      "summary": {
+        "title": "Agency adopts evaluation rules",
+        "oneSentence": "The agency adopted evaluation rules on Wednesday.",
+        "whyItMatters": "The agency adopted evaluation rules on Wednesday.",
+        "uncertainty": "The agency adopted evaluation rules on Wednesday.",
+        "claims": [
+          {
+            "text": "The agency adopted evaluation rules on Wednesday.",
+            "sourceIds": ["missing-source"],
+            "evidenceExcerpt": "The agency adopted evaluation rules on Wednesday."
+          }
+        ],
+        "accessLevel": "full_text",
+        "provenance": {
+          "title": {
+            "sourceIds": ["missing-source"],
+            "evidenceExcerpt": "The agency adopted evaluation rules on Wednesday."
+          },
+          "oneSentence": {
+            "sourceIds": ["missing-source"],
+            "evidenceExcerpt": "The agency adopted evaluation rules on Wednesday."
+          },
+          "whyItMatters": {
+            "sourceIds": ["missing-source"],
+            "evidenceExcerpt": "The agency adopted evaluation rules on Wednesday."
+          },
+          "uncertainty": {
+            "sourceIds": ["missing-source"],
+            "evidenceExcerpt": "The agency adopted evaluation rules on Wednesday."
+          }
+        }
+      }
+    }
+  ]
+}

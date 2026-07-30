@@ -514,6 +514,12 @@ a {
   cursor: pointer;
 }
 
+.state-page > p > a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+
 @media (max-width: 759px) {
   .site-header {
     position: sticky;

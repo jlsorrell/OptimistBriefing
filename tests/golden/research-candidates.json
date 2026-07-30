@@ -1,0 +1,207 @@
+{
+  "cases": [
+    {
+      "caseId": "highly-relevant-strong-paper",
+      "raw": {
+        "kind": "paper",
+        "sourceId": "arxiv-strong",
+        "sourceName": "arXiv",
+        "sourceRole": "primary",
+        "title": "Tracing Internal Representations Through Alignment Training",
+        "originalUrl": "https://arxiv.org/abs/2607.10001?utm_source=golden",
+        "externalId": "arXiv:2607.10001",
+        "externalIds": ["arXiv:2607.10001"],
+        "publishedAt": "2026-07-29T10:00:00.000Z",
+        "retrievedAt": "2026-07-30T04:00:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["Ada Researcher"],
+        "institutions": ["Stanford University"],
+        "abstract": "We trace internal representations and concept evolution throughout alignment training.",
+        "content": "We trace internal representations and concept evolution throughout alignment training with causal interventions.",
+        "relatedPaperIds": [],
+        "metadata": { "caseId": "highly-relevant-strong-paper" }
+      },
+      "score": {
+        "topicalFit": 0.99,
+        "technicalQuality": 0.95,
+        "researchSignal": 0.92,
+        "novelty": 0.9,
+        "seriousAttention": 0.88
+      }
+    },
+    {
+      "caseId": "preferred-institution-weak-incremental-paper",
+      "raw": {
+        "kind": "paper",
+        "sourceId": "arxiv-incremental",
+        "sourceName": "arXiv",
+        "sourceRole": "primary",
+        "title": "A Small Prompt Variation for Interpretability",
+        "originalUrl": "https://arxiv.org/abs/2607.10002",
+        "externalId": "arXiv:2607.10002",
+        "externalIds": ["arXiv:2607.10002"],
+        "publishedAt": "2026-07-29T09:00:00.000Z",
+        "retrievedAt": "2026-07-30T04:00:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["Pat Incremental"],
+        "institutions": ["MIT"],
+        "abstract": "We make a small prompt variation to an existing interpretability benchmark.",
+        "content": "The experiment repeats an existing benchmark with a small prompt variation.",
+        "relatedPaperIds": [],
+        "metadata": { "caseId": "preferred-institution-weak-incremental-paper" }
+      },
+      "score": {
+        "topicalFit": 0.68,
+        "technicalQuality": 0.42,
+        "researchSignal": 0.62,
+        "novelty": 0.18,
+        "seriousAttention": 0.55
+      }
+    },
+    {
+      "caseId": "strong-unfamiliar-institution-paper",
+      "raw": {
+        "kind": "paper",
+        "sourceId": "arxiv-unfamiliar",
+        "sourceName": "arXiv",
+        "sourceRole": "primary",
+        "title": "A Game-Theoretic Account of Multi-Agent Deception",
+        "originalUrl": "https://arxiv.org/abs/2607.10003",
+        "externalId": "arXiv:2607.10003",
+        "externalIds": ["arXiv:2607.10003"],
+        "publishedAt": "2026-07-29T08:00:00.000Z",
+        "retrievedAt": "2026-07-30T04:00:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["Rin Theorist"],
+        "institutions": ["University of Tartu"],
+        "abstract": "We give a game-theoretic model of deception and cooperation in multi-agent learning.",
+        "content": "The model characterizes equilibria and provides proofs for multi-agent learning dynamics.",
+        "relatedPaperIds": [],
+        "metadata": { "caseId": "strong-unfamiliar-institution-paper" }
+      },
+      "score": {
+        "topicalFit": 0.94,
+        "technicalQuality": 0.94,
+        "researchSignal": 0.55,
+        "novelty": 0.93,
+        "seriousAttention": 0.72
+      }
+    },
+    {
+      "caseId": "new-paper-no-citations",
+      "raw": {
+        "kind": "paper",
+        "sourceId": "arxiv-new",
+        "sourceName": "arXiv",
+        "sourceRole": "primary",
+        "title": "Secure Evaluation of Elicited Model Capabilities",
+        "originalUrl": "https://arxiv.org/abs/2607.10004",
+        "externalId": "arXiv:2607.10004",
+        "externalIds": ["arXiv:2607.10004"],
+        "publishedAt": "2026-07-30T01:00:00.000Z",
+        "retrievedAt": "2026-07-30T04:00:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["New Author"],
+        "institutions": ["Carnegie Mellon University"],
+        "abstract": "We introduce a secure evaluation protocol for eliciting model capabilities.",
+        "content": "The secure evaluation protocol separates evaluators from capability elicitation artifacts.",
+        "relatedPaperIds": [],
+        "metadata": { "caseId": "new-paper-no-citations", "citationCount": null }
+      },
+      "score": {
+        "topicalFit": 0.92,
+        "technicalQuality": 0.86,
+        "researchSignal": 0.85,
+        "novelty": 0.84,
+        "seriousAttention": null
+      }
+    },
+    {
+      "caseId": "abstract-only-paper",
+      "raw": {
+        "kind": "paper",
+        "sourceId": "arxiv-abstract",
+        "sourceName": "arXiv",
+        "sourceRole": "primary",
+        "title": "Zero-Knowledge Proofs for Verifiable ML Inference",
+        "originalUrl": "https://arxiv.org/abs/2607.10005",
+        "externalId": "arXiv:2607.10005",
+        "externalIds": ["arXiv:2607.10005"],
+        "publishedAt": "2026-07-28T15:00:00.000Z",
+        "retrievedAt": "2026-07-30T04:00:00.000Z",
+        "accessLevel": "abstract",
+        "authors": ["Zee Cryptographer"],
+        "institutions": ["University of Pennsylvania"],
+        "abstract": "We describe zero-knowledge proofs for verifiable private machine learning inference.",
+        "content": null,
+        "relatedPaperIds": [],
+        "metadata": { "caseId": "abstract-only-paper" }
+      },
+      "score": {
+        "topicalFit": 0.9,
+        "technicalQuality": 0.82,
+        "researchSignal": 0.82,
+        "novelty": 0.78,
+        "seriousAttention": 0.7
+      }
+    },
+    {
+      "caseId": "solid-scaling-paper",
+      "raw": {
+        "kind": "paper",
+        "sourceId": "arxiv-scaling",
+        "sourceName": "arXiv",
+        "sourceRole": "primary",
+        "title": "A Theoretical Model of Scaling and Emergent Learning",
+        "originalUrl": "https://arxiv.org/abs/2607.10006",
+        "externalId": "arXiv:2607.10006",
+        "externalIds": ["arXiv:2607.10006"],
+        "publishedAt": "2026-07-27T15:00:00.000Z",
+        "retrievedAt": "2026-07-30T04:00:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["Sam Scaler"],
+        "institutions": ["Georgia Institute of Technology"],
+        "abstract": "We provide a theoretical model of scaling laws and emergent learning phenomena.",
+        "content": "The model derives scaling transitions under explicit assumptions.",
+        "relatedPaperIds": [],
+        "metadata": { "caseId": "solid-scaling-paper" }
+      },
+      "score": {
+        "topicalFit": 0.88,
+        "technicalQuality": 0.8,
+        "researchSignal": 0.78,
+        "novelty": 0.74,
+        "seriousAttention": 0.68
+      }
+    },
+    {
+      "caseId": "sensational-low-value-research",
+      "raw": {
+        "kind": "blog",
+        "sourceId": "hype-blog",
+        "sourceName": "Future Hype",
+        "sourceRole": "blog",
+        "title": "This Scaling Trick Changes Everything Overnight",
+        "originalUrl": "https://hype.example/scaling-trick",
+        "externalId": "https://hype.example/scaling-trick",
+        "externalIds": ["https://hype.example/scaling-trick"],
+        "publishedAt": "2026-07-30T02:00:00.000Z",
+        "retrievedAt": "2026-07-30T04:00:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["Hype Writer"],
+        "institutions": [],
+        "abstract": null,
+        "content": "A dramatic claim about scaling with no methods, evidence, or evaluation.",
+        "relatedPaperIds": [],
+        "metadata": { "caseId": "sensational-low-value-research" }
+      },
+      "score": {
+        "topicalFit": 0.62,
+        "technicalQuality": 0.15,
+        "researchSignal": 0.1,
+        "novelty": 0.25,
+        "seriousAttention": 0.1
+      }
+    }
+  ]
+}
