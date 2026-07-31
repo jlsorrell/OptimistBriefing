@@ -12,7 +12,7 @@
     "seed:dev": "node --import tsx scripts/seed-dev.ts",
     "dev:integration": "node --import tsx scripts/start-local-integration.ts",
     "dev": "vite",
-    "deploy": "npm run build && wrangler deploy"
+    "deploy": "npm run build && wrangler deploy --keep-vars"
   },
   "dependencies": {
     "@hono/zod-validator": "^0.7.0",
