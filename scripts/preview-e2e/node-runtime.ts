@@ -45,7 +45,10 @@ interface PreviewBrowser {
 }
 
 interface PreviewChromium {
-  launch(options: { headless: boolean }): Promise<PreviewBrowser>;
+  launch(options: {
+    headless: boolean;
+    timeout: number;
+  }): Promise<PreviewBrowser>;
 }
 
 interface PreviewSuiteOptions {
@@ -65,6 +68,7 @@ interface PreviewSuiteOptions {
 
 const DEFAULT_TERMINATION_GRACE_MILLISECONDS = 2_000;
 const DEFAULT_TERMINATION_FALLBACK_MILLISECONDS = 2_000;
+const PREVIEW_BROWSER_LAUNCH_TIMEOUT_MILLISECONDS = 15_000;
 
 export async function createPreviewTempDirectory(): Promise<string> {
   const tempDirectory = await mkdtemp(join(tmpdir(), PREVIEW_TEMP_PREFIX));
@@ -237,26 +241,21 @@ async function launchPreviewBrowser(
   signal: AbortSignal,
 ): Promise<PreviewBrowser> {
   if (signal.aborted) throw new Error("Preview harness terminated.");
-  let rejectAbort: (error: Error) => void = () => undefined;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    rejectAbort = reject;
-  });
-  const abortListener = () => {
-    rejectAbort(new Error("Preview harness terminated."));
-  };
-  signal.addEventListener("abort", abortListener, { once: true });
-  const launched = browserDriver.launch({ headless: false }).then(async (browser) => {
-    if (signal.aborted) {
-      await browser.close().catch(() => undefined);
-      throw new Error("Preview harness terminated.");
-    }
-    return browser;
-  });
+  let browser: PreviewBrowser;
   try {
-    return await Promise.race([launched, aborted]);
-  } finally {
-    signal.removeEventListener("abort", abortListener);
+    // Playwright owns launch-process cleanup at this deadline, so shutdown can
+    // join the real launch instead of abandoning it behind a separate timer.
+    browser = await browserDriver.launch({
+      headless: false,
+      timeout: PREVIEW_BROWSER_LAUNCH_TIMEOUT_MILLISECONDS,
+    });
+  } catch (error) {
+    if (signal.aborted) throw new Error("Preview harness terminated.");
+    throw error;
   }
+  if (!signal.aborted) return browser;
+  await browser.close().catch(() => undefined);
+  throw new Error("Preview harness terminated.");
 }
 
 export async function capturePreviewAccessState(
@@ -422,6 +421,7 @@ export async function runPreviewSuite(
       } catch {
         // Escalation and fallback below still bound shutdown.
       }
+      if (settled) return;
       graceTimer = setTimeout(() => {
         if (settled) return;
         try {
@@ -441,13 +441,14 @@ export async function runPreviewSuite(
       settled = true;
       clearTerminationTimers();
       signal.removeEventListener("abort", abortListener);
-      if (code === 0) {
+      const resultCode = signal.aborted ? 1 : code;
+      if (resultCode === 0) {
         if (stdout.length > 0) writeOutput(stdout.join(""), "stdout");
         if (stderr.length > 0) writeOutput(stderr.join(""), "stderr");
       } else {
         writeOutput("Preview checks failed; re-authenticate and retry.\n", "stderr");
       }
-      resolve(code);
+      resolve(resultCode);
     };
     child.once("error", () => settle(1));
     child.once("close", (code, childSignal) => {

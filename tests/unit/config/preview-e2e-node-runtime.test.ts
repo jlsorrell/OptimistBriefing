@@ -41,7 +41,7 @@ async function createProtectedSuiteEnvironment(): Promise<NodeJS.ProcessEnv> {
 class FakePreviewChild extends EventEmitter {
   stdout = new PassThrough();
   stderr = new PassThrough();
-  kill = vi.fn(() => true);
+  kill = vi.fn((_signal?: NodeJS.Signals) => true);
 }
 
 afterEach(async () => {
@@ -424,13 +424,62 @@ describe("preview E2E Node runtime", () => {
     await expect(capture).rejects.toThrow("Preview harness terminated");
   });
 
-  it("returns on abort before a pending launch and closes a late browser", async () => {
+  it("keeps cleanup and signal relay behind bounded pending-launch termination", async () => {
+    vi.useFakeTimers();
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const storageStatePath = join(tempDirectory, "storage-state.json");
+    const abortController = new AbortController();
+    let markLaunchStarted: (() => void) | undefined;
+    const launchStarted = new Promise<void>((resolve) => { markLaunchStarted = resolve; });
+    let launchTerminated = false;
+    const launch = vi.fn((options: { headless: boolean; timeout?: number }) => {
+      markLaunchStarted!();
+      return new Promise<never>((_resolve, reject) => {
+        setTimeout(() => {
+          launchTerminated = true;
+          reject(new Error("browser launch terminated"));
+        }, options.timeout ?? 0);
+      });
+    });
+    const capture = capturePreviewAccessState(
+      { baseURL, storageStatePath },
+      { launch },
+      abortController.signal,
+    );
+    const order: string[] = [];
+    const handler = createPreviewSignalHandler(
+      async (signal) => {
+        abortController.abort(signal);
+        await capture.catch(() => undefined);
+        order.push("cleanup");
+      },
+      () => { order.push("unregister"); },
+      (signal) => { order.push(`relay:${signal}`); },
+    );
+    await launchStarted;
+
+    const signalHandling = handler("SIGTERM");
+    await vi.advanceTimersByTimeAsync(14_999);
+    expect(launchTerminated).toBe(false);
+    expect(order).toEqual([]);
+    await vi.advanceTimersByTimeAsync(1);
+
+    await expect(signalHandling).resolves.toBeUndefined();
+    expect(launch).toHaveBeenCalledWith({ headless: false, timeout: 15_000 });
+    expect(launchTerminated).toBe(true);
+    expect(order).toEqual(["cleanup", "unregister", "relay:SIGTERM"]);
+  });
+
+  it("awaits closure of a browser returned after launch abort", async () => {
     const tempDirectory = await createPreviewTempDirectory();
     temporaryParents.push(tempDirectory);
     const storageStatePath = join(tempDirectory, "storage-state.json");
     const abortController = new AbortController();
     const newContext = vi.fn().mockRejectedValue(new Error("browser closed"));
-    const close = vi.fn().mockResolvedValue(undefined);
+    let releaseClose: (() => void) | undefined;
+    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
+    const close = vi.fn(async () => { await closeGate; });
     const lateBrowser = { newContext, close };
     let resolveLaunch: ((browser: typeof lateBrowser) => void) | undefined;
     let markLaunchStarted: (() => void) | undefined;
@@ -454,10 +503,16 @@ describe("preview E2E Node runtime", () => {
       new Promise<false>((resolve) => setImmediate(() => resolve(false))),
     ]);
     resolveLaunch!(lateBrowser);
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    const settledBeforeClose = await Promise.race([
+      outcome.then(() => true),
+      new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+    ]);
+    releaseClose!();
 
     await expect(outcome).resolves.toBe("rejected");
-    expect(settledBeforeLateResolution).toBe(true);
-    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(settledBeforeLateResolution).toBe(false);
+    expect(settledBeforeClose).toBe(false);
     expect(newContext).not.toHaveBeenCalled();
   });
 
@@ -554,6 +609,56 @@ describe("preview E2E Node runtime", () => {
       "Preview checks failed; re-authenticate and retry.\n",
       "stderr",
     );
+  });
+
+  it("treats an aborted child close with code zero as a redacted failure", async () => {
+    const env = await createProtectedSuiteEnvironment();
+    const child = new FakePreviewChild();
+    const abortController = new AbortController();
+    const writeOutput = vi.fn();
+    const running = runPreviewSuite(env, abortController.signal, {
+      platform: "linux",
+      spawnProcess: vi.fn(() => child) as never,
+      writeOutput,
+    });
+    child.stdout.write("sensitive successful output\n");
+
+    abortController.abort("SIGTERM");
+    child.emit("close", 0, null);
+
+    await expect(running).resolves.toBe(1);
+    expect(writeOutput).toHaveBeenCalledOnce();
+    expect(writeOutput).toHaveBeenCalledWith(
+      "Preview checks failed; re-authenticate and retry.\n",
+      "stderr",
+    );
+    expect(writeOutput.mock.calls.flat().join(" ")).not.toContain("sensitive");
+  });
+
+  it("does not leave a grace timer when the initial kill closes synchronously", async () => {
+    vi.useFakeTimers();
+    const env = await createProtectedSuiteEnvironment();
+    const child = new FakePreviewChild();
+    child.kill.mockImplementation((signal) => {
+      if (signal === "SIGTERM") child.emit("close", 1, null);
+      return true;
+    });
+    const abortController = new AbortController();
+    const running = runPreviewSuite(env, abortController.signal, {
+      platform: "linux",
+      spawnProcess: vi.fn(() => child) as never,
+      writeOutput: vi.fn(),
+      terminationGraceMilliseconds: 5,
+      terminationFallbackMilliseconds: 5,
+    });
+
+    abortController.abort("SIGTERM");
+    await expect(running).resolves.toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(10);
+
+    expect(child.kill).toHaveBeenCalledOnce();
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
   it("escalates an unresponsive child and settles after a bounded fallback", async () => {
