@@ -91,6 +91,12 @@ The runtime contract is `MONTHLY_BUDGET_USD`, bounded to at most 30, plus
     exists and passes;
   - narrowed the source audit query to source ID, actor, enabled change, and
     timestamp.
+- Review fix commit:
+  `21fec08 docs: correct preview rehearsal and source audit`.
+- Independent re-review of `30f1620..21fec08`: APPROVED with no Critical,
+  Important, or Minor findings. The reviewer confirmed the preview D1/fixture
+  commands, explicit Playwright production blocker, bounded attributable source
+  audit query, Wrangler 4.115.0 command syntax, secret safety, and clean diff.
 
 ## Remaining concerns
 
