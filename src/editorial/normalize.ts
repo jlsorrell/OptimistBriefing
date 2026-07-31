@@ -24,6 +24,7 @@ const TRACKING_PARAMETERS = new Set([
   "mc_eid",
   "ref",
 ]);
+const CANDIDATE_RETENTION_MS = 90 * 24 * 60 * 60 * 1_000;
 
 function normalizedWhitespace(value: string): string {
   return value.normalize("NFKC").replace(/\s+/g, " ").trim();
@@ -104,6 +105,18 @@ function optionalDate(value: unknown): string | null {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return null;
   return new Date(timestamp).toISOString();
+}
+
+export function candidateExpiry(
+  createdAt: string,
+  configured: unknown,
+): string {
+  const explicit = optionalDate(configured);
+  const defaultExpiry =
+    new Date(Date.parse(createdAt) + CANDIDATE_RETENTION_MS).toISOString();
+  return explicit !== null && Date.parse(explicit) < Date.parse(defaultExpiry)
+    ? explicit
+    : defaultExpiry;
 }
 
 function stableHash(value: string): string {
@@ -324,6 +337,7 @@ export function normalizeCandidate(raw: unknown): Item {
     `${candidate.kind}:${stableIdentifier}`,
   )}`;
   const sourceUrl = canonicalizeUrl(candidate.originalUrl);
+  const createdAt = new Date(candidate.retrievedAt).toISOString();
   const signalPrimaryDocumentUrls = uniqueSorted([
     ...primaryDocumentUrls,
     ...(candidate.kind === "document" ? [canonicalUrl] : []),
@@ -410,7 +424,7 @@ export function normalizeCandidate(raw: unknown): Item {
         },
       ],
     },
-    createdAt: new Date(candidate.retrievedAt).toISOString(),
-    expiresAt: optionalDate(candidate.metadata.expiresAt),
+    createdAt,
+    expiresAt: candidateExpiry(createdAt, candidate.metadata.expiresAt),
   });
 }

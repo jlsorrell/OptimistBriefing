@@ -946,6 +946,45 @@ describe("manual editorial run", () => {
     );
   });
 
+  it("keeps ephemeral article bodies out of collection checkpoints and D1", async () => {
+    const store = new FixtureStore();
+    const candidate: RawNewsCandidate = {
+      ...rawNewsCandidate("reuters", "world"),
+      abstract: null,
+      content: `${"evidence ".repeat(260)}COPYRIGHTED_BODY_TAIL`,
+      metadata: {
+        primarySection: "world",
+        retention: "ephemeral-only",
+        expiresAt: "2026-10-27T08:30:00.000Z",
+      },
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-02",
+      runId: "run-ephemeral-evidence",
+      store,
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [candidate],
+    });
+
+    const collected = await context.collect();
+    await store.saveCheckpoint(context.runId, "collect", collected);
+    const normalized = await context.normalize(collected);
+    await new D1BriefingRepository(env.DB).upsertItems(normalized);
+
+    expect(JSON.stringify(store.artifacts.get("run-ephemeral-evidence:collect")))
+      .not.toContain("COPYRIGHTED_BODY_TAIL");
+    const itemId = normalized[0]!.id;
+    const row = await env.DB.prepare(
+      "SELECT normalized_json, expires_at FROM items WHERE id = ?",
+    ).bind(itemId).first<{ normalized_json: string; expires_at: string }>();
+    expect(row!.normalized_json).not.toContain("COPYRIGHTED_BODY_TAIL");
+    expect(row!.expires_at).toBe("2026-10-27T08:30:00.000Z");
+  });
+
   it("constructs manual-run providers and budget policy from the run-scoped runtime factory", async () => {
     const factoryCalls: Array<{ runId: string; editionDate: string }> = [];
     const launcher = createD1WorkflowLauncher(

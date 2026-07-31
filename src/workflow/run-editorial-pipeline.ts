@@ -4,6 +4,7 @@ import { D1BriefingRepository } from "../db/d1-repository";
 import { z } from "zod";
 import { SourceHttpClient } from "../sources/http-client";
 import { createNewsCollectorFromCatalog } from "../sources/news-collector";
+import { durableCollectedCandidate } from "../sources/durable-evidence";
 import { normalizeCandidate } from "../editorial/normalize";
 import { deduplicateItems } from "../editorial/deduplicate";
 import {
@@ -39,6 +40,8 @@ import { ResearchCollector } from "../sources/research-collector";
 import {
   RawNewsCandidateSchema,
   RawResearchCandidateSchema,
+  type RawNewsCandidate,
+  type RawResearchCandidate,
   type ResearchSourceInput,
 } from "../sources/types";
 import {
@@ -768,6 +771,12 @@ function providerEligibleItems(
     : items;
 }
 
+function isRawCollectedCandidate(
+  candidate: CollectedCandidate,
+): candidate is RawNewsCandidate | RawResearchCandidate {
+  return "sourceId" in candidate && "retrievedAt" in candidate;
+}
+
 export function createProductionPipelineContext(
   options: ProductionPipelineContextOptions,
 ): PipelineContext {
@@ -778,7 +787,11 @@ export function createProductionPipelineContext(
     now: options.now,
     collect: async () =>
       z.array(CollectedCandidateSchema).parse(
-        await options.collectCandidates(),
+        (await options.collectCandidates()).map((candidate) =>
+          isRawCollectedCandidate(candidate)
+            ? durableCollectedCandidate(candidate)
+            : candidate,
+        ),
       ),
     normalize: async (candidates) => {
       const normalized = candidates.map(normalizedCandidate);
