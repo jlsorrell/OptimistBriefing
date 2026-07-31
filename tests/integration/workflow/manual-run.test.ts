@@ -58,7 +58,10 @@ const now = "2026-07-30T09:00:00.000Z";
 function fixturePreferences(
   overrides: Partial<Pick<
     ReaderPreferences,
-    "topicWeights" | "sourceWeights" | "sectionBudgets"
+    | "topicWeights"
+    | "sourceWeights"
+    | "sectionBudgets"
+    | "feedbackHistory"
   >> = {},
 ): ReaderPreferences {
   const baseline = approvedBaselinePreferences();
@@ -66,7 +69,7 @@ function fixturePreferences(
     ...baseline,
     ...overrides,
     baseline,
-    feedbackHistory: [],
+    feedbackHistory: overrides.feedbackHistory ?? [],
   });
 }
 
@@ -648,6 +651,25 @@ describe("manual editorial run", () => {
       .toEqual(shortlistedSelectionReasons);
   });
 
+  it("uses the editorial shortlist fallback when calculated reasons are absent", async () => {
+    // This fails if composition revives the old validation placeholder or
+    // emits an empty reason list.
+    const item = fixtureItem("fallback-research", "research");
+    const context = fixturePipelineContext({
+      runId: "run-selection-reason-fallback",
+    });
+
+    const composition = await composeEdition(
+      context,
+      [{ item, summary: fixtureSummary(item), valid: true }],
+      [item],
+    );
+
+    expect(composition.entries[0]!.selectionReasons).toEqual([
+      "Selected by the editorial shortlist.",
+    ]);
+  });
+
   it("delegates every durable checkpoint through an optional executor while the manual path remains direct", async () => {
     const delegated: string[] = [];
     const context = fixturePipelineContext({
@@ -1162,6 +1184,34 @@ describe("manual editorial run", () => {
           technology: 1,
         },
         sourceWeights: { nist: 0 },
+        feedbackHistory: [
+          {
+            id: "source-feedback-earlier",
+            itemId: "source-feedback-item",
+            action: "less_like_this",
+            reason: "source",
+            adjustments: [{
+              dimension: "source",
+              key: "nist",
+              delta: -0.1,
+              resultingWeight: 0.2,
+            }],
+            createdAt: "2026-07-30T08:00:00.000Z",
+          },
+          {
+            id: "source-feedback-later",
+            itemId: "source-feedback-item",
+            action: "more_like_this",
+            reason: "source",
+            adjustments: [{
+              dimension: "source",
+              key: "nist",
+              delta: 0.1,
+              resultingWeight: 0.5,
+            }],
+            createdAt: now,
+          },
+        ],
       }),
       providers: {
         summary,
@@ -1189,7 +1239,7 @@ describe("manual editorial run", () => {
       | undefined;
 
     expect(researchWorkflow?.topicalFit).toBe(1);
-    expect(newsWorkflow?.personalRelevance).toBeCloseTo(0.3, 12);
+    expect(newsWorkflow?.personalRelevance).toBeCloseTo(0.45, 12);
     expect(news).toBeDefined();
   });
 

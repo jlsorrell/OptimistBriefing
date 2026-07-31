@@ -606,6 +606,31 @@ function parsedPreferences(
     : ReaderPreferencesSchema.parse(preferences);
 }
 
+function effectivePreferenceWeights(
+  preferences: ReaderPreferences,
+): Pick<ReaderPreferences, "topicWeights" | "sourceWeights"> {
+  const weights = {
+    topic: {
+      ...preferences.baseline.topicWeights,
+      ...preferences.topicWeights,
+    },
+    source: {
+      ...preferences.baseline.sourceWeights,
+      ...preferences.sourceWeights,
+    },
+  };
+  for (const feedback of preferences.feedbackHistory) {
+    for (const adjustment of feedback.adjustments) {
+      weights[adjustment.dimension][adjustment.key] =
+        adjustment.resultingWeight;
+    }
+  }
+  return {
+    topicWeights: weights.topic,
+    sourceWeights: weights.source,
+  };
+}
+
 export async function loadOrCreatePreferenceSnapshot(
   store: D1PipelineStore,
   runId: string,
@@ -948,6 +973,7 @@ export function createProductionPipelineContext(
   options: ProductionPipelineContextOptions,
 ): PipelineContext {
   const preferences = parsedPreferences(options.preferences);
+  const effectiveWeights = effectivePreferenceWeights(preferences);
   const configuredBudgets = preferredSectionBudgets(preferences);
   return {
     editionDate: options.editionDate,
@@ -1005,11 +1031,11 @@ export function createProductionPipelineContext(
             cosineSimilarity(embedding, profileVector),
           ),
         );
-        const topicWeight = preferences.topicWeights[item.primaryTopic];
+        const topicWeight = effectiveWeights.topicWeights[item.primaryTopic];
         const sourceWeights = [
           ...new Set(item.sourceRefs.map(({ id }) => id)),
         ].flatMap((sourceId) => {
-          const weight = preferences.sourceWeights[sourceId];
+          const weight = effectiveWeights.sourceWeights[sourceId];
           return weight === undefined ? [] : [weight];
         });
         return withWorkflowPayload(

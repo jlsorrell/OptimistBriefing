@@ -291,17 +291,15 @@ function resumableContext(
 }
 
 describe("durable workflow checkpoint execution", () => {
-  it("keeps the first preference snapshot across a retry and gives a new run current settings", async () => {
-    // This fails if a resume rereads mutable global preferences.
+  it("keeps pre-feedback ranking on resume while a new run applies feedback", async () => {
+    // This fails if ranking ignores effective feedback weights or a resume
+    // rereads mutable global preferences.
     const repository = new D1BriefingRepository(env.DB);
-    const baseline = approvedBaselinePreferences();
-    await repository.updatePreferences({
-      ...baseline,
-      topicWeights: {
-        ...baseline.topicWeights,
-        "alignment-interpretability": 2,
-      },
-    });
+    const feedbackItem: Item = {
+      ...item("preference-feedback-item", "research"),
+      primaryTopic: "alignment-interpretability",
+    };
+    await repository.upsertItems([feedbackItem]);
     const firstRunId = "preference-snapshot-resume";
     const firstStore = createD1PipelineStore(env.DB);
     await firstStore.createRun({
@@ -328,12 +326,10 @@ describe("durable workflow checkpoint execution", () => {
       estimatedCostUsd: 0,
     });
 
-    await repository.updatePreferences({
-      ...baseline,
-      topicWeights: {
-        ...baseline.topicWeights,
-        "alignment-interpretability": 0,
-      },
+    await repository.recordFeedback({
+      itemId: feedbackItem.id,
+      action: "more_like_this",
+      reason: "topic",
     });
     const resumedSnapshot = await loadOrCreatePreferenceSnapshot(
       firstStore,
@@ -391,12 +387,13 @@ describe("durable workflow checkpoint execution", () => {
         | undefined)?.topicalFit;
     };
 
-    expect(firstSnapshot.topicWeights["alignment-interpretability"]).toBe(2);
-    expect(resumedSnapshot.topicWeights["alignment-interpretability"]).toBe(2);
-    expect(newSnapshot.topicWeights["alignment-interpretability"]).toBe(0);
-    await expect(topicalFit("initial-ranking", firstSnapshot)).resolves.toBe(1);
-    await expect(topicalFit("resumed-ranking", resumedSnapshot)).resolves.toBe(1);
-    await expect(topicalFit("new-ranking", newSnapshot)).resolves.toBe(0);
+    expect(firstSnapshot.feedbackHistory).toEqual([]);
+    expect(resumedSnapshot.feedbackHistory).toEqual([]);
+    expect(newSnapshot.feedbackHistory[0]?.adjustments[0]?.resultingWeight)
+      .toBe(1.1);
+    await expect(topicalFit("initial-ranking", firstSnapshot)).resolves.toBe(0.6);
+    await expect(topicalFit("resumed-ranking", resumedSnapshot)).resolves.toBe(0.6);
+    await expect(topicalFit("new-ranking", newSnapshot)).resolves.toBe(0.66);
   });
 
   it("stores exactly one immutable preference snapshot under concurrent retries", async () => {
