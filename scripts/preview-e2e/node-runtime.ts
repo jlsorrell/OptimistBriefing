@@ -88,6 +88,7 @@ async function resolveCaptureAccessStateInput(input: {
     if (
       !metadata.isDirectory() ||
       metadata.isSymbolicLink() ||
+      (metadata.mode & 0o777) !== 0o700 ||
       dirname(realTempDirectory) !== realSystemTempDirectory
     ) {
       throw new Error("Unsafe preview storage directory");

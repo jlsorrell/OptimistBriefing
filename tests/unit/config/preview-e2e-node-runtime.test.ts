@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -106,6 +106,25 @@ describe("preview E2E Node runtime", () => {
       {
         baseURL,
         storageStatePath: join(linkedDirectory, "storage-state.json"),
+      },
+      { launch },
+    )).rejects.toMatchObject({
+      message: "Preview storage state must be the protected temporary file",
+    });
+
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("rejects a direct temporary-directory child whose mode is not 0700 before launching Chromium", async () => {
+    const tempDirectory = await mkdtemp(join(tmpdir(), PREVIEW_TEMP_PREFIX));
+    temporaryParents.push(tempDirectory);
+    await chmod(tempDirectory, 0o755);
+    const launch = vi.fn();
+
+    await expect(capturePreviewAccessState(
+      {
+        baseURL,
+        storageStatePath: join(tempDirectory, "storage-state.json"),
       },
       { launch },
     )).rejects.toMatchObject({
