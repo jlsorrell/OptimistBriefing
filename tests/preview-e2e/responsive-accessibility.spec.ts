@@ -2,24 +2,54 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
 const routes = [
-  ["/", "The day, thoughtfully distilled."],
-  ["/archive", "Archive"],
-  ["/preferences", "Preferences"],
-  ["/run-status", "Run status"],
+  {
+    path: "/",
+    heading: "The day, thoughtfully distilled.",
+    primaryControl: { role: "link" as const, name: "Optimist Briefing home" },
+  },
+  {
+    path: "/archive",
+    heading: "Archive",
+    primaryControl: { role: "button" as const, name: "Apply filters" },
+  },
+  {
+    path: "/preferences",
+    heading: "Preferences",
+    primaryControl: { role: "button" as const, name: "Save explicit preferences" },
+  },
+  {
+    path: "/run-status",
+    heading: "Run status",
+    primaryControl: { role: "link" as const, name: "Return to today’s edition" },
+  },
 ] as const;
 
-for (const [path, heading] of routes) {
-  test(`${path} has no horizontal overflow`, async ({ page }) => {
-    await page.goto(path);
-    await expect(page.getByRole("heading", { level: 1, name: heading })).toBeVisible();
+for (const route of routes) {
+  test(`${route.path} has no horizontal overflow and keeps its primary control usable`, async ({ page }) => {
+    await page.goto(route.path);
+    await expect(
+      page.getByRole("heading", { level: 1, name: route.heading }),
+    ).toBeVisible();
     await expect.poll(() => page.evaluate(
       () => document.documentElement.scrollWidth <= document.documentElement.clientWidth,
     )).toBe(true);
+
+    const control = page.getByRole(route.primaryControl.role, {
+      name: route.primaryControl.name,
+      exact: true,
+    });
+    await expect(control).toBeVisible();
+    const box = await control.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box?.width ?? 0).toBeGreaterThanOrEqual(40);
+    expect(box?.height ?? 0).toBeGreaterThanOrEqual(24);
   });
 
-  test(`${path} has no serious or critical axe violations`, async ({ page }) => {
-    await page.goto(path);
-    await expect(page.getByRole("heading", { level: 1, name: heading })).toBeVisible();
+  test(`${route.path} has no serious or critical axe violations`, async ({ page }) => {
+    await page.goto(route.path);
+    await expect(
+      page.getByRole("heading", { level: 1, name: route.heading }),
+    ).toBeVisible();
     const results = await new AxeBuilder({ page }).analyze();
     expect(
       results.violations.filter(

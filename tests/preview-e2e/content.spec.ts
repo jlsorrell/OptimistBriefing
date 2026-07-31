@@ -1,6 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
 const sectionHeadings = ["Research", "World", "AI policy", "DMV", "Baltimore"] as const;
+const sourceHosts = [
+  "arxiv.org",
+  "www.reuters.com",
+  "www.thebaltimorebanner.com",
+] as const;
 const routeHeadings = [
   ["/archive", "Archive"],
   ["/preferences", "Preferences"],
@@ -33,8 +38,11 @@ test("shows the fixed edition and leaves run state unchanged", async ({ page }) 
   await expect(page.getByText("Primary source").first()).toBeVisible();
   await expect(page.getByText("Forecast, not fact")).toBeVisible();
 
-  for (const hostname of ["arxiv.org", "reuters.com", "thebaltimorebanner.com"]) {
-    await expect(page.locator(`a[href*="${hostname}"]`).first()).toBeVisible();
+  const visibleSourceHosts = await page.locator(".source-list a").evaluateAll((links) =>
+    links.map((link) => new URL((link as HTMLAnchorElement).href).hostname),
+  );
+  for (const hostname of sourceHosts) {
+    expect(visibleSourceHosts).toContain(hostname);
   }
 
   for (const [path, heading] of routeHeadings) {
