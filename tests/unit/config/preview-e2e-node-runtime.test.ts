@@ -1,4 +1,4 @@
-import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -86,6 +86,26 @@ describe("preview E2E Node runtime", () => {
       {
         baseURL,
         storageStatePath: join(tempDirectory, "other-state.json"),
+      },
+      { launch },
+    )).rejects.toMatchObject({
+      message: "Preview storage state must be the protected temporary file",
+    });
+
+    expect(launch).not.toHaveBeenCalled();
+  });
+
+  it("rejects a prefix-named temporary-directory symlink before launching Chromium", async () => {
+    const targetDirectory = await mkdtemp(join(process.cwd(), "preview-e2e-node-runtime-target-"));
+    const linkedDirectory = join(tmpdir(), `${PREVIEW_TEMP_PREFIX}symlink-${Date.now()}`);
+    temporaryParents.push(linkedDirectory, targetDirectory);
+    await symlink(targetDirectory, linkedDirectory);
+    const launch = vi.fn();
+
+    await expect(capturePreviewAccessState(
+      {
+        baseURL,
+        storageStatePath: join(linkedDirectory, "storage-state.json"),
       },
       { launch },
     )).rejects.toMatchObject({

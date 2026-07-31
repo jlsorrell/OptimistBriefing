@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { chmod, mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -71,15 +71,27 @@ function isPlaywrightNavigationError(error: unknown): boolean {
   );
 }
 
-function resolveCaptureAccessStateInput(input: {
+async function resolveCaptureAccessStateInput(input: {
   baseURL: string;
   storageStatePath: string;
-}): { baseURL: string; storageStatePath: string } {
+}): Promise<{ baseURL: string; storageStatePath: string }> {
   const baseURL = resolvePreviewBaseURL(input.baseURL);
   const storageStatePath = resolve(input.storageStatePath);
   let tempDirectory: string;
   try {
     tempDirectory = assertTemporaryDirectory(dirname(storageStatePath));
+    const [metadata, realTempDirectory, realSystemTempDirectory] = await Promise.all([
+      lstat(tempDirectory),
+      realpath(tempDirectory),
+      realpath(tmpdir()),
+    ]);
+    if (
+      !metadata.isDirectory() ||
+      metadata.isSymbolicLink() ||
+      dirname(realTempDirectory) !== realSystemTempDirectory
+    ) {
+      throw new Error("Unsafe preview storage directory");
+    }
   } catch {
     throw new Error("Preview storage state must be the protected temporary file");
   }
@@ -93,7 +105,7 @@ export async function capturePreviewAccessState(
   input: { baseURL: string; storageStatePath: string },
   browserDriver: PreviewChromium = chromium,
 ): Promise<void> {
-  const { baseURL, storageStatePath } = resolveCaptureAccessStateInput(input);
+  const { baseURL, storageStatePath } = await resolveCaptureAccessStateInput(input);
   const browser = await browserDriver.launch({ headless: false });
   try {
     const context = await browser.newContext();
