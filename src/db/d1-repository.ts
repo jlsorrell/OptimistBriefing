@@ -48,12 +48,16 @@ import {
   type FeedbackAdjustment,
   type PreferenceUpdateInput,
   type ReaderPreferences,
+  type ReconcileModelBudgetInput,
+  type ReleaseModelBudgetInput,
+  type ReserveModelBudgetInput,
   type ModelUsageRecord,
   type SourceRecord,
   type UpdateSourceInput,
   type WorkflowRun,
   type WorkflowRunDetail,
 } from "./repository";
+import type { BudgetReservation } from "../models/budget-gate";
 import {
   decodeEditionCursor,
   encodeEditionCursor,
@@ -73,6 +77,28 @@ const ModelUsageRecordSchema = z.object({
   embeddingCount: z.number().int().nonnegative().max(10_000_000),
   unitPriceUsd: z.number().finite().nonnegative().max(1_000_000),
   estimatedCostUsd: z.number().finite().nonnegative().max(1_000_000),
+}).strict();
+const BudgetMicrousdSchema = z.number().int().nonnegative().max(
+  Number.MAX_SAFE_INTEGER,
+);
+const ReserveModelBudgetInputSchema = z.object({
+  reservationId: z.string().min(1).max(200),
+  runId: z.string().min(1).max(200),
+  monthStart: z.string().datetime(),
+  maximumCostMicrousd: BudgetMicrousdSchema,
+  monthlyLimitMicrousd: BudgetMicrousdSchema.positive(),
+  reservedAt: z.string().datetime(),
+}).strict();
+const ReconcileModelBudgetInputSchema = z.object({
+  reservationId: z.string().min(1).max(200),
+  runId: z.string().min(1).max(200),
+  actualCostMicrousd: BudgetMicrousdSchema,
+  reconciledAt: z.string().datetime(),
+}).strict();
+const ReleaseModelBudgetInputSchema = z.object({
+  reservationId: z.string().min(1).max(200),
+  runId: z.string().min(1).max(200),
+  releasedAt: z.string().datetime(),
 }).strict();
 const EditionDateSchema = EditionSchema.shape.editionDate;
 const NonemptyIdSchema = z.string().min(1);
@@ -2052,6 +2078,98 @@ export class D1BriefingRepository implements BriefingRepository {
       parsedJson(record.event_json, "Invalid model usage record"),
       "Invalid model usage record",
     ));
+  }
+
+  async reserveModelBudget(
+    input: ReserveModelBudgetInput,
+  ): Promise<BudgetReservation | null> {
+    const valid = validated(
+      ReserveModelBudgetInputSchema,
+      input,
+      "Invalid model budget reservation",
+    );
+    const result = await this.db.prepare(
+      `INSERT INTO model_budget_reservations (
+        id, run_id, month_start, maximum_cost_microusd,
+        actual_cost_microusd, status, created_at, updated_at
+      )
+      SELECT ?, ?, ?, ?, NULL, 'reserved', ?, ?
+      WHERE (
+        SELECT COALESCE(SUM(
+          CASE
+            WHEN status = 'reserved' THEN maximum_cost_microusd
+            WHEN status = 'reconciled' THEN actual_cost_microusd
+            ELSE 0
+          END
+        ), 0)
+        FROM model_budget_reservations
+        WHERE month_start = ?
+      ) + ? <= ?`,
+    ).bind(
+      valid.reservationId,
+      valid.runId,
+      valid.monthStart,
+      valid.maximumCostMicrousd,
+      valid.reservedAt,
+      valid.reservedAt,
+      valid.monthStart,
+      valid.maximumCostMicrousd,
+      valid.monthlyLimitMicrousd,
+    ).run();
+    if ((result.meta.changes ?? 0) !== 1) return null;
+    return {
+      id: valid.reservationId,
+      maximumCostMicrousd: valid.maximumCostMicrousd,
+    };
+  }
+
+  async reconcileModelBudget(
+    input: ReconcileModelBudgetInput,
+  ): Promise<void> {
+    const valid = validated(
+      ReconcileModelBudgetInputSchema,
+      input,
+      "Invalid model budget reconciliation",
+    );
+    const result = await this.db.prepare(
+      `UPDATE model_budget_reservations
+      SET actual_cost_microusd = ?, status = 'reconciled', updated_at = ?
+      WHERE id = ? AND run_id = ? AND status = 'reserved'
+        AND ? <= maximum_cost_microusd`,
+    ).bind(
+      valid.actualCostMicrousd,
+      valid.reconciledAt,
+      valid.reservationId,
+      valid.runId,
+      valid.actualCostMicrousd,
+    ).run();
+    if ((result.meta.changes ?? 0) !== 1) {
+      throw new RepositoryValidationError(
+        "Model budget reservation could not be reconciled",
+      );
+    }
+  }
+
+  async releaseModelBudget(input: ReleaseModelBudgetInput): Promise<void> {
+    const valid = validated(
+      ReleaseModelBudgetInputSchema,
+      input,
+      "Invalid model budget release",
+    );
+    const result = await this.db.prepare(
+      `UPDATE model_budget_reservations
+      SET status = 'released', updated_at = ?
+      WHERE id = ? AND run_id = ? AND status = 'reserved'`,
+    ).bind(
+      valid.releasedAt,
+      valid.reservationId,
+      valid.runId,
+    ).run();
+    if ((result.meta.changes ?? 0) !== 1) {
+      throw new RepositoryValidationError(
+        "Model budget reservation could not be released",
+      );
+    }
   }
 
   async recordRetentionAudit(now: string, report: RetentionReport): Promise<void> {

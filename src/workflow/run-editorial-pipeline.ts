@@ -54,6 +54,7 @@ import {
   type EditionSection,
   type Item,
   type ItemScore,
+  type StructuredSummary,
 } from "../contracts/editorial";
 import type {
   Edition,
@@ -832,20 +833,29 @@ export function createProductionPipelineContext(
             READER_PROFILE.researchQualityGates.minimumTopicalFit
         );
       }),
-    assess: async (items) => Promise.all(
-      providerEligibleItems(items, options.budgetPolicy).map(async (candidate) => {
-      const item = WorkflowItemSchema.parse(candidate);
-      if (item.kind !== "paper" && item.kind !== "blog") return item;
-      const rawResearch = workflowPayload(item).rawResearch;
-      if (rawResearch === undefined) {
-        throw new Error(`MISSING_RAW_RESEARCH:${item.id}`);
+    assess: async (items) => {
+      const assessed: Item[] = [];
+      for (const candidate of providerEligibleItems(
+        items,
+        options.budgetPolicy,
+      )) {
+        const item = WorkflowItemSchema.parse(candidate);
+        if (item.kind !== "paper" && item.kind !== "blog") {
+          assessed.push(item);
+          continue;
+        }
+        const rawResearch = workflowPayload(item).rawResearch;
+        if (rawResearch === undefined) {
+          throw new Error(`MISSING_RAW_RESEARCH:${item.id}`);
+        }
+        const assessment = await assessResearch(
+          rawResearch,
+          options.providers.assessment,
+        );
+        assessed.push(withWorkflowPayload(item, { assessment }));
       }
-      const assessment = await assessResearch(
-        rawResearch,
-        options.providers.assessment,
-      );
-      return withWorkflowPayload(item, { assessment });
-    })),
+      return assessed;
+    },
     score: async (items) => items.map((candidate) => {
       const item = WorkflowItemSchema.parse(candidate);
       const payload = workflowPayload(item);
@@ -994,11 +1004,17 @@ export function createProductionPipelineContext(
       });
     },
     synthesize: async (items) => {
-      const summaries = await Promise.all(
-        providerEligibleItems(items, options.budgetPolicy).map(async (candidate) => {
+      const summaries: Array<{
+        item: Item;
+        summary: StructuredSummary;
+      }> = [];
+      for (const candidate of providerEligibleItems(
+        items,
+        options.budgetPolicy,
+      )) {
         const item = WorkflowItemSchema.parse(candidate);
         try {
-          return {
+          summaries.push({
             item,
             summary: await summarizeItem(
               sourcePacketForItem(item),
@@ -1012,15 +1028,13 @@ export function createProductionPipelineContext(
                         : options.budgetPolicy.featuredSummaryTokens,
                   },
             ),
-          };
+          });
         } catch (error) {
-          if (error instanceof SummaryRejectedError) return null;
+          if (error instanceof SummaryRejectedError) continue;
           throw error;
         }
-      }));
-      return summaries.filter(
-        (entry): entry is NonNullable<typeof entry> => entry !== null,
-      );
+      }
+      return summaries;
     },
     validate: async (entries) => entries.map((entry) => {
       const parsedSummary = StructuredSummarySchema.strict().safeParse(

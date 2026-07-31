@@ -262,6 +262,80 @@ class GroundedProductionProvider implements ModelProvider {
   }
 }
 
+class ConcurrencyTrackingAssessmentProvider implements ModelProvider {
+  active = 0;
+  maximumActive = 0;
+  readonly startedPackets: string[] = [];
+
+  async embed(): Promise<readonly (readonly number[])[]> {
+    throw new Error("Assessment provider must not embed.");
+  }
+
+  async generateObject(input: GenerateObjectRequest): Promise<unknown> {
+    this.active += 1;
+    this.maximumActive = Math.max(this.maximumActive, this.active);
+    this.startedPackets.push(input.sourcePacket);
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+    this.active -= 1;
+    return {
+      technicalQuality: 0.9,
+      novelty: 0.8,
+      strengths: ["The abstract describes a concrete method."],
+      limitations: ["Only abstract evidence was supplied."],
+      rationale: "The available abstract supports a strong assessment.",
+      accessLevel: "abstract",
+    };
+  }
+}
+
+class ConcurrencyTrackingSummaryProvider implements ModelProvider {
+  active = 0;
+  maximumActive = 0;
+
+  async embed(
+    texts: readonly string[],
+  ): Promise<readonly (readonly number[])[]> {
+    return texts.map(() => [1, 0]);
+  }
+
+  async generateObject(input: GenerateObjectRequest): Promise<unknown> {
+    this.active += 1;
+    this.maximumActive = Math.max(this.maximumActive, this.active);
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
+    this.active -= 1;
+    const sourceId = packetValue(input.sourcePacket, "source_id");
+    const title = packetValue(input.sourcePacket, "title");
+    const evidence = packetExcerpt(input.sourcePacket);
+    const accessLevel = packetAccessLevel(input.sourcePacket);
+    const provenance = {
+      sourceIds: [sourceId],
+      evidenceExcerpt: evidence,
+    };
+    return {
+      title,
+      oneSentence: evidence,
+      whyItMatters: evidence,
+      uncertainty: evidence,
+      claims: [{
+        text: evidence,
+        sourceIds: [sourceId],
+        evidenceExcerpt: evidence,
+      }],
+      accessLevel,
+      provenance: {
+        title: provenance,
+        oneSentence: provenance,
+        whyItMatters: provenance,
+        uncertainty: provenance,
+      },
+    };
+  }
+}
+
 class WrongSourceGroundingProvider implements ModelProvider {
   async embed(
     texts: readonly string[],
@@ -1129,6 +1203,58 @@ describe("manual editorial run", () => {
 
     const { runId } = await launcher.start({ editionDate: "2033-03-01" });
     expect(factoryCalls).toEqual([{ runId, editionDate: "2033-03-01" }]);
+  });
+
+  it("runs paid research assessments sequentially", async () => {
+    const assessment = new ConcurrencyTrackingAssessmentProvider();
+    const context = createProductionPipelineContext({
+      editionDate: "2033-03-10",
+      runId: "sequential-assessment",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new GroundedProductionProvider(),
+        assessment,
+      },
+      collectCandidates: async () => [
+        rawResearchCandidate("2607.30001", "First sequential assessment"),
+        rawResearchCandidate("2607.30002", "Second sequential assessment"),
+      ],
+    });
+    const normalized = await context.normalize(await context.collect());
+    const enriched = await context.enrich(normalized);
+    const prefiltered = await context.prefilter(enriched);
+
+    await expect(context.assess(prefiltered)).resolves.toHaveLength(2);
+    expect(assessment.maximumActive).toBe(1);
+    expect(assessment.startedPackets[0]).toContain(
+      "First sequential assessment",
+    );
+    expect(assessment.startedPackets[1]).toContain(
+      "Second sequential assessment",
+    );
+  });
+
+  it("runs paid synthesis calls sequentially", async () => {
+    const summary = new ConcurrencyTrackingSummaryProvider();
+    const context = createProductionPipelineContext({
+      editionDate: "2033-03-11",
+      runId: "sequential-synthesis",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary,
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [
+        rawNewsCandidate("sequential-world", "world"),
+        rawNewsCandidate("sequential-tech", "technology"),
+      ],
+    });
+    const normalized = await context.normalize(await context.collect());
+
+    await expect(context.synthesize(normalized)).resolves.toHaveLength(2);
+    expect(summary.maximumActive).toBe(1);
   });
 
   it("removes hard-stop radar before assessment and gives degraded radar only 120 summary tokens", async () => {

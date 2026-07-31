@@ -20,6 +20,7 @@ import {
   type StructuredSummary,
 } from "../contracts/editorial";
 import type { CollectionFailureKind } from "../sources/types";
+import type { BudgetReservation } from "../models/budget-gate";
 
 export type EditionListInput = {
   limit: number;
@@ -170,6 +171,28 @@ export type ModelUsageRecord = {
   embeddingCount: number;
   unitPriceUsd: number;
   estimatedCostUsd: number;
+};
+
+export type ReserveModelBudgetInput = {
+  reservationId: string;
+  runId: string;
+  monthStart: string;
+  maximumCostMicrousd: number;
+  monthlyLimitMicrousd: number;
+  reservedAt: string;
+};
+
+export type ReconcileModelBudgetInput = {
+  reservationId: string;
+  runId: string;
+  actualCostMicrousd: number;
+  reconciledAt: string;
+};
+
+export type ReleaseModelBudgetInput = {
+  reservationId: string;
+  runId: string;
+  releasedAt: string;
 };
 
 export class RepositoryValidationError extends Error {
@@ -615,6 +638,11 @@ export interface BriefingRepository {
   getWorkflowRunDetail(runId: string): Promise<WorkflowRunDetail | null>;
   recordModelUsage(runId: string, usage: ModelUsageRecord): Promise<void>;
   listMonthlyModelUsage(monthStart: string): Promise<readonly ModelUsageRecord[]>;
+  reserveModelBudget(
+    input: ReserveModelBudgetInput,
+  ): Promise<BudgetReservation | null>;
+  reconcileModelBudget(input: ReconcileModelBudgetInput): Promise<void>;
+  releaseModelBudget(input: ReleaseModelBudgetInput): Promise<void>;
   recordRetentionAudit(now: string, report: RetentionReport): Promise<void>;
   pruneExpiredData(now: string): Promise<RetentionReport>;
 }

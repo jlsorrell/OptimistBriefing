@@ -5,6 +5,11 @@ import { z } from "zod";
 import { D1BriefingRepository } from "../db/d1-repository";
 import { CostLedger } from "../models/cost-ledger";
 import { OpenAIModelProvider } from "../models/openai-provider";
+import type { OpenAIModelProviderOptions } from "../models/openai-provider";
+import {
+  actualUsageUnits,
+  maximumCostMicrousd,
+} from "../models/budget-gate";
 import { pruneExpiredData } from "../maintenance/retention";
 import { shouldRunAt } from "./schedule";
 import {
@@ -65,6 +70,78 @@ function monthStart(now: Date): string {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)).toISOString();
 }
 
+type ModelBudgetCallbacks = Required<
+  Pick<
+    OpenAIModelProviderOptions,
+    "authorize" | "reconcile" | "release"
+  >
+>;
+
+export function createD1ModelBudgetCallbacks(
+  repository: Pick<
+    D1BriefingRepository,
+    | "reserveModelBudget"
+    | "reconcileModelBudget"
+    | "releaseModelBudget"
+  >,
+  options: {
+    runId: string;
+    monthlyLimitUsd: number;
+    unitPricesUsd: Readonly<Record<string, number>>;
+    clock: () => Date;
+  },
+): ModelBudgetCallbacks {
+  const monthlyLimitMicrousd = Math.floor(
+    options.monthlyLimitUsd * 1_000_000,
+  );
+  if (
+    !Number.isSafeInteger(monthlyLimitMicrousd) ||
+    monthlyLimitMicrousd <= 0
+  ) {
+    throw new RangeError("Monthly model budget must be positive micro-USD.");
+  }
+  const priceFor = (model: string): number => {
+    const price = options.unitPricesUsd[model];
+    if (price === undefined) throw new Error(`UNBUDGETED_MODEL:${model}`);
+    return price;
+  };
+  return {
+    authorize: async (request) => {
+      const now = options.clock();
+      const maximumCost = maximumCostMicrousd(
+        request.maximumBillableUnits,
+        priceFor(request.model),
+      );
+      return repository.reserveModelBudget({
+        reservationId: crypto.randomUUID(),
+        runId: options.runId,
+        monthStart: monthStart(now),
+        maximumCostMicrousd: maximumCost,
+        monthlyLimitMicrousd,
+        reservedAt: now.toISOString(),
+      });
+    },
+    reconcile: async (reservation, usage) => {
+      await repository.reconcileModelBudget({
+        reservationId: reservation.id,
+        runId: options.runId,
+        actualCostMicrousd: maximumCostMicrousd(
+          actualUsageUnits(usage),
+          priceFor(usage.model),
+        ),
+        reconciledAt: options.clock().toISOString(),
+      });
+    },
+    release: async (reservation) => {
+      await repository.releaseModelBudget({
+        reservationId: reservation.id,
+        runId: options.runId,
+        releasedAt: options.clock().toISOString(),
+      });
+    },
+  };
+}
+
 export function createBudgetedPipelineRuntimeFactory(
   env: Pick<
     Env,
@@ -106,10 +183,22 @@ export function createBudgetedPipelineRuntimeFactory(
     const recordUsage = async (usage: Parameters<CostLedger["record"]>[0]) => {
       await repository.recordModelUsage(runId, ledger.record(usage));
     };
+    const unitPricesUsd = {
+      [config.SUMMARY_MODEL]: config.SUMMARY_UNIT_PRICE_USD,
+      [config.ASSESSMENT_MODEL]: config.ASSESSMENT_UNIT_PRICE_USD,
+      [config.EMBEDDING_MODEL]: config.EMBEDDING_UNIT_PRICE_USD,
+    };
+    const budgetCallbacks = createD1ModelBudgetCallbacks(repository, {
+      runId,
+      monthlyLimitUsd: config.MONTHLY_BUDGET_USD,
+      unitPricesUsd,
+      clock,
+    });
     const providerOptions = {
       apiKey: config.OPENAI_API_KEY,
       embeddingModel: config.EMBEDDING_MODEL,
       onUsage: recordUsage,
+      ...budgetCallbacks,
     };
     return {
       providers: {
@@ -143,10 +232,10 @@ export class DailyBriefingWorkflow extends WorkflowEntrypoint<Env, RunParams> {
     if (existing?.status === "published") return decision;
 
     const runId = params.runId ?? editionDate;
-    const runtime = await createBudgetedPipelineRuntimeFactory(
-      this.env,
-      () => now,
-    )({ runId, editionDate });
+    const runtime = await createBudgetedPipelineRuntimeFactory(this.env)({
+      runId,
+      editionDate,
+    });
     const context = createD1ProductionPipelineContext(
       new D1PipelineStore(this.env.DB),
       editionDate,

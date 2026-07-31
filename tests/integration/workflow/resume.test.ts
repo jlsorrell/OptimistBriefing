@@ -9,10 +9,12 @@ import type {
   StructuredSummary,
 } from "../../../src/contracts/editorial";
 import {
+  createD1ModelBudgetCallbacks,
   RunParamsSchema,
   ScheduledModelConfigSchema,
 } from "../../../src/workflow/daily-briefing-workflow";
 import { D1BriefingRepository } from "../../../src/db/d1-repository";
+import { BudgetHardStopError } from "../../../src/models/budget-gate";
 import {
   PIPELINE_STEPS,
   runEditorialPipeline,
@@ -265,6 +267,77 @@ function resumableContext(
 }
 
 describe("durable workflow checkpoint execution", () => {
+  it("authorizes every paid request against live D1 reservations", async () => {
+    const runId = "live-budget-runtime";
+    await env.DB.prepare(
+      `INSERT INTO workflow_runs (
+        id, edition_date, status, current_step, retryable, attempt_count,
+        failure_code, estimated_cost_usd, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      runId,
+      "2036-03-01",
+      "running",
+      "assess",
+      0,
+      1,
+      null,
+      0,
+      now,
+      now,
+    ).run();
+    const callbacks = createD1ModelBudgetCallbacks(
+      new D1BriefingRepository(env.DB),
+      {
+        runId,
+        monthlyLimitUsd: 1,
+        unitPricesUsd: { "paid-model": 0.001 },
+        clock: () => new Date("2036-03-01T09:00:00.000Z"),
+      },
+    );
+
+    const first = await callbacks.authorize({
+      model: "paid-model",
+      maximumBillableUnits: 600,
+    });
+    expect(first).not.toBeNull();
+    expect(await callbacks.authorize({
+      model: "paid-model",
+      maximumBillableUnits: 600,
+    })).toBeNull();
+    if (first === null) throw new Error("Expected first reservation");
+    await callbacks.reconcile(first, {
+      provider: "openai",
+      operation: "generation",
+      model: "paid-model",
+      inputTokens: 90,
+      outputTokens: 10,
+      totalTokens: 100,
+      embeddingCount: 0,
+    });
+    await expect(callbacks.authorize({
+      model: "paid-model",
+      maximumBillableUnits: 600,
+    })).resolves.not.toBeNull();
+  });
+
+  it("persists a live budget rejection as retryable and rethrows it", async () => {
+    const context = resumableContext("publish");
+    context.assess = async () => {
+      throw new BudgetHardStopError();
+    };
+    context.checkpointExecutor = async (_step, execute) => execute();
+
+    await expect(runEditorialPipeline(context)).rejects.toBeInstanceOf(
+      BudgetHardStopError,
+    );
+    expect(context.store.runs.get(context.runId)).toMatchObject({
+      status: "retryable",
+      retryable: true,
+      failureCode: "BUDGET_HARD_STOP",
+    });
+  });
+
   it.each([
     ["paused", "resume"],
     ["errored", "restart"],

@@ -113,6 +113,114 @@ async function publishFixtureEdition(
 }
 
 describe("D1BriefingRepository", () => {
+  it("atomically reserves monthly model budget and counts reconciled cost instead of maxima", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const createdAt = "2036-02-01T09:00:00.000Z";
+    await env.DB.batch(
+      ["budget-run-a", "budget-run-b"].map((runId, index) =>
+        env.DB.prepare(
+          `INSERT INTO workflow_runs (
+            id, edition_date, status, current_step, retryable, attempt_count,
+            failure_code, estimated_cost_usd, created_at, updated_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        ).bind(
+          runId,
+          `2036-02-0${index + 1}`,
+          "running",
+          "assess",
+          0,
+          1,
+          null,
+          0,
+          createdAt,
+          createdAt,
+        ),
+      ),
+    );
+
+    const attempts = await Promise.all([
+      repo.reserveModelBudget({
+        reservationId: "reservation-a",
+        runId: "budget-run-a",
+        monthStart: "2036-02-01T00:00:00.000Z",
+        maximumCostMicrousd: 600_000,
+        monthlyLimitMicrousd: 1_000_000,
+        reservedAt: createdAt,
+      }),
+      repo.reserveModelBudget({
+        reservationId: "reservation-b",
+        runId: "budget-run-b",
+        monthStart: "2036-02-01T00:00:00.000Z",
+        maximumCostMicrousd: 600_000,
+        monthlyLimitMicrousd: 1_000_000,
+        reservedAt: createdAt,
+      }),
+    ]);
+
+    const accepted = attempts.filter(
+      (reservation): reservation is NonNullable<typeof reservation> =>
+        reservation !== null,
+    );
+    expect(accepted).toHaveLength(1);
+    expect(await env.DB.prepare(
+      `SELECT COALESCE(SUM(
+        CASE
+          WHEN status = 'reserved' THEN maximum_cost_microusd
+          WHEN status = 'reconciled' THEN actual_cost_microusd
+          ELSE 0
+        END
+      ), 0) AS total
+      FROM model_budget_reservations
+      WHERE month_start = ?`,
+    ).bind("2036-02-01T00:00:00.000Z").first<{ total: number }>())
+      .toEqual({ total: 600_000 });
+
+    const first = accepted[0]!;
+    const firstRunId = first.id === "reservation-a"
+      ? "budget-run-a"
+      : "budget-run-b";
+    await repo.reconcileModelBudget({
+      reservationId: first.id,
+      runId: firstRunId,
+      actualCostMicrousd: 100_000,
+      reconciledAt: "2036-02-01T09:01:00.000Z",
+    });
+    const secondRunId = firstRunId === "budget-run-a"
+      ? "budget-run-b"
+      : "budget-run-a";
+    const second = await repo.reserveModelBudget({
+      reservationId: "reservation-after-reconcile",
+      runId: secondRunId,
+      monthStart: "2036-02-01T00:00:00.000Z",
+      maximumCostMicrousd: 600_000,
+      monthlyLimitMicrousd: 1_000_000,
+      reservedAt: "2036-02-01T09:02:00.000Z",
+    });
+    expect(second).toEqual({
+      id: "reservation-after-reconcile",
+      maximumCostMicrousd: 600_000,
+    });
+    if (second === null) throw new Error("Expected second reservation");
+
+    await repo.releaseModelBudget({
+      reservationId: second.id,
+      runId: secondRunId,
+      releasedAt: "2036-02-01T09:03:00.000Z",
+    });
+    expect(await env.DB.prepare(
+      `SELECT COALESCE(SUM(
+        CASE
+          WHEN status = 'reserved' THEN maximum_cost_microusd
+          WHEN status = 'reconciled' THEN actual_cost_microusd
+          ELSE 0
+        END
+      ), 0) AS total
+      FROM model_budget_reservations
+      WHERE month_start = ?`,
+    ).bind("2036-02-01T00:00:00.000Z").first<{ total: number }>())
+      .toEqual({ total: 100_000 });
+  });
+
   it("accepts only exact legacy or complete bounded edition metadata", () => {
     expect(EditionMetadataSchema.parse({})).toEqual({
       missingSections: [],

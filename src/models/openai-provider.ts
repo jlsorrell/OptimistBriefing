@@ -9,6 +9,13 @@ import type {
   ModelProvider,
   ModelUsage,
 } from "./provider";
+import {
+  BudgetHardStopError,
+  maximumEmbeddingUnits,
+  maximumGenerationUnits,
+  type BudgetReservation,
+  type ModelBudgetRequest,
+} from "./budget-gate";
 
 export interface OpenAIModelProviderOptions {
   apiKey: string;
@@ -16,6 +23,14 @@ export interface OpenAIModelProviderOptions {
   embeddingModel: string;
   maxTransportRetries?: number;
   onUsage?: (usage: ModelUsage) => void | Promise<void>;
+  authorize?: (
+    request: ModelBudgetRequest,
+  ) => Promise<BudgetReservation | null>;
+  reconcile?: (
+    reservation: BudgetReservation,
+    usage: ModelUsage,
+  ) => Promise<void>;
+  release?: (reservation: BudgetReservation) => Promise<void>;
   fetch?: typeof fetch;
   sleep?: (milliseconds: number) => Promise<void>;
 }
@@ -31,6 +46,15 @@ export class OpenAIModelProvider implements ModelProvider {
   readonly #embeddingModel: string;
   readonly #maxTransportRetries: number;
   readonly #onUsage: ((usage: ModelUsage) => void | Promise<void>) | undefined;
+  readonly #authorize:
+    | ((request: ModelBudgetRequest) => Promise<BudgetReservation | null>)
+    | undefined;
+  readonly #reconcile:
+    | ((reservation: BudgetReservation, usage: ModelUsage) => Promise<void>)
+    | undefined;
+  readonly #release:
+    | ((reservation: BudgetReservation) => Promise<void>)
+    | undefined;
   readonly #sleep: (milliseconds: number) => Promise<void>;
 
   constructor(options: OpenAIModelProviderOptions) {
@@ -53,6 +77,9 @@ export class OpenAIModelProvider implements ModelProvider {
     this.#embeddingModel = options.embeddingModel;
     this.#maxTransportRetries = maxTransportRetries;
     this.#onUsage = options.onUsage;
+    this.#authorize = options.authorize;
+    this.#reconcile = options.reconcile;
+    this.#release = options.release;
     this.#sleep =
       options.sleep ??
       ((milliseconds) =>
@@ -64,22 +91,34 @@ export class OpenAIModelProvider implements ModelProvider {
   async embed(
     texts: readonly string[],
   ): Promise<readonly (readonly number[])[]> {
-    const response = await this.#withTransportRetry(() =>
-      this.#client.embeddings.create({
-        model: this.#embeddingModel,
-        input: [...texts],
-        encoding_format: "float",
-      }),
-    );
-    await this.#recordUsage({
-      provider: "openai",
-      operation: "embedding",
+    const reservation = await this.#reserve({
       model: this.#embeddingModel,
-      inputTokens: response.usage.prompt_tokens,
-      outputTokens: 0,
-      totalTokens: response.usage.total_tokens,
-      embeddingCount: texts.length,
+      maximumBillableUnits: maximumEmbeddingUnits(texts),
     });
+    let usage: ModelUsage | undefined;
+    let response;
+    try {
+      response = await this.#withTransportRetry(() =>
+        this.#client.embeddings.create({
+          model: this.#embeddingModel,
+          input: [...texts],
+          encoding_format: "float",
+        }),
+      );
+      usage = {
+        provider: "openai",
+        operation: "embedding",
+        model: this.#embeddingModel,
+        inputTokens: response.usage.prompt_tokens,
+        outputTokens: 0,
+        totalTokens: response.usage.total_tokens,
+        embeddingCount: texts.length,
+      };
+      await this.#recordAndReconcile(reservation, usage);
+    } catch (error) {
+      if (usage === undefined) await this.#releaseReservation(reservation);
+      throw error;
+    }
     return [...response.data]
       .sort((left, right) => left.index - right.index)
       .map((entry) => entry.embedding);
@@ -88,34 +127,58 @@ export class OpenAIModelProvider implements ModelProvider {
   async generateObject(
     input: GenerateObjectRequest,
   ): Promise<unknown> {
-    const response = await this.#withTransportRetry(() =>
-      this.#client.responses.create({
-        model: this.#generationModel,
-        instructions: input.system,
-        input: input.sourcePacket,
-        max_output_tokens: input.maxOutputTokens,
-        store: false,
-        text: {
-          format: {
-            type: "json_schema",
-            name: input.schemaName,
-            schema: input.jsonSchema,
-            strict: true,
-          },
+    const requestBody = {
+      model: this.#generationModel,
+      instructions: input.system,
+      input: input.sourcePacket,
+      max_output_tokens: input.maxOutputTokens,
+      store: false as const,
+      text: {
+        format: {
+          type: "json_schema" as const,
+          name: input.schemaName,
+          schema: input.jsonSchema,
+          strict: true,
         },
-      }),
-    );
-    const usage = response.usage;
-    if (usage !== undefined) {
-      await this.#recordUsage({
-        provider: "openai",
-        operation: "generation",
-        model: this.#generationModel,
-        inputTokens: usage.input_tokens,
-        outputTokens: usage.output_tokens,
-        totalTokens: usage.total_tokens,
-        embeddingCount: 0,
-      });
+      },
+    };
+    const serializedRequest = JSON.stringify(requestBody);
+    const reservation = await this.#reserve({
+      model: this.#generationModel,
+      maximumBillableUnits: maximumGenerationUnits(
+        serializedRequest,
+        input.maxOutputTokens,
+      ),
+    });
+    let usage: ModelUsage | undefined;
+    let releaseAttempted = false;
+    let response;
+    try {
+      response = await this.#withTransportRetry(() =>
+        this.#client.responses.create(requestBody),
+      );
+      const responseUsage = response.usage;
+      if (responseUsage !== undefined) {
+        usage = {
+          provider: "openai",
+          operation: "generation",
+          model: this.#generationModel,
+          inputTokens: responseUsage.input_tokens,
+          outputTokens: responseUsage.output_tokens,
+          totalTokens: responseUsage.total_tokens,
+          embeddingCount: 0,
+        };
+        await this.#recordAndReconcile(reservation, usage);
+      } else {
+        releaseAttempted = true;
+        await this.#releaseReservation(reservation);
+      }
+    } catch (error) {
+      if (usage === undefined && !releaseAttempted) {
+        releaseAttempted = true;
+        await this.#releaseReservation(reservation);
+      }
+      throw error;
     }
     try {
       return JSON.parse(response.output_text) as unknown;
@@ -124,6 +187,39 @@ export class OpenAIModelProvider implements ModelProvider {
         return response.output_text;
       }
       throw error;
+    }
+  }
+
+  async #reserve(
+    request: ModelBudgetRequest,
+  ): Promise<BudgetReservation | undefined> {
+    if (this.#authorize === undefined) return undefined;
+    const reservation = await this.#authorize(request);
+    if (reservation === null) throw new BudgetHardStopError();
+    return reservation;
+  }
+
+  async #recordAndReconcile(
+    reservation: BudgetReservation | undefined,
+    usage: ModelUsage,
+  ): Promise<void> {
+    let recordError: unknown;
+    try {
+      await this.#recordUsage(usage);
+    } catch (error) {
+      recordError = error;
+    }
+    if (reservation !== undefined) {
+      await this.#reconcile?.(reservation, usage);
+    }
+    if (recordError !== undefined) throw recordError;
+  }
+
+  async #releaseReservation(
+    reservation: BudgetReservation | undefined,
+  ): Promise<void> {
+    if (reservation !== undefined) {
+      await this.#release?.(reservation);
     }
   }
 
