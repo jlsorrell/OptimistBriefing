@@ -78,10 +78,19 @@ The runtime contract is `MONTHLY_BUDGET_USD`, bounded to at most 30, plus
 
 - Narrow retention launch-blocker commit:
   `f6d7fbd fix: expire workflow artifact audits`.
-- Required documentation commit: this report is part of the pending
-  `docs: add briefing deployment and operations runbooks` commit; its hash will
-  be recorded in the post-review report update.
-- Independent reviewer verdict: pending.
+- Required documentation commit:
+  `30f1620 docs: add briefing deployment and operations runbooks`.
+- Independent review of `7c7496d..30f1620`: CHANGES REQUIRED.
+  - Important: preview D1 was neither migrated nor seeded, and the committed
+    local Playwright harness cannot target/authenticate against preview.
+  - Minor: source audit query was not attributable to the changed source/state.
+- Review round 1 response:
+  - added exact preview-config migration and fixed-fixture seed commands;
+  - documented that the current local Playwright harness cannot test preview
+    and blocks production approval until a separately reviewed preview harness
+    exists and passes;
+  - narrowed the source audit query to source ID, actor, enabled change, and
+    timestamp.
 
 ## Remaining concerns
 
@@ -92,6 +101,9 @@ The runtime contract is `MONTHLY_BUDGET_USD`, bounded to at most 30, plus
   identifiers and prices must be verified immediately before live use.
 - There is no draft-only live-source rehearsal. Any approved preview run must
   use isolated resources and can incur cost and publish into its preview D1.
+- Preview browser automation is not yet implemented. Local 39/39 browser
+  evidence does not substitute for an Access-protected preview run; production
+  approval remains blocked on that separate change.
 
 ## External actions deliberately not performed
 

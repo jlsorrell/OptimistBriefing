@@ -72,14 +72,17 @@ source update endpoint accepts an `enabled` change and records a
 
 4. Confirm the response shows `enabled: false`.
 5. Confirm `GET /api/sources` reflects the change.
-6. Verify the audit record without exposing its full payload:
+6. Verify the audit record with bounded JSON fields rather than exposing its
+   full payload:
 
    ```sh
-   npx wrangler d1 execute optimist-briefing --remote --command "SELECT event_type, created_at FROM audit_events WHERE event_type = 'source_updated' ORDER BY created_at DESC LIMIT 20"
+   npx wrangler d1 execute optimist-briefing --remote --command "SELECT json_extract(event_json, '$.sourceId') AS source_id, json_extract(event_json, '$.actorEmail') AS actor_email, json_extract(event_json, '$.changes.enabled') AS enabled, created_at FROM audit_events WHERE event_type = 'source_updated' AND json_extract(event_json, '$.sourceId') = 'REPLACE_WITH_SOURCE_ID' ORDER BY created_at DESC LIMIT 20"
    ```
 
 The JavaScript and SQL are templates. Verify the authenticated origin, source
-ID, account, and database before execution.
+ID, account, and database before execution. Keep the bounded output private
+because it contains the operator email. Confirm the newest row has the intended
+source ID, actor, and enabled state.
 
 ## Re-enable criteria and procedure
 

@@ -223,8 +223,30 @@ use `d1 execute --remote` to hand-apply migration SQL.
 
 Use a distinct preview Worker name, D1 database, Workflow name, Access
 application, and local configuration file outside the repository. Resolve and
-inspect every preview binding before upload. Build, then deploy only after the
-user approves the preview deployment:
+inspect every preview binding before upload. Apply migrations through the
+preview config and verify that none remain:
+
+```sh
+npx wrangler d1 migrations apply DB --remote --config "$OPTIMIST_PREVIEW_CONFIG"
+npx wrangler d1 migrations list DB --remote --config "$OPTIMIST_PREVIEW_CONFIG"
+```
+
+The preview UI needs data. The existing `seed:dev` command is local-only and
+must not be pointed at a remote database. Generate the repository's fixed,
+nonsecret fixture SQL into a protected file outside the repository, inspect the
+destination, then apply it only to the preview config's `DB` binding:
+
+```sh
+node --import tsx --input-type=module -e 'import { writeFileSync } from "node:fs"; import { seedSql } from "./scripts/seed-dev.ts"; writeFileSync(process.argv[1], seedSql(), { mode: 0o600 });' "$OPTIMIST_PREVIEW_SEED_SQL"
+npx wrangler d1 execute DB --remote --config "$OPTIMIST_PREVIEW_CONFIG" --file "$OPTIMIST_PREVIEW_SEED_SQL"
+```
+
+Both variables must be reviewed absolute paths. Before the execute command,
+confirm the preview config has a distinct Worker name, D1 UUID, and Workflow
+name, and inspect the generated SQL to verify it contains only the fixed
+`2026-07-29` fixture. Never run this seed against production.
+
+Build, then deploy only after the user approves the preview deployment:
 
 ```sh
 npm run build
@@ -241,9 +263,16 @@ With an allowed Google session:
 3. verify a nonallowed Google account is denied;
 4. verify the allowed account can view the fixture edition and source links;
 5. inspect Today, Archive, Preferences, Run Status, desktop, and mobile;
-6. inspect `GET /api/sources`, `GET /api/runs`, and the relevant run detail;
-7. run Playwright against preview only after configuring its base URL and
-   authenticated storage without committing credentials.
+6. inspect `GET /api/sources`, `GET /api/runs`, and the relevant run detail.
+
+The committed Playwright configuration cannot target preview: it hard-codes the
+local integration server and its tests inject a locally signed assertion that
+Cloudflare Access will not accept. Do not claim that `npm run test:e2e` tested
+preview. Before production approval, add and independently review a
+preview-specific Playwright configuration and authentication harness in a
+separate change, then run it against the Access-protected preview without
+committing Google credentials, cookies, tokens, or storage state. Production
+approval remains blocked until that preview automation is present and passes.
 
 There is no draft-only live-source endpoint. `POST /api/admin/runs` can incur
 model cost and may publish when coverage passes. A live-source preview run
@@ -269,7 +298,8 @@ approval before running it.
 Present the user with:
 
 - verified commit and clean diff;
-- complete local gate and preview results;
+- complete local gates, manual preview results, and the separately reviewed
+  preview Playwright result;
 - DNS review and current zone status;
 - Access allow/deny test evidence;
 - resolved D1 and Workflow bindings;
