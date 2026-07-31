@@ -1,7 +1,7 @@
 # Pre-Merge Hardening Design
 
-**Date:** 2026-07-30  
-**Status:** Approved for planning  
+**Date:** 2026-07-30
+**Status:** Approved for planning
 **Scope:** Resolve the release-blocking and Important findings from the first
 whole-branch review of the private morning briefing.
 
