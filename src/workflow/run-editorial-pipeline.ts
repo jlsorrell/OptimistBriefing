@@ -1138,27 +1138,41 @@ export function createD1ProductionPipelineContext(
         ...news.succeededSourceIds,
         ...research.succeededSourceIds,
       ]);
+      const collectionFailures = [
+        ...news.failures,
+        ...research.failures,
+      ];
       const failuresBySourceId = new Map(
-        [...news.failures, ...research.failures].map((failure) => [
+        collectionFailures.map((failure) => [
           failure.sourceId,
           failure,
         ]),
       );
+      const recordedFailureSourceIds = new Set<string>();
       for (const catalogSource of sources) {
         const failure = failuresBySourceId.get(catalogSource.id);
-        if (failure !== undefined) {
+        if (
+          failure !== undefined &&
+          failure.sourceId !== "unknown-source"
+        ) {
           await store.repository.recordSourceOutcome(
             failure.sourceId,
             failure.kind,
             to,
           );
           sourceFailures.push(`${failure.sourceId}:${failure.kind}`);
+          recordedFailureSourceIds.add(failure.sourceId);
         } else if (succeededSourceIds.has(catalogSource.id)) {
           await store.repository.recordSourceOutcome(
             catalogSource.id,
             "success",
             to,
           );
+        }
+      }
+      for (const failure of collectionFailures) {
+        if (!recordedFailureSourceIds.has(failure.sourceId)) {
+          sourceFailures.push(`${failure.sourceId}:${failure.kind}`);
         }
       }
       return [

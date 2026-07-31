@@ -1542,6 +1542,72 @@ describe("manual editorial run", () => {
     }
   });
 
+  it("retains an unknown-source failure in production metadata without updating health", async () => {
+    await env.DB.prepare("UPDATE sources SET enabled = 0").run();
+    await env.DB.prepare(
+      `INSERT INTO sources (
+        id, canonical_name, canonical_url, role, trust_prior, enabled,
+        restrictions_json, last_success_at, health_status
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      "malformed source",
+      "Malformed Source ID",
+      "https://malformed-source.example/",
+      "reporting",
+      0.5,
+      1,
+      JSON.stringify({
+        bodyRetrieval: "forbidden",
+        paywall: "none",
+        contentUse: "metadata-only",
+        discoveryMechanism: "rss",
+        sectionEligibility: ["world"],
+        feedUrl: "https://malformed-source.example/feed.xml",
+        urlPolicy: {
+          allowedHosts: ["malformed-source.example"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/"],
+        },
+      }),
+      null,
+      "unknown",
+    ).run();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        new Response("private upstream body", { status: 401 })
+      ),
+    );
+    try {
+      const store = createD1PipelineStore(env.DB);
+      const context = createD1ProductionPipelineContext(
+        store,
+        "2033-02-09",
+        "run-unknown-source-failure",
+        {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+      );
+
+      await expect(context.collect()).resolves.toEqual([]);
+      expect(context.sourceFailures).toEqual(["unknown-source:fetch"]);
+      expect(
+        (await store.repository.listSources()).find(
+          ({ id }) => id === "malformed source",
+        ),
+      ).toMatchObject({
+        healthStatus: "unknown",
+        lastSuccessAt: null,
+      });
+      expect(JSON.stringify(context.sourceFailures)).not.toContain(
+        "private upstream body",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("returns the original published result for an idempotent retry", async () => {
     const context = fixturePipelineContext({ runId: "run-idempotent" });
     const first = await runEditorialPipeline(context);

@@ -44,11 +44,19 @@ const RssDocumentSchema = z.object({
   }),
 });
 
+const OutboundUrlPolicySchema = z.object({
+  allowedHosts: z.array(z.string().min(1)).optional(),
+  allowedPorts: z.array(z.string()).optional(),
+  allowedPathPrefixes: z
+    .array(z.string().startsWith("/"))
+    .optional(),
+});
+
 export type ConfiguredFeed = {
   source: ResearchSourceInput;
-  feedUrl: string;
-  feedUrlPolicy?: OutboundUrlPolicy;
-  articleUrlPolicy?: OutboundUrlPolicy;
+  feedUrl: unknown;
+  feedUrlPolicy?: unknown;
+  articleUrlPolicy?: unknown;
 };
 
 function asArray<T>(value: T | readonly T[] | undefined): T[] {
@@ -82,19 +90,7 @@ export class RssAdapter {
     private readonly http: SourceHttpClient,
     feeds: readonly ConfiguredFeed[],
   ) {
-    this.feeds = feeds.map((feed) => ({
-      source: ResearchSourceRecordSchema.parse(feed.source),
-      feedUrl: assertSafeOutboundUrl(
-        feed.feedUrl,
-        feed.feedUrlPolicy,
-      ).toString(),
-      ...(feed.feedUrlPolicy === undefined
-        ? {}
-        : { feedUrlPolicy: feed.feedUrlPolicy }),
-      ...(feed.articleUrlPolicy === undefined
-        ? {}
-        : { articleUrlPolicy: feed.articleUrlPolicy }),
-    }));
+    this.feeds = feeds.map((feed) => ({ ...feed }));
   }
 
   async collect(
@@ -107,12 +103,23 @@ export class RssAdapter {
         .map((feed) => ({
           sourceId: feed.source.id,
           collect: async (): Promise<RawItem[]> => {
+            const source = ResearchSourceRecordSchema.parse(feed.source);
+            const feedUrlPolicy: OutboundUrlPolicy =
+              OutboundUrlPolicySchema.parse(
+                feed.feedUrlPolicy ?? {},
+              ) as OutboundUrlPolicy;
+            const articleUrlPolicy: OutboundUrlPolicy =
+              OutboundUrlPolicySchema.parse(
+                feed.articleUrlPolicy ?? {},
+              ) as OutboundUrlPolicy;
+            const feedUrl = assertSafeOutboundUrl(
+              z.string().min(1).parse(feed.feedUrl),
+              feedUrlPolicy,
+            ).toString();
             const response = await this.http.get(
-              feed.source,
-              feed.feedUrl,
-              feed.feedUrlPolicy === undefined
-                ? {}
-                : { urlPolicy: feed.feedUrlPolicy },
+              source,
+              feedUrl,
+              { urlPolicy: feedUrlPolicy },
             );
             if (response.notModified || response.body === null) {
               return [];
@@ -129,7 +136,7 @@ export class RssAdapter {
               try {
                 originalUrl = assertSafeOutboundUrl(
                   item.link,
-                  feed.articleUrlPolicy,
+                  articleUrlPolicy,
                 ).toString();
               } catch {
                 return [];
@@ -155,9 +162,9 @@ export class RssAdapter {
               return [
                 RawItemSchema.parse({
                   kind: "blog",
-                  sourceId: feed.source.id,
-                  sourceName: feed.source.canonicalName,
-                  sourceRole: feed.source.role,
+                  sourceId: source.id,
+                  sourceName: source.canonicalName,
+                  sourceRole: source.role,
                   title: normalizeWhitespace(item.title),
                   originalUrl,
                   externalId: guid ?? originalUrl,
@@ -175,7 +182,7 @@ export class RssAdapter {
                     `${originalUrl} ${rawDescription}`,
                   ),
                   metadata: {
-                    feedUrl: feed.feedUrl,
+                    feedUrl,
                   },
                 }),
               ];

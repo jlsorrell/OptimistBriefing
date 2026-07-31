@@ -61,4 +61,33 @@ describe("settleSourceCollections", () => {
       failures: [],
     });
   });
+
+  it("settles a synchronously throwing collection without losing siblings", async () => {
+    const result = await settleSourceCollections([
+      {
+        sourceId: "sync-failure",
+        collect() {
+          throw new SourceFetchError({
+            sourceId: "sync-failure",
+            status: null,
+            retryable: true,
+            failureKind: "transport",
+            reason: "private synchronous detail",
+          });
+        },
+      },
+      {
+        sourceId: "healthy-source",
+        collect: async () => ["healthy value"],
+      },
+    ]);
+
+    expect(result).toEqual({
+      values: ["healthy value"],
+      failures: [{ sourceId: "sync-failure", kind: "fetch" }],
+    });
+    expect(JSON.stringify(result)).not.toContain(
+      "private synchronous detail",
+    );
+  });
 });

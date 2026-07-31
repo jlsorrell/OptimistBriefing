@@ -38,8 +38,8 @@ import {
 } from "./types";
 
 export type ConfiguredNewsFeed = ConfiguredFeed & {
-  feedUrlPolicy: OutboundUrlPolicy;
-  articleUrlPolicy: OutboundUrlPolicy;
+  feedUrlPolicy: unknown;
+  articleUrlPolicy: unknown;
 };
 
 type NewsCollectorOptions = {
@@ -493,17 +493,17 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
 
 export class NewsCollector {
   private readonly directFeeds: readonly {
-    source: ResearchSourceRecord;
-    feedUrl: string;
-    feedUrlPolicy: OutboundUrlPolicy;
-    articleUrlPolicy: OutboundUrlPolicy;
+    source: ConfiguredNewsFeed["source"];
+    feedUrl: ConfiguredNewsFeed["feedUrl"];
+    feedUrlPolicy: ConfiguredNewsFeed["feedUrlPolicy"];
+    articleUrlPolicy: ConfiguredNewsFeed["articleUrlPolicy"];
   }[];
   private readonly rss: RssAdapter;
   private readonly sourceOrder: readonly string[];
 
   constructor(private readonly options: NewsCollectorOptions) {
     this.directFeeds = options.directFeeds.map((feed) => ({
-      source: ResearchSourceRecordSchema.parse(feed.source),
+      source: feed.source,
       feedUrl: feed.feedUrl,
       feedUrlPolicy: feed.feedUrlPolicy,
       articleUrlPolicy: feed.articleUrlPolicy,
@@ -537,7 +537,12 @@ export class NewsCollector {
                     `RSS returned an unconfigured source: ${item.sourceId}`,
                   );
                 }
-                const source = feed.source;
+                const source = ResearchSourceRecordSchema.parse(
+                  feed.source,
+                );
+                const articleUrlPolicy = CatalogUrlPolicySchema.parse(
+                  feed.articleUrlPolicy,
+                );
                 const contentUse = restriction(
                   source,
                   "contentUse",
@@ -559,7 +564,7 @@ export class NewsCollector {
                           accept: "text/html,application/xhtml+xml",
                         },
                         useValidators: false,
-                        urlPolicy: feed.articleUrlPolicy,
+                        urlPolicy: articleUrlPolicy,
                       },
                     );
                     if (response.body !== null) {
@@ -702,17 +707,24 @@ export function createNewsCollectorFromCatalog(
 
   for (const source of sources) {
     if (!source.enabled || !isNewsCatalogSource(source)) continue;
-    const collectionSource = ResearchSourceRecordSchema.parse(source);
     if (source.discoveryMechanism === "rss") {
-      const urlPolicy = catalogPolicy(source);
       directFeeds.push({
-        source: collectionSource,
-        feedUrl: catalogString(source, "feedUrl"),
-        feedUrlPolicy: urlPolicy,
-        articleUrlPolicy: urlPolicy,
+        source: {
+          id: source.id,
+          canonicalName: source.canonicalName,
+          canonicalUrl: source.canonicalUrl,
+          role: source.role,
+          enabled: source.enabled,
+          sectionEligibility: [...source.sectionEligibility],
+          restrictions: source.restrictions,
+        },
+        feedUrl: source.restrictions.feedUrl,
+        feedUrlPolicy: source.restrictions.urlPolicy,
+        articleUrlPolicy: source.restrictions.urlPolicy,
       });
       continue;
     }
+    const collectionSource = ResearchSourceRecordSchema.parse(source);
     if (source.discoveryMechanism === "page") {
       discoveryAdapters.push(
         new DirectPageAdapter(

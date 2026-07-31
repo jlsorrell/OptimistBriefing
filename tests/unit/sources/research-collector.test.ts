@@ -707,23 +707,22 @@ describe("provider endpoint and identifier policy", () => {
     ).toThrow();
   });
 
-  it("rejects private and local configured feed URLs", () => {
-    const http = new SourceHttpClient({
-      fetch: vi.fn(async () => new Response("unused")),
-    });
+  it.each([
+    "https://localhost/feed.xml",
+    "https://10.0.0.1/feed.xml",
+  ])("settles private or local configured feed URL %s as policy failure", async (feedUrl) => {
+    const fetch = vi.fn(async () => new Response("unused"));
+    const adapter = new RssAdapter(
+      new SourceHttpClient({ fetch }),
+      [{ source: blogSource, feedUrl }],
+    );
 
-    expect(
-      () =>
-        new RssAdapter(http, [
-          { source: blogSource, feedUrl: "https://localhost/feed.xml" },
-        ]),
-    ).toThrow();
-    expect(
-      () =>
-        new RssAdapter(http, [
-          { source: blogSource, feedUrl: "https://10.0.0.1/feed.xml" },
-        ]),
-    ).toThrow();
+    await expect(adapter.collect(fixedWindow())).resolves.toEqual({
+      candidates: [],
+      succeededSourceIds: [],
+      failures: [{ sourceId: "alignment-lab", kind: "policy" }],
+    });
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("canonicalizes DOI and versioned arXiv identifiers before joins", () => {

@@ -581,6 +581,64 @@ describe("catalog-driven news collection", () => {
     allowedPathPrefixes,
   });
 
+  it("isolates an invalid RSS catalog URL and collects its healthy sibling", async () => {
+    const validFeed = `<?xml version="1.0"?>
+      <rss version="2.0"><channel><item>
+        <title>Healthy sibling feed item</title>
+        <link>https://healthy-feed.example/article</link>
+        <guid>healthy-feed-item</guid>
+        <description>Healthy bounded evidence.</description>
+      </item></channel></rss>`;
+    const fetch = vi.fn(async () =>
+      new Response(validFeed, {
+        headers: { "content-type": "application/rss+xml" },
+      }),
+    );
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      sources: [
+        catalogSource({
+          id: "invalid-feed",
+          canonicalName: "Invalid Feed",
+          canonicalUrl: "https://invalid-feed.example/",
+          role: "reporting",
+          discoveryMechanism: "rss",
+          restrictions: {
+            bodyRetrieval: "forbidden",
+            paywall: "none",
+            contentUse: "metadata-only",
+            feedUrl: "http://invalid-feed.example/feed.xml",
+            urlPolicy: policy("invalid-feed.example", ["/"]),
+          },
+        }),
+        catalogSource({
+          id: "healthy-feed",
+          canonicalName: "Healthy Feed",
+          canonicalUrl: "https://healthy-feed.example/",
+          role: "reporting",
+          discoveryMechanism: "rss",
+          restrictions: {
+            bodyRetrieval: "forbidden",
+            paywall: "none",
+            contentUse: "metadata-only",
+            feedUrl: "https://healthy-feed.example/feed.xml",
+            urlPolicy: policy("healthy-feed.example", ["/"]),
+          },
+        }),
+      ],
+    });
+
+    await expect(collector.collect(fixedWindow())).resolves.toMatchObject({
+      candidates: [expect.objectContaining({ sourceId: "healthy-feed" })],
+      succeededSourceIds: ["healthy-feed"],
+      failures: [{ sourceId: "invalid-feed", kind: "policy" }],
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("constructs a usable Federal Register API adapter with typed policy", async () => {
     const fetch = vi.fn(async (input) => {
       const url = String(input);

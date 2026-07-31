@@ -1,6 +1,7 @@
 import { ZodError } from "zod";
 
 import { SourceFetchError } from "./http-client";
+import { UnsafeOutboundUrlError } from "./outbound-url";
 import {
   type CollectionBatch,
   type CollectionFailure,
@@ -18,6 +19,7 @@ function collectionFailureKind(error: unknown): CollectionFailureKind {
   if (error instanceof ZodError || error instanceof SyntaxError) {
     return "parse";
   }
+  if (error instanceof UnsafeOutboundUrlError) return "policy";
   if (!(error instanceof SourceFetchError)) return "unknown";
   return error.failureKind === "policy" ? "policy" : "fetch";
 }
@@ -26,7 +28,7 @@ export async function settleSourceCollections<T>(
   operations: readonly SourceCollection<T>[],
 ): Promise<{ values: T[]; failures: CollectionFailure[] }> {
   const settled = await Promise.allSettled(
-    operations.map((operation) => operation.collect()),
+    operations.map(async (operation) => operation.collect()),
   );
   const values: T[] = [];
   const failures: CollectionFailure[] = [];
