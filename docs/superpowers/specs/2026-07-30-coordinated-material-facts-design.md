@@ -1,8 +1,8 @@
 # Coordinated Material Facts — Design Specification
 
-**Status:** Approved design  
-**Date:** July 30, 2026  
-**Parent recovery:** Event Clause Parser Recovery  
+**Status:** Approved design<br>
+**Date:** July 30, 2026<br>
+**Parent recovery:** Event Clause Parser Recovery<br>
 **Failure policy:** Fail open
 
 ## 1. Purpose

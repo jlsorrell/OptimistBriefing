@@ -1,8 +1,8 @@
 # Event Clause Parser Recovery — Design Specification
 
-**Status:** Approved design  
-**Date:** July 30, 2026  
-**Parent plan:** Personal Morning Briefing, Task 7  
+**Status:** Approved design<br>
+**Date:** July 30, 2026<br>
+**Parent plan:** Personal Morning Briefing, Task 7<br>
 **Failure policy:** Fail open
 **Amendment:** Exact-object fact clauses and organization-led headlines
 approved July 30, 2026
