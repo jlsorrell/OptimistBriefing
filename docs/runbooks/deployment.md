@@ -265,14 +265,39 @@ With an allowed Google session:
 5. inspect Today, Archive, Preferences, Run Status, desktop, and mobile;
 6. inspect `GET /api/sources`, `GET /api/runs`, and the relevant run detail.
 
-The committed Playwright configuration cannot target preview: it hard-codes the
-local integration server and its tests inject a locally signed assertion that
-Cloudflare Access will not accept. Do not claim that `npm run test:e2e` tested
-preview. Before production approval, add and independently review a
-preview-specific Playwright configuration and authentication harness in a
-separate change, then run it against the Access-protected preview without
-committing Google credentials, cookies, tokens, or storage state. Production
-approval remains blocked until that preview automation is present and passes.
+The local `npm run test:e2e` suite cannot target preview: it hard-codes the
+local integration server and uses a locally signed assertion that Cloudflare
+Access will not accept. Do not claim that it tested preview. To rehearse the
+Access-protected preview, run:
+
+```sh
+npm run test:e2e:preview
+```
+
+The command opens headed Chromium for the allowed user to complete Google
+authentication. It does not start the preview suite until `/health` returns
+exactly `{"status":"ok"}`, then closes the authentication browser and runs the
+desktop, tablet, and mobile projects. The harness accepts only the preview,
+Cloudflare Access, and Google authentication origins.
+
+Authentication state and Playwright output live only in a uniquely named
+directory directly under Node's `os.tmpdir()`: the directory is mode `0700` and
+its `storage-state.json` is mode `0600`. The harness removes that exact
+directory after success, failure, or `SIGINT`/`SIGTERM`; it rejects broad,
+unrelated, or symlinked cleanup targets. Playwright trace, screenshot, and
+video artifacts are disabled, and all preview tests are read-only: they make
+only GET/navigation requests and verify that run state is unchanged. To list
+any unexpected leftovers portably, use Node's actual temporary directory:
+
+```sh
+node --input-type=module -e 'import { readdirSync } from "node:fs"; import { tmpdir } from "node:os"; console.log(readdirSync(tmpdir()).filter((name) => name.startsWith("optimist-preview-e2e-")).join("\\n"));'
+```
+
+Do not commit Google credentials, cookies, tokens, storage state, or test
+artifacts. The signed-out Access challenge and allowed Google session are
+covered by the harness, but a real nonallowed Google account has not been
+tested. That unresolved nonallowed-account test continues to block production
+approval even if the preview rehearsal passes.
 
 There is no draft-only live-source endpoint. `POST /api/admin/runs` can incur
 model cost and may publish when coverage passes. A live-source preview run
