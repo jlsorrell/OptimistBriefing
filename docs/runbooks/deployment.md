@@ -284,15 +284,29 @@ Cloudflare Access, and Google authentication origins.
 Authentication state and Playwright output live only in a uniquely named
 directory directly under Node's `os.tmpdir()`: the directory is mode `0700` and
 its `storage-state.json` is mode `0600`. The harness removes that exact
-directory after success, failure, or `SIGINT`/`SIGTERM`; it rejects broad,
-unrelated, or symlinked cleanup targets. Playwright trace, screenshot, and
-video artifacts are disabled, and all preview tests are read-only: they make
-only GET/navigation requests and verify that run state is unchanged. To list
-any unexpected leftovers portably, use Node's actual temporary directory:
+directory after success or failure. On `SIGINT`/`SIGTERM`, it first terminates
+and awaits the active authentication browser or Playwright child, then removes
+state and relays the first signal. It rejects broad, unrelated, or symlinked
+cleanup targets. Failed suite details are suppressed in favor of a generic
+retry message so expired Access or Google pages cannot reach terminal output.
+Playwright trace, screenshot, and video artifacts are disabled, and all preview
+tests are read-only: they make only GET/navigation requests and verify that run
+state is unchanged. To list any unexpected leftovers portably, use Node's
+actual temporary directory:
 
 ```sh
 node --input-type=module -e 'import { readdirSync } from "node:fs"; import { tmpdir } from "node:os"; console.log(readdirSync(tmpdir()).filter((name) => name.startsWith("optimist-preview-e2e-")).join("\\n"));'
 ```
+
+Retain this required secret-free evidence with the rehearsal record:
+
+- the total test count and the `desktop`, `tablet`, and `mobile` project names;
+- the preview command's numeric exit status;
+- the deployed preview Worker version;
+- the allowed-session and signed-out Access-policy results, while marking the
+  real nonallowed-account result unresolved;
+- the Workflow instance count before and after the rehearsal; and
+- the D1 migration status after the rehearsal.
 
 Do not commit Google credentials, cookies, tokens, storage state, or test
 artifacts. The signed-out Access challenge and allowed Google session are

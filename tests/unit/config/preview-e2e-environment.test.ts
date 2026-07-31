@@ -1,15 +1,38 @@
+import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import {
   PREVIEW_ORIGIN,
+  PREVIEW_TEMP_PREFIX,
   assertAuthenticationNavigation,
   assertTemporaryDirectory,
   normalizeChildExitCode,
   resolvePreviewBaseURL,
   resolvePreviewRuntimeEnvironment,
 } from "../../../scripts/preview-e2e/environment";
+
+const temporaryPaths: string[] = [];
+
+async function createProtectedRuntimeState(): Promise<{
+  tempDirectory: string;
+  storageStatePath: string;
+}> {
+  const tempDirectory = await mkdtemp(join(tmpdir(), PREVIEW_TEMP_PREFIX));
+  temporaryPaths.push(tempDirectory);
+  await chmod(tempDirectory, 0o700);
+  const storageStatePath = join(tempDirectory, "storage-state.json");
+  await writeFile(storageStatePath, "{}", { mode: 0o600 });
+  await chmod(storageStatePath, 0o600);
+  return { tempDirectory, storageStatePath };
+}
+
+afterEach(async () => {
+  await Promise.all(temporaryPaths.splice(0).map((path) =>
+    rm(path, { force: true, recursive: true })
+  ));
+});
 
 describe("preview E2E environment", () => {
   it("defaults to and accepts only the canonical preview origin", () => {
@@ -46,9 +69,8 @@ describe("preview E2E environment", () => {
     );
   });
 
-  it("requires the exact storage-state child of the runner temp directory", () => {
-    const tempDirectory = join(tmpdir(), "optimist-preview-e2e-unit");
-    const storageStatePath = join(tempDirectory, "storage-state.json");
+  it("requires a real protected directory and exact protected storage-state file", async () => {
+    const { tempDirectory, storageStatePath } = await createProtectedRuntimeState();
     expect(resolvePreviewRuntimeEnvironment({
       OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
       OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
@@ -58,6 +80,52 @@ describe("preview E2E environment", () => {
       OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
       OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
       OPTIMIST_PREVIEW_STORAGE_STATE: join(tempDirectory, "..", "state.json"),
+    })).toThrow("Preview storage state must be the protected temporary file");
+  });
+
+  it("rejects a missing, non-regular, or non-0600 storage-state leaf", async () => {
+    const { tempDirectory, storageStatePath } = await createProtectedRuntimeState();
+    await chmod(storageStatePath, 0o644);
+    expect(() => resolvePreviewRuntimeEnvironment({
+      OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
+      OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
+      OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
+    })).toThrow("Preview storage state must be the protected temporary file");
+
+    await rm(storageStatePath);
+    expect(() => resolvePreviewRuntimeEnvironment({
+      OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
+      OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
+      OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
+    })).toThrow("Preview storage state must be the protected temporary file");
+
+    await symlink(tempDirectory, storageStatePath);
+    expect(() => resolvePreviewRuntimeEnvironment({
+      OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
+      OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
+      OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
+    })).toThrow("Preview storage state must be the protected temporary file");
+  });
+
+  it("rejects a symlinked or non-0700 runtime directory", async () => {
+    const { tempDirectory, storageStatePath } = await createProtectedRuntimeState();
+    await chmod(tempDirectory, 0o755);
+    expect(() => resolvePreviewRuntimeEnvironment({
+      OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
+      OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
+      OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
+    })).toThrow("Preview storage state must be the protected temporary file");
+
+    const targetDirectory = await mkdtemp(join(tmpdir(), "preview-runtime-target-"));
+    const linkedDirectory = join(tmpdir(), `${PREVIEW_TEMP_PREFIX}runtime-link-${Date.now()}`);
+    temporaryPaths.push(linkedDirectory, targetDirectory);
+    await chmod(targetDirectory, 0o700);
+    await writeFile(join(targetDirectory, "storage-state.json"), "{}", { mode: 0o600 });
+    await symlink(targetDirectory, linkedDirectory);
+    expect(() => resolvePreviewRuntimeEnvironment({
+      OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
+      OPTIMIST_PREVIEW_TEMP_DIR: linkedDirectory,
+      OPTIMIST_PREVIEW_STORAGE_STATE: join(linkedDirectory, "storage-state.json"),
     })).toThrow("Preview storage state must be the protected temporary file");
   });
 

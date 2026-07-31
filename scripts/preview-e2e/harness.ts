@@ -5,12 +5,14 @@ import { resolvePreviewBaseURL } from "./environment";
 export interface PreviewHarnessDependencies {
   createTempDirectory(): Promise<string>;
   removeTempDirectory(tempDirectory: string): Promise<void>;
-  registerSignalCleanup(cleanup: () => Promise<void>): () => void;
+  registerSignalCleanup(
+    cleanup: (signal: NodeJS.Signals) => Promise<void>,
+  ): () => void;
   captureAccessState(input: {
     baseURL: string;
     storageStatePath: string;
-  }): Promise<void>;
-  runPreviewSuite(env: NodeJS.ProcessEnv): Promise<number>;
+  }, signal: AbortSignal): Promise<void>;
+  runPreviewSuite(env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<number>;
 }
 
 export async function runPreviewHarness(
@@ -18,24 +20,64 @@ export async function runPreviewHarness(
   dependencies: PreviewHarnessDependencies,
 ): Promise<number> {
   const baseURL = resolvePreviewBaseURL(env.OPTIMIST_PREVIEW_BASE_URL);
-  const tempDirectory = await dependencies.createTempDirectory();
-  const storageStatePath = join(tempDirectory, "storage-state.json");
+  let tempDirectory: string | undefined;
   let cleanupPromise: Promise<void> | undefined;
   const cleanup = () => {
+    if (tempDirectory === undefined) return Promise.resolve();
     cleanupPromise ??= dependencies.removeTempDirectory(tempDirectory);
     return cleanupPromise;
   };
-  const unregister = dependencies.registerSignalCleanup(cleanup);
+  const abortController = new AbortController();
+  let activeOperation: Promise<unknown> | undefined;
+  let receivedSignal: NodeJS.Signals | undefined;
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = (signal: NodeJS.Signals) => {
+    if (receivedSignal === undefined) {
+      receivedSignal = signal;
+      abortController.abort(signal);
+    }
+    shutdownPromise ??= (async () => {
+      try {
+        await activeOperation;
+      } catch {
+        // The signal path deliberately suppresses operation details.
+      }
+      await cleanup();
+    })();
+    return shutdownPromise;
+  };
+  const unregister = dependencies.registerSignalCleanup(shutdown);
   try {
-    await dependencies.captureAccessState({ baseURL, storageStatePath });
-    return await dependencies.runPreviewSuite({
+    activeOperation = dependencies.createTempDirectory().then((createdDirectory) => {
+      tempDirectory = createdDirectory;
+      return createdDirectory;
+    });
+    await activeOperation;
+    if (receivedSignal !== undefined) return 1;
+    if (tempDirectory === undefined) throw new Error("Preview temporary directory was not created");
+    const storageStatePath = join(tempDirectory, "storage-state.json");
+    activeOperation = dependencies.captureAccessState(
+      { baseURL, storageStatePath },
+      abortController.signal,
+    );
+    await activeOperation;
+    if (receivedSignal !== undefined) return 1;
+    const suiteOperation = dependencies.runPreviewSuite({
       ...env,
       OPTIMIST_PREVIEW_BASE_URL: baseURL,
       OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
       OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
-    });
+    }, abortController.signal);
+    activeOperation = suiteOperation;
+    return await suiteOperation;
+  } catch (error) {
+    if (receivedSignal !== undefined) return 1;
+    throw error;
   } finally {
-    unregister();
-    await cleanup();
+    try {
+      await cleanup();
+    } finally {
+      unregister();
+    }
   }
 }

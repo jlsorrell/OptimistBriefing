@@ -1,3 +1,4 @@
+import { lstatSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -33,6 +34,66 @@ export function assertTemporaryDirectory(
   return candidate;
 }
 
+export function assertProtectedTemporaryDirectory(
+  path: string,
+  systemTempDirectory = tmpdir(),
+): string {
+  const candidate = assertTemporaryDirectory(path, systemTempDirectory);
+  try {
+    const metadata = lstatSync(candidate);
+    if (
+      metadata.isSymbolicLink() ||
+      !metadata.isDirectory() ||
+      (metadata.mode & 0o777) !== 0o700 ||
+      dirname(realpathSync(candidate)) !== realpathSync(systemTempDirectory)
+    ) {
+      throw new Error("unsafe directory");
+    }
+  } catch {
+    throw new Error("Refusing unsafe preview temporary directory");
+  }
+  return candidate;
+}
+
+export function resolvePreviewStorageStatePath(
+  tempDirectory: string,
+  storageStatePath: string,
+): string {
+  const candidate = resolve(storageStatePath);
+  if (candidate !== join(tempDirectory, "storage-state.json")) {
+    throw new Error("Preview storage state must be the protected temporary file");
+  }
+  return candidate;
+}
+
+export function assertProtectedStorageStateFile(
+  tempDirectory: string,
+  storageStatePath: string,
+  systemTempDirectory = tmpdir(),
+): string {
+  try {
+    const protectedDirectory = assertProtectedTemporaryDirectory(
+      tempDirectory,
+      systemTempDirectory,
+    );
+    const candidate = resolvePreviewStorageStatePath(
+      protectedDirectory,
+      storageStatePath,
+    );
+    const metadata = lstatSync(candidate);
+    if (
+      metadata.isSymbolicLink() ||
+      !metadata.isFile() ||
+      (metadata.mode & 0o777) !== 0o600
+    ) {
+      throw new Error("unsafe storage state");
+    }
+    return candidate;
+  } catch {
+    throw new Error("Preview storage state must be the protected temporary file");
+  }
+}
+
 export function resolvePreviewRuntimeEnvironment(env: NodeJS.ProcessEnv) {
   const baseURL = resolvePreviewBaseURL(env.OPTIMIST_PREVIEW_BASE_URL);
   const rawTempDirectory = env.OPTIMIST_PREVIEW_TEMP_DIR;
@@ -40,9 +101,15 @@ export function resolvePreviewRuntimeEnvironment(env: NodeJS.ProcessEnv) {
   if (rawTempDirectory === undefined || rawStorageState === undefined) {
     throw new Error("Preview storage state must be the protected temporary file");
   }
-  const tempDirectory = assertTemporaryDirectory(rawTempDirectory);
-  const storageStatePath = resolve(rawStorageState);
-  if (storageStatePath !== join(tempDirectory, "storage-state.json")) {
+  let tempDirectory: string;
+  let storageStatePath: string;
+  try {
+    tempDirectory = assertProtectedTemporaryDirectory(rawTempDirectory);
+    storageStatePath = assertProtectedStorageStateFile(
+      tempDirectory,
+      rawStorageState,
+    );
+  } catch {
     throw new Error("Preview storage state must be the protected temporary file");
   }
   return { baseURL, tempDirectory, storageStatePath };

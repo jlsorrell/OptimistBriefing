@@ -1,7 +1,7 @@
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test } from "@playwright/test";
 
-const routes = [
+const primaryControlRoutes = [
   {
     path: "/",
     heading: "The day, thoughtfully distilled.",
@@ -22,9 +22,14 @@ const routes = [
     heading: "Run status",
     primaryControl: { role: "link" as const, name: "Return to today’s edition" },
   },
+  {
+    path: "/saved",
+    heading: "Saved items",
+    primaryControl: { role: "link" as const, name: "Return to today’s edition" },
+  },
 ] as const;
 
-for (const route of routes) {
+for (const route of primaryControlRoutes) {
   test(`${route.path} has no horizontal overflow and keeps its primary control usable`, async ({ page }) => {
     await page.goto(route.path);
     await expect(
@@ -44,7 +49,9 @@ for (const route of routes) {
     expect(box?.width ?? 0).toBeGreaterThanOrEqual(40);
     expect(box?.height ?? 0).toBeGreaterThanOrEqual(24);
   });
+}
 
+for (const route of primaryControlRoutes.filter(({ path }) => path !== "/saved")) {
   test(`${route.path} has no serious or critical axe violations`, async ({ page }) => {
     await page.goto(route.path);
     await expect(

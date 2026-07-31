@@ -36,18 +36,22 @@ describe("preview E2E harness", () => {
     expect(deps.captureAccessState).toHaveBeenCalledWith({
       baseURL: "https://optimist-briefing-preview.optimistindustries.workers.dev",
       storageStatePath: join(tempDirectory, "storage-state.json"),
-    });
+    }, expect.any(AbortSignal));
     expect(deps.runPreviewSuite).toHaveBeenCalledWith({
       OPTIMIST_PREVIEW_BASE_URL: baseURL,
       OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
       OPTIMIST_PREVIEW_STORAGE_STATE: join(tempDirectory, "storage-state.json"),
-    });
+    }, expect.any(AbortSignal));
     expect(deps.removeTempDirectory).toHaveBeenCalledOnce();
     expect(deps.captureAccessState.mock.invocationCallOrder[0]!).toBeLessThan(
       deps.runPreviewSuite.mock.invocationCallOrder[0]!,
     );
     expect(deps.runPreviewSuite.mock.invocationCallOrder[0]!).toBeLessThan(
       deps.removeTempDirectory.mock.invocationCallOrder[0]!,
+    );
+    const unregister = deps.registerSignalCleanup.mock.results[0]?.value as ReturnType<typeof vi.fn>;
+    expect(deps.removeTempDirectory.mock.invocationCallOrder[0]!).toBeLessThan(
+      unregister.mock.invocationCallOrder[0]!,
     );
   });
 
@@ -70,24 +74,82 @@ describe("preview E2E harness", () => {
     expect(deps.removeTempDirectory).toHaveBeenCalledOnce();
   });
 
-  it("cleans only once when signal cleanup runs before the suite finishes", async () => {
+  it("aborts and awaits the active suite before signal cleanup", async () => {
     const deps = createDependencies();
-    let signalCleanup: (() => Promise<void>) | undefined;
+    let signalCleanup: ((signal: NodeJS.Signals) => Promise<void>) | undefined;
     let resolveSuite: ((code: number) => void) | undefined;
+    let activeSignal: AbortSignal | undefined;
     deps.registerSignalCleanup.mockImplementation((cleanup) => {
-      signalCleanup = cleanup;
+      signalCleanup = cleanup as unknown as (signal: NodeJS.Signals) => Promise<void>;
       return vi.fn();
     });
-    deps.runPreviewSuite.mockImplementation(() => new Promise<number>((resolve) => {
+    deps.runPreviewSuite.mockImplementation((_env, signal) => new Promise<number>((resolve) => {
+      activeSignal = signal;
       resolveSuite = resolve;
     }));
 
     const running = runPreviewHarness({}, deps);
     await vi.waitFor(() => expect(deps.runPreviewSuite).toHaveBeenCalledOnce());
-    await signalCleanup!();
-    resolveSuite!(0);
+    const signalHandling = signalCleanup!("SIGTERM");
+    await Promise.resolve();
+    const cleanedBeforeChildExit = deps.removeTempDirectory.mock.calls.length > 0;
+    const abortedWith = activeSignal?.reason;
+    resolveSuite!(1);
 
-    await expect(running).resolves.toBe(0);
+    await expect(signalHandling).resolves.toBeUndefined();
+    await expect(running).resolves.toBe(1);
+    expect(cleanedBeforeChildExit).toBe(false);
+    expect(activeSignal?.aborted).toBe(true);
+    expect(abortedWith).toBe("SIGTERM");
+    expect(deps.removeTempDirectory).toHaveBeenCalledOnce();
+  });
+
+  it("uses the first concurrent signal and shares cleanup with finally", async () => {
+    const deps = createDependencies();
+    let signalCleanup: ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+    let resolveSuite: ((code: number) => void) | undefined;
+    let activeSignal: AbortSignal | undefined;
+    deps.registerSignalCleanup.mockImplementation((cleanup) => {
+      signalCleanup = cleanup as unknown as (signal: NodeJS.Signals) => Promise<void>;
+      return vi.fn();
+    });
+    deps.runPreviewSuite.mockImplementation((_env, signal) => new Promise<number>((resolve) => {
+      activeSignal = signal;
+      resolveSuite = resolve;
+    }));
+
+    const running = runPreviewHarness({}, deps);
+    await vi.waitFor(() => expect(deps.runPreviewSuite).toHaveBeenCalledOnce());
+    const first = signalCleanup!("SIGTERM");
+    const second = signalCleanup!("SIGINT");
+    await Promise.resolve();
+    resolveSuite!(1);
+
+    await Promise.all([first, second, running]);
+    expect(activeSignal?.reason).toBe("SIGTERM");
+    expect(deps.removeTempDirectory).toHaveBeenCalledOnce();
+  });
+
+  it("awaits and removes a temporary directory interrupted during creation", async () => {
+    const deps = createDependencies();
+    let signalCleanup: ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+    let resolveTempDirectory: ((path: string) => void) | undefined;
+    deps.registerSignalCleanup.mockImplementation((cleanup) => {
+      signalCleanup = cleanup as unknown as (signal: NodeJS.Signals) => Promise<void>;
+      return vi.fn();
+    });
+    deps.createTempDirectory.mockImplementation(() => new Promise<string>((resolve) => {
+      resolveTempDirectory = resolve;
+    }));
+
+    const running = runPreviewHarness({}, deps);
+    await vi.waitFor(() => expect(deps.registerSignalCleanup).toHaveBeenCalledOnce());
+    const signalHandling = signalCleanup!("SIGINT");
+    resolveTempDirectory!(tempDirectory);
+
+    await expect(signalHandling).resolves.toBeUndefined();
+    await expect(running).resolves.toBe(1);
+    expect(deps.captureAccessState).not.toHaveBeenCalled();
     expect(deps.removeTempDirectory).toHaveBeenCalledOnce();
   });
 });

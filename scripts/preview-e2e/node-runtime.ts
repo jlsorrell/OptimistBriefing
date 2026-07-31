@@ -1,17 +1,19 @@
-import { spawn } from "node:child_process";
-import { chmod, lstat, mkdtemp, realpath, rm } from "node:fs/promises";
+import { spawn, type ChildProcess } from "node:child_process";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 
 import { chromium } from "@playwright/test";
 
 import {
   PREVIEW_TEMP_PREFIX,
   assertAuthenticationNavigation,
-  assertTemporaryDirectory,
+  assertProtectedTemporaryDirectory,
   normalizeChildExitCode,
   resolvePreviewBaseURL,
   resolvePreviewRuntimeEnvironment,
+  resolvePreviewStorageStatePath,
 } from "./environment";
 import type { PreviewHarnessDependencies } from "./harness";
 
@@ -46,6 +48,19 @@ interface PreviewChromium {
   launch(options: { headless: boolean }): Promise<PreviewBrowser>;
 }
 
+interface PreviewSuiteOptions {
+  platform?: NodeJS.Platform;
+  spawnProcess?: (
+    executable: string,
+    arguments_: string[],
+    options: {
+      env: NodeJS.ProcessEnv;
+      stdio: ["ignore", "pipe", "pipe"];
+    },
+  ) => ChildProcess;
+  writeOutput?: (text: string, destination: "stdout" | "stderr") => void;
+}
+
 export async function createPreviewTempDirectory(
   systemTempDirectory = tmpdir(),
 ): Promise<string> {
@@ -58,7 +73,7 @@ export async function removePreviewTempDirectory(
   tempDirectory: string,
   systemTempDirectory = tmpdir(),
 ): Promise<void> {
-  await rm(assertTemporaryDirectory(tempDirectory, systemTempDirectory), {
+  await rm(assertProtectedTemporaryDirectory(tempDirectory, systemTempDirectory), {
     force: true,
     recursive: true,
   });
@@ -76,123 +91,232 @@ async function resolveCaptureAccessStateInput(input: {
   storageStatePath: string;
 }): Promise<{ baseURL: string; storageStatePath: string }> {
   const baseURL = resolvePreviewBaseURL(input.baseURL);
-  const storageStatePath = resolve(input.storageStatePath);
-  let tempDirectory: string;
+  let storageStatePath: string;
   try {
-    tempDirectory = assertTemporaryDirectory(dirname(storageStatePath));
-    const [metadata, realTempDirectory, realSystemTempDirectory] = await Promise.all([
-      lstat(tempDirectory),
-      realpath(tempDirectory),
-      realpath(tmpdir()),
-    ]);
-    if (
-      !metadata.isDirectory() ||
-      metadata.isSymbolicLink() ||
-      (metadata.mode & 0o777) !== 0o700 ||
-      dirname(realTempDirectory) !== realSystemTempDirectory
-    ) {
-      throw new Error("Unsafe preview storage directory");
-    }
+    const tempDirectory = assertProtectedTemporaryDirectory(
+      dirname(input.storageStatePath),
+    );
+    storageStatePath = resolvePreviewStorageStatePath(
+      tempDirectory,
+      input.storageStatePath,
+    );
   } catch {
     throw new Error("Preview storage state must be the protected temporary file");
   }
-  if (storageStatePath !== join(tempDirectory, "storage-state.json")) {
-    throw new Error("Preview storage state must be the protected temporary file");
+  try {
+    await lstat(storageStatePath);
+  } catch (error) {
+    if (isFileSystemError(error, "ENOENT")) return { baseURL, storageStatePath };
+    throw new Error("Preview storage state must be absent before authentication");
   }
-  return { baseURL, storageStatePath };
+  throw new Error("Preview storage state must be absent before authentication");
+}
+
+function isFileSystemError(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+async function protectCapturedStorageState(storageStatePath: string): Promise<void> {
+  let handle;
+  try {
+    handle = await open(
+      storageStatePath,
+      constants.O_RDONLY | constants.O_NOFOLLOW,
+    );
+    const before = await handle.stat();
+    if (!before.isFile()) throw new Error("not a regular file");
+    await handle.chmod(0o600);
+    const [after, leaf] = await Promise.all([handle.stat(), lstat(storageStatePath)]);
+    if (
+      !after.isFile() ||
+      (after.mode & 0o777) !== 0o600 ||
+      leaf.isSymbolicLink() ||
+      !leaf.isFile() ||
+      (leaf.mode & 0o777) !== 0o600 ||
+      leaf.dev !== after.dev ||
+      leaf.ino !== after.ino
+    ) {
+      throw new Error("unsafe storage state");
+    }
+  } catch {
+    throw new Error("Preview storage state was not captured securely");
+  } finally {
+    await handle?.close();
+  }
 }
 
 export async function capturePreviewAccessState(
   input: { baseURL: string; storageStatePath: string },
   browserDriver: PreviewChromium = chromium,
+  signal: AbortSignal = new AbortController().signal,
 ): Promise<void> {
   const { baseURL, storageStatePath } = await resolveCaptureAccessStateInput(input);
+  if (signal.aborted) throw new Error("Preview harness terminated.");
   const browser = await browserDriver.launch({ headless: false });
+  let closePromise: Promise<void> | undefined;
+  const closeBrowser = () => {
+    closePromise ??= browser.close();
+    return closePromise;
+  };
+  let rejectAbort: (error: Error) => void = () => undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  const abortListener = () => {
+    void closeBrowser().catch(() => undefined);
+    rejectAbort(new Error("Preview harness terminated."));
+  };
+  signal.addEventListener("abort", abortListener, { once: true });
+  let authentication: Promise<void> | undefined;
   try {
-    const context = await browser.newContext();
-    const page = await context.newPage();
-    let rejectUnexpectedNavigation: (reason: unknown) => void = () => undefined;
-    const unexpectedNavigation = new Promise<never>((_resolve, reject) => {
-      rejectUnexpectedNavigation = reject;
-    });
-    const navigationListener = (frame: PreviewFrame) => {
-      if (frame !== page.mainFrame()) return;
+    authentication = (async () => {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      let rejectUnexpectedNavigation: (reason: unknown) => void = () => undefined;
+      const unexpectedNavigation = new Promise<never>((_resolve, reject) => {
+        rejectUnexpectedNavigation = reject;
+      });
+      const navigationListener = (frame: PreviewFrame) => {
+        if (frame !== page.mainFrame()) return;
+        try {
+          assertAuthenticationNavigation(frame.url());
+        } catch (error) {
+          rejectUnexpectedNavigation(error);
+        }
+      };
+      page.on("framenavigated", navigationListener);
       try {
-        assertAuthenticationNavigation(frame.url());
-      } catch (error) {
-        rejectUnexpectedNavigation(error);
+        await Promise.race([
+          unexpectedNavigation,
+          (async () => {
+            await page.goto(`${baseURL}/health`, { waitUntil: "domcontentloaded" });
+            await page.waitForURL(`${baseURL}/health`, { timeout: 300_000 });
+            await page.waitForFunction(
+              () => document.body.textContent?.trim() === '{"status":"ok"}',
+              undefined,
+              { timeout: 300_000 },
+            );
+            await context.storageState({ path: storageStatePath });
+            await protectCapturedStorageState(storageStatePath);
+          })(),
+        ]);
+      } finally {
+        page.off("framenavigated", navigationListener);
       }
-    };
-    page.on("framenavigated", navigationListener);
+    })();
+    if (signal.aborted) abortListener();
     try {
-      await Promise.race([
-        unexpectedNavigation,
-        (async () => {
-          await page.goto(`${baseURL}/health`, { waitUntil: "domcontentloaded" });
-          await page.waitForURL(`${baseURL}/health`, { timeout: 300_000 });
-          await page.waitForFunction(
-            () => document.body.textContent?.trim() === '{"status":"ok"}',
-            undefined,
-            { timeout: 300_000 },
-          );
-          await context.storageState({ path: storageStatePath });
-          await chmod(storageStatePath, 0o600);
-        })(),
-      ]);
+      await Promise.race([authentication, aborted]);
     } catch (error) {
+      if (signal.aborted) throw new Error("Preview harness terminated.");
       if (isPlaywrightNavigationError(error)) {
         throw new Error("Preview authentication did not complete; retry the command.");
       }
       throw error;
-    } finally {
-      page.off("framenavigated", navigationListener);
     }
   } finally {
-    await browser.close();
+    signal.removeEventListener("abort", abortListener);
+    await closeBrowser();
+    if (signal.aborted) await authentication?.catch(() => undefined);
   }
 }
 
 export function createPreviewSignalHandler(
-  signal: NodeJS.Signals,
-  cleanup: () => Promise<void>,
+  shutdown: (signal: NodeJS.Signals) => Promise<void>,
+  unregister: () => void,
   relaySignal: (signal: NodeJS.Signals) => void,
-): () => Promise<void> {
-  return async () => {
-    try {
-      await cleanup();
-    } finally {
-      relaySignal(signal);
-    }
+): (signal: NodeJS.Signals) => Promise<void> {
+  let handlingPromise: Promise<void> | undefined;
+  return (signal) => {
+    handlingPromise ??= (async () => {
+      try {
+        await shutdown(signal);
+      } finally {
+        unregister();
+        relaySignal(signal);
+      }
+    })();
+    return handlingPromise;
   };
 }
 
 export function registerPreviewSignalCleanup(
-  cleanup: () => Promise<void>,
+  cleanup: (signal: NodeJS.Signals) => Promise<void>,
 ): () => void {
-  const handlers = new Map<NodeJS.Signals, () => void>();
-  for (const signal of ["SIGINT", "SIGTERM"] as const) {
-    const handler = createPreviewSignalHandler(signal, cleanup, (value) => {
-      process.kill(process.pid, value);
-    });
-    const listener = () => { void handler(); };
-    handlers.set(signal, listener);
-    process.once(signal, listener);
-  }
-  return () => {
-    for (const [signal, listener] of handlers) process.off(signal, listener);
+  const listeners = new Map<NodeJS.Signals, () => void>();
+  let registered = true;
+  const unregister = () => {
+    if (!registered) return;
+    registered = false;
+    for (const [signal, listener] of listeners) process.off(signal, listener);
   };
+  const handler = createPreviewSignalHandler(cleanup, unregister, (signal) => {
+    process.kill(process.pid, signal);
+  });
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    const listener = () => { void handler(signal).catch(() => undefined); };
+    listeners.set(signal, listener);
+    process.on(signal, listener);
+  }
+  return unregister;
 }
 
-export async function runPreviewSuite(env: NodeJS.ProcessEnv): Promise<number> {
+export function previewNpxExecutable(
+  platform: NodeJS.Platform = process.platform,
+): "npx" | "npx.cmd" {
+  return platform === "win32" ? "npx.cmd" : "npx";
+}
+
+function abortSignalName(signal: AbortSignal): NodeJS.Signals {
+  return signal.reason === "SIGINT" ? "SIGINT" : "SIGTERM";
+}
+
+export async function runPreviewSuite(
+  env: NodeJS.ProcessEnv,
+  signal: AbortSignal = new AbortController().signal,
+  options: PreviewSuiteOptions = {},
+): Promise<number> {
   resolvePreviewRuntimeEnvironment(env);
-  return await new Promise((resolve, reject) => {
-    const child = spawn(
-      "npx",
+  const writeOutput = options.writeOutput ?? ((text, destination) => {
+    process[destination].write(text);
+  });
+  if (signal.aborted) {
+    writeOutput("Preview checks failed; re-authenticate and retry.\n", "stderr");
+    return 1;
+  }
+  const spawnProcess = options.spawnProcess ?? spawn;
+  return await new Promise((resolve) => {
+    const child = spawnProcess(
+      previewNpxExecutable(options.platform),
       ["playwright", "test", "--config", "playwright.preview.config.ts"],
-      { env, stdio: "inherit" },
+      { env, stdio: ["ignore", "pipe", "pipe"] },
     );
-    child.once("error", reject);
-    child.once("exit", (code, signal) => resolve(normalizeChildExitCode(code, signal)));
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    child.stdout?.on("data", (chunk: Buffer | string) => stdout.push(String(chunk)));
+    child.stderr?.on("data", (chunk: Buffer | string) => stderr.push(String(chunk)));
+    let settled = false;
+    const abortListener = () => {
+      child.kill(abortSignalName(signal));
+    };
+    const settle = (code: number) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abortListener);
+      if (code === 0) {
+        if (stdout.length > 0) writeOutput(stdout.join(""), "stdout");
+        if (stderr.length > 0) writeOutput(stderr.join(""), "stderr");
+      } else {
+        writeOutput("Preview checks failed; re-authenticate and retry.\n", "stderr");
+      }
+      resolve(code);
+    };
+    child.once("error", () => settle(1));
+    child.once("exit", (code, childSignal) => {
+      settle(normalizeChildExitCode(code, childSignal));
+    });
+    signal.addEventListener("abort", abortListener, { once: true });
+    if (signal.aborted) abortListener();
   });
 }
 
@@ -201,7 +325,8 @@ export function createNodePreviewHarnessDependencies(): PreviewHarnessDependenci
     createTempDirectory: createPreviewTempDirectory,
     removeTempDirectory: removePreviewTempDirectory,
     registerSignalCleanup: registerPreviewSignalCleanup,
-    captureAccessState: capturePreviewAccessState,
+    captureAccessState: (input, signal) =>
+      capturePreviewAccessState(input, chromium, signal),
     runPreviewSuite,
   };
 }
