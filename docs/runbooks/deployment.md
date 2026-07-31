@@ -260,7 +260,8 @@ With an allowed Google session:
 
 1. open `/health` and verify the body is exactly `{"status":"ok"}`;
 2. verify a signed-out request is challenged by Access;
-3. verify a nonallowed Google account is denied;
+3. record that the separate real nonallowed Google-account check is unavailable
+   and remains a production blocker; do not mark it verified;
 4. verify the allowed account can view the fixture edition and source links;
 5. inspect Today, Archive, Preferences, Run Status, desktop, and mobile;
 6. inspect `GET /api/sources`, `GET /api/runs`, and the relevant run detail.
