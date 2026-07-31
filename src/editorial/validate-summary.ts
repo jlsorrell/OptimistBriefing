@@ -342,6 +342,23 @@ function normalizedText(value: string): string {
     .trim();
 }
 
+export function claimEvidenceMatchesAllSources(
+  evidenceExcerpt: string,
+  sourceIds: readonly string[],
+  packet: SourcePacket,
+): boolean {
+  const evidence = normalizedText(evidenceExcerpt);
+  if (evidence.length === 0) return false;
+  const sources = new Map(
+    packet.sources.map((source) => [source.sourceId, source]),
+  );
+  return sourceIds.every((sourceId) =>
+    sources.get(sourceId)?.excerpts.some((excerpt) =>
+      normalizedText(excerpt.text).includes(evidence),
+    ) ?? false,
+  );
+}
+
 const StrictSummaryClaimSchema = StructuredSummarySchema.shape.claims.element
   .extend({
     sourceIds: z.array(SafeSourceIdSchema).min(1),
@@ -583,6 +600,13 @@ export function validateSummary(
     );
     if (evidenceSources.length === 0) {
       errors.push(`EVIDENCE_NOT_FOUND:${claimIndex}`);
+    }
+    if (!claimEvidenceMatchesAllSources(
+      claim.evidenceExcerpt,
+      claim.sourceIds,
+      packet,
+    )) {
+      errors.push("CLAIM_EVIDENCE_NOT_EXACT");
     }
     if (
       !extractivelySupports(

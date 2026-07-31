@@ -11,7 +11,7 @@ import {
   summarizeItem,
   SummaryRejectedError,
 } from "../editorial/summarize";
-import type { SourcePacket } from "../editorial/validate-summary";
+import { claimEvidenceMatchesAllSources } from "../editorial/validate-summary";
 import type { ModelProvider } from "../models/provider";
 import { assessResearch } from "../editorial/assess-research";
 import { scoreResearch } from "../editorial/research-score";
@@ -75,6 +75,7 @@ import {
   type WorkflowItemPayload,
 } from "./types";
 import type { BudgetPolicy } from "../models/cost-ledger";
+import { sourcePacketForItem } from "./source-packet";
 
 export { PIPELINE_STEPS } from "./types";
 export type { PipelineContext, PipelineRun, PipelineStore } from "./types";
@@ -661,27 +662,6 @@ function recency(item: Item, now: string): number {
   return Math.max(0, Math.min(1, 1 - ageHours / (7 * 24)));
 }
 
-function packet(item: Item): SourcePacket {
-  const sources = [
-    ...new Map(item.sourceRefs.map((source) => [source.id, source])).values(),
-  ].slice(0, 12);
-  return {
-    itemKind: item.kind,
-    sources: sources.map((source) => ({
-      sourceId: source.id,
-      role: source.role,
-      title: item.title,
-      url: source.url,
-      retrievedAt: source.retrievedAt,
-      accessLevel: item.accessLevel,
-      excerpts: [{
-        number: 1,
-        text: item.normalizedText.slice(0, 4_000) || item.title,
-      }],
-    })),
-  };
-}
-
 function averageNewsComponent(
   scores: readonly NewsScore[],
   key:
@@ -1021,7 +1001,7 @@ export function createProductionPipelineContext(
           return {
             item,
             summary: await summarizeItem(
-              packet(item),
+              sourcePacketForItem(item),
               options.providers.summary,
               options.budgetPolicy === undefined
                 ? {}
@@ -1047,18 +1027,24 @@ export function createProductionPipelineContext(
         entry.summary,
       );
       const sourceIds = new Set(entry.item.sourceRefs.map(({ id }) => id));
+      const packet = sourcePacketForItem(entry.item);
       const validationErrors = parsedSummary.success
         ? [
             ...new Set(
-              parsedSummary.data.claims.flatMap((claim) =>
-                claim.sourceIds
+              parsedSummary.data.claims.flatMap((claim) => [
+                ...claim.sourceIds
                   .filter((sourceId) => !sourceIds.has(sourceId))
                   .map((sourceId) =>
                     `UNKNOWN_ITEM_SOURCE:${
                       encodeURIComponent(sourceId).slice(0, 160)
-                    }`
+                    }`,
                   ),
-              ),
+                ...(!claimEvidenceMatchesAllSources(
+                  claim.evidenceExcerpt,
+                  claim.sourceIds,
+                  packet,
+                ) ? ["CLAIM_EVIDENCE_NOT_EXACT"] : []),
+              ]),
             ),
           ]
         : ["SCHEMA_INVALID"];

@@ -3,6 +3,7 @@ import { env } from "cloudflare:test";
 
 import {
   ItemSchema,
+  StructuredSummarySchema,
 } from "../../../src/contracts/editorial";
 import type {
   Edition,
@@ -29,6 +30,7 @@ import {
 import type { BriefingRepository } from "../../../src/db/repository";
 import { D1BriefingRepository } from "../../../src/db/d1-repository";
 import { FakeModelProvider } from "../../../src/models/fake-provider";
+import { clusterNews } from "../../../src/editorial/cluster";
 import type {
   GenerateObjectRequest,
   ModelProvider,
@@ -254,6 +256,42 @@ class GroundedProductionProvider implements ModelProvider {
         oneSentence: provenance,
         whyItMatters: provenance,
         uncertainty: provenance,
+      },
+    };
+  }
+}
+
+class WrongSourceGroundingProvider implements ModelProvider {
+  async embed(
+    texts: readonly string[],
+  ): Promise<readonly (readonly number[])[]> {
+    return texts.map(() => [1, 0]);
+  }
+
+  async generateObject(input: GenerateObjectRequest): Promise<unknown> {
+    if (input.schemaName !== "structured_summary") {
+      throw new Error(`Unexpected schema: ${input.schemaName}`);
+    }
+    const sourceA = {
+      sourceIds: ["source-a"],
+      evidenceExcerpt: "fact only from A",
+    };
+    return {
+      title: "fact only from A",
+      oneSentence: "fact only from A",
+      whyItMatters: "fact only from A",
+      uncertainty: "fact only from A",
+      claims: [{
+        text: "fact only from A",
+        sourceIds: ["source-b"],
+        evidenceExcerpt: "fact only from A",
+      }],
+      accessLevel: "full_text",
+      provenance: {
+        title: sourceA,
+        oneSentence: sourceA,
+        whyItMatters: sourceA,
+        uncertainty: sourceA,
       },
     };
   }
@@ -944,6 +982,88 @@ describe("manual editorial run", () => {
     expect(new Set(shortlisted.map((item) => item.metadata.section))).toEqual(
       new Set(["research", "world", "dmv"]),
     );
+  });
+
+  it("rejects a claim when its cited source lacks the claimed evidence", async () => {
+    // This fails if validation accepts evidence from another source in the development.
+    const sourceA: Item = {
+      ...fixtureItem("source-a", "world"),
+      title: "Source A title",
+      sourceRefs: [{
+        id: "source-a",
+        name: "Source A",
+        url: "https://example.com/sources/source-a",
+        role: "primary",
+        retrievedAt: now,
+      }],
+      accessLevel: "full_text",
+      normalizedText: "fact only from A",
+      metadata: {
+        primarySection: "world",
+        sectionEligibility: ["world"],
+        primaryDocumentUrl: "https://example.com/documents/shared-event",
+        namedEntities: ["Example Agency"],
+      },
+    };
+    const sourceB: Item = {
+      ...fixtureItem("source-b", "world"),
+      title: "Source B title",
+      sourceRefs: [{
+        id: "source-b",
+        name: "Source B",
+        url: "https://example.com/sources/source-b",
+        role: "reporting",
+        retrievedAt: now,
+      }],
+      accessLevel: "full_text",
+      normalizedText: "different fact from B",
+      metadata: {
+        primarySection: "world",
+        sectionEligibility: ["world"],
+        primaryDocumentUrl: "https://example.com/documents/shared-event",
+        namedEntities: ["Example Agency"],
+      },
+    };
+    const development = clusterNews([sourceA, sourceB], {})[0];
+    if (development === undefined) throw new Error("Expected clustered development.");
+    const item = ItemSchema.parse({
+      ...development.representativeItem,
+      id: development.id,
+      title: development.title,
+      sourceRefs: development.sourceRefs,
+      normalizedText: development.items.map((value) => value.normalizedText).join(" "),
+      metadata: {
+        ...development.representativeItem.metadata,
+        workflow: { version: 1, development },
+      },
+    });
+    const provider = new WrongSourceGroundingProvider();
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-03",
+      runId: "run-wrong-source-grounding",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: { summary: provider, assessment: provider },
+      collectCandidates: async () => [],
+    });
+    await expect(context.synthesize([item])).resolves.toEqual([]);
+    const summary = StructuredSummarySchema.parse(
+      await provider.generateObject({
+        model: "briefing-summary",
+        schemaName: "structured_summary",
+        jsonSchema: {},
+        system: "Use only the supplied source packet.",
+        sourcePacket: "source_id: source-a",
+        maxOutputTokens: 1_800,
+      }),
+    );
+
+    const validated = await context.validate([{ item, summary }]);
+
+    expect(validated).toMatchObject([{
+      valid: false,
+      validationErrors: expect.arrayContaining(["CLAIM_EVIDENCE_NOT_EXACT"]),
+    }]);
   });
 
   it("keeps ephemeral article bodies out of collection checkpoints and D1", async () => {
