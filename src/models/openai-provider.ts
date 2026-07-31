@@ -151,7 +151,6 @@ export class OpenAIModelProvider implements ModelProvider {
       ),
     });
     let usage: ModelUsage | undefined;
-    let releaseAttempted = false;
     let response;
     try {
       response = await this.#withTransportRetry(() =>
@@ -169,13 +168,9 @@ export class OpenAIModelProvider implements ModelProvider {
           embeddingCount: 0,
         };
         await this.#recordAndReconcile(reservation, usage);
-      } else {
-        releaseAttempted = true;
-        await this.#releaseReservation(reservation);
       }
     } catch (error) {
-      if (usage === undefined && !releaseAttempted) {
-        releaseAttempted = true;
+      if (usage === undefined) {
         await this.#releaseReservation(reservation);
       }
       throw error;

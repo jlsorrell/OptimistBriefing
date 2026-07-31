@@ -173,7 +173,7 @@ describe("OpenAIModelProvider budget authorization", () => {
     }]);
   });
 
-  it("attempts release once when a successful response has no usage", async () => {
+  it("preserves the maximum reservation when a successful response omits usage", async () => {
     let releaseCalls = 0;
     const provider = new OpenAIModelProvider({
       apiKey: "test-key",
@@ -183,7 +183,6 @@ describe("OpenAIModelProvider budget authorization", () => {
       authorize: async () => reservation,
       release: async () => {
         releaseCalls += 1;
-        throw new Error("RELEASE_FAILED");
       },
       fetch: async () => new Response(JSON.stringify({
         model: "gpt-test",
@@ -194,10 +193,10 @@ describe("OpenAIModelProvider budget authorization", () => {
       }),
     });
 
-    await expect(provider.generateObject(generationRequest)).rejects.toThrow(
-      "RELEASE_FAILED",
+    await expect(provider.generateObject(generationRequest)).resolves.toEqual(
+      {},
     );
-    expect(releaseCalls).toBe(1);
+    expect(releaseCalls).toBe(0);
   });
 
   it("does not release the conservative maximum after observed usage if reconciliation fails", async () => {
