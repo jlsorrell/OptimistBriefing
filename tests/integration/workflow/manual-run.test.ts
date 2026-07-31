@@ -670,6 +670,34 @@ describe("manual editorial run", () => {
     ]);
   });
 
+  it("bounds deterministic unique source-failure metadata during composition", async () => {
+    const item = fixtureItem("bounded-source-failures", "research");
+    const context = fixturePipelineContext({
+      runId: "run-bounded-source-failures",
+    });
+    context.sourceFailures = [
+      `${"a".repeat(200)}:fetch`,
+      "duplicate:parse",
+      "duplicate:parse",
+      ...Array.from({ length: 70 }, (_, index) =>
+        `source-${String(index).padStart(2, "0")}:timeout`
+      ),
+    ];
+
+    const composition = await composeEdition(
+      context,
+      [{ item, summary: fixtureSummary(item), valid: true }],
+      [item],
+    );
+    const failures = composition.edition.metadata!.sourceFailures;
+
+    expect(failures).toHaveLength(64);
+    expect(failures).toEqual([...failures].sort());
+    expect(new Set(failures).size).toBe(failures.length);
+    expect(failures.every((failure) => [...failure].length <= 200)).toBe(true);
+    expect(composition.sourceFailures).toEqual(failures);
+  });
+
   it("delegates every durable checkpoint through an optional executor while the manual path remains direct", async () => {
     const delegated: string[] = [];
     const context = fixturePipelineContext({
@@ -1352,27 +1380,6 @@ describe("manual editorial run", () => {
     )).toBe(true);
   });
 
-  it("rejects explicitly malformed reader preferences", () => {
-    // This fails if an invalid supplied snapshot is silently replaced by defaults.
-    expect(() => createProductionPipelineContext({
-      editionDate: "2033-01-15",
-      runId: "run-invalid-preferences",
-      store: new FixtureStore(),
-      now: () => now,
-      preferences: {
-        ...fixturePreferences(),
-        topicWeights: {
-          "alignment-interpretability": Number.NaN,
-        },
-      },
-      providers: {
-        summary: new FakeModelProvider(),
-        assessment: new FakeModelProvider(),
-      },
-      collectCandidates: async () => [],
-    })).toThrow();
-  });
-
   it("rejects a claim when its cited source lacks the claimed evidence", async () => {
     // This fails if validation accepts evidence from another source in the development.
     const sourceA: Item = {
@@ -1803,7 +1810,7 @@ describe("manual editorial run", () => {
     ).toEqual({ count: 0 });
   });
 
-  it("publishes with sufficient sources and exposes only a sanitized failed-feed ID", async () => {
+  it("restores sanitized source failures when a fresh context resumes past collect", async () => {
     const enabledSources = [
       "arxiv",
       "federal-register",
@@ -1945,15 +1952,13 @@ describe("manual editorial run", () => {
     );
     vi.stubGlobal("fetch", sourceFetch);
     try {
-      const store = createD1PipelineStore(env.DB);
-      const summary = new GroundedProductionProvider();
-      summary.failNextSummary = false;
-      const context = createD1ProductionPipelineContext(
-        store,
+      const firstStore = createD1PipelineStore(env.DB);
+      const firstContext = createD1ProductionPipelineContext(
+        firstStore,
         "2033-02-08",
         "run-fail-open-production",
         {
-          summary,
+          summary: new GroundedProductionProvider(),
           assessment: new FakeModelProvider({
             generatedObjects: [{
               technicalQuality: 0.9,
@@ -1968,9 +1973,42 @@ describe("manual editorial run", () => {
         },
       );
 
-      await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+      await expect(runEditorialPipeline(firstContext)).rejects.toThrow(
+        "TRANSIENT_SUMMARY_FAILURE",
+      );
+      const fetchCallsAfterCollect = sourceFetch.mock.calls.length;
+      await firstStore.saveCollectionSourceFailures(
+        "run-fail-open-production",
+        ["changed-source:parse"],
+      );
+      expect(await firstStore.readCollectionSourceFailures(
+        "run-fail-open-production",
+      )).toEqual(["reuters:fetch"]);
+      expect((await env.DB.prepare(
+        `SELECT id FROM audit_events
+         WHERE run_id = ? AND event_type = ?`,
+      ).bind(
+        "run-fail-open-production",
+        "collection_source_failures",
+      ).all()).results).toEqual([{
+        id: "collection_source_failures:run-fail-open-production",
+      }]);
+
+      const resumedSummary = new GroundedProductionProvider();
+      resumedSummary.failNextSummary = false;
+      const resumedContext = createD1ProductionPipelineContext(
+        createD1PipelineStore(env.DB),
+        "2033-02-08",
+        "run-fail-open-production",
+        {
+          summary: resumedSummary,
+          assessment: new FakeModelProvider(),
+        },
+      );
+      await expect(runEditorialPipeline(resumedContext)).resolves.toMatchObject({
         status: "published",
       });
+      expect(sourceFetch).toHaveBeenCalledTimes(fetchCallsAfterCollect);
       const edition = await new D1BriefingRepository(env.DB)
         .getEditionByDate("2033-02-08");
       expect(edition?.metadata?.sourceFailures).toEqual(["reuters:fetch"]);

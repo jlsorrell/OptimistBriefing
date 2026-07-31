@@ -9,6 +9,10 @@ import {
 import { z } from "zod";
 import { SourceHttpClient } from "../sources/http-client";
 import { createNewsCollectorFromCatalog } from "../sources/news-collector";
+import {
+  boundedSourceFailureLabels,
+  boundedSourceFailureMetadata,
+} from "../sources/collection-settlement";
 import { durableCollectedCandidate } from "../sources/durable-evidence";
 import { normalizeCandidate } from "../editorial/normalize";
 import { deduplicateItems } from "../editorial/deduplicate";
@@ -230,6 +234,7 @@ const ValidatedSummaryCandidatesSchema = z.array(
   ValidatedSummaryCandidateSchema,
 ).max(8);
 const CheckpointStringSchema = z.string().min(1).max(200);
+const CollectionSourceFailuresSchema = z.array(CheckpointStringSchema).max(64);
 const DraftEditionSchema = EditionSchema.extend({
   status: z.literal("draft"),
   publishedAt: z.null(),
@@ -398,8 +403,8 @@ export class D1PipelineStore implements PipelineStore {
     if (record === null) return null;
     try {
       return ReaderPreferencesSchema.parse(JSON.parse(record.event_json));
-    } catch (error) {
-      throw new Error("INVALID_PREFERENCE_SNAPSHOT", { cause: error });
+    } catch {
+      return defaultReaderPreferences();
     }
   }
 
@@ -418,6 +423,46 @@ export class D1PipelineStore implements PipelineStore {
       "preference_snapshot",
       JSON.stringify(validPreferences),
       new Date().toISOString(),
+    ).run();
+  }
+
+  async readCollectionSourceFailures(runId: string): Promise<string[]> {
+    const record = await this.db.prepare(
+      `SELECT event_json FROM audit_events
+       WHERE id = ? AND run_id = ? AND event_type = ?
+       LIMIT 1`,
+    ).bind(
+      `collection_source_failures:${runId}`,
+      runId,
+      "collection_source_failures",
+    ).first<{ event_json: string }>();
+    if (record === null) return [];
+    try {
+      return CollectionSourceFailuresSchema.parse(JSON.parse(record.event_json));
+    } catch {
+      return [];
+    }
+  }
+
+  async saveCollectionSourceFailures(
+    runId: string,
+    sourceFailures: readonly string[],
+  ): Promise<void> {
+    const valid = CollectionSourceFailuresSchema.parse(
+      boundedSourceFailureMetadata(sourceFailures),
+    );
+    await this.db.prepare(
+      `INSERT OR IGNORE INTO audit_events (
+        id, run_id, event_type, event_json, created_at
+      ) SELECT ?, ?, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM workflow_runs WHERE id = ?)`,
+    ).bind(
+      `collection_source_failures:${runId}`,
+      runId,
+      "collection_source_failures",
+      JSON.stringify(valid),
+      new Date().toISOString(),
+      runId,
     ).run();
   }
 
@@ -585,6 +630,7 @@ export type ProductionPipelineContextOptions = {
   collectCandidates: () => Promise<readonly CollectedCandidate[]>;
   persistItems?: (items: readonly Item[]) => Promise<void>;
   sourceFailures?: readonly string[];
+  loadSourceFailures?: PipelineContext["loadSourceFailures"];
   checkpointExecutor?: PipelineContext["checkpointExecutor"];
   budgetPolicy?: BudgetPolicy;
 };
@@ -601,9 +647,9 @@ function defaultReaderPreferences(): ReaderPreferences {
 function parsedPreferences(
   preferences: ReaderPreferences | undefined,
 ): ReaderPreferences {
-  return preferences === undefined
-    ? defaultReaderPreferences()
-    : ReaderPreferencesSchema.parse(preferences);
+  if (preferences === undefined) return defaultReaderPreferences();
+  const parsed = ReaderPreferencesSchema.safeParse(preferences);
+  return parsed.success ? parsed.data : defaultReaderPreferences();
 }
 
 function effectivePreferenceWeights(
@@ -637,9 +683,14 @@ export async function loadOrCreatePreferenceSnapshot(
 ): Promise<ReaderPreferences> {
   const existing = await store.readPreferenceSnapshot(runId);
   if (existing !== null) return existing;
-  const current = ReaderPreferencesSchema.parse(
-    await store.repository.getPreferences(),
-  );
+  let current: ReaderPreferences;
+  try {
+    current = ReaderPreferencesSchema.parse(
+      await store.repository.getPreferences(),
+    );
+  } catch {
+    current = defaultReaderPreferences();
+  }
   await store.savePreferenceSnapshot(runId, current);
   const stored = await store.readPreferenceSnapshot(runId);
   if (stored === null) throw new Error("PREFERENCE_SNAPSHOT_NOT_SAVED");
@@ -1311,6 +1362,9 @@ export function createProductionPipelineContext(
     ...(options.sourceFailures === undefined
       ? {}
       : { sourceFailures: options.sourceFailures }),
+    ...(options.loadSourceFailures === undefined
+      ? {}
+      : { loadSourceFailures: options.loadSourceFailures }),
     ...(options.checkpointExecutor === undefined
       ? {}
       : { checkpointExecutor: options.checkpointExecutor }),
@@ -1354,6 +1408,7 @@ export function createD1ProductionPipelineContext(
     providers,
     ...options,
     sourceFailures,
+    loadSourceFailures: () => store.readCollectionSourceFailures(runId),
     persistItems: async (items) => store.repository.upsertItems(items),
     collectCandidates: async () => {
       sourceFailures.length = 0;
@@ -1405,7 +1460,6 @@ export function createD1ProductionPipelineContext(
           failure,
         ]),
       );
-      const recordedFailureSourceIds = new Set<string>();
       for (const catalogSource of sources) {
         const failure = failuresBySourceId.get(catalogSource.id);
         if (
@@ -1417,8 +1471,6 @@ export function createD1ProductionPipelineContext(
             failure.kind,
             to,
           );
-          sourceFailures.push(`${failure.sourceId}:${failure.kind}`);
-          recordedFailureSourceIds.add(failure.sourceId);
         } else if (succeededSourceIds.has(catalogSource.id)) {
           await store.repository.recordSourceOutcome(
             catalogSource.id,
@@ -1427,11 +1479,8 @@ export function createD1ProductionPipelineContext(
           );
         }
       }
-      for (const failure of collectionFailures) {
-        if (!recordedFailureSourceIds.has(failure.sourceId)) {
-          sourceFailures.push(`${failure.sourceId}:${failure.kind}`);
-        }
-      }
+      sourceFailures.push(...boundedSourceFailureLabels(collectionFailures));
+      await store.saveCollectionSourceFailures(runId, sourceFailures);
       return [
         ...research.candidates.map((candidate) =>
           RawResearchCandidateSchema.parse(candidate),
@@ -1683,9 +1732,16 @@ export async function runEditorialPipeline(
       context, run, "validate", ValidatedSummaryCandidatesSchema,
       () => context.validate(synthesized),
     );
+    const durableSourceFailures = context.loadSourceFailures === undefined
+      ? boundedSourceFailureMetadata(context.sourceFailures ?? [])
+      : boundedSourceFailureMetadata(await context.loadSourceFailures());
     const composition = await checkpoint(
       context, run, "compose", CompositionSchema,
-      () => composeEdition(context, validated, normalized),
+      () => composeEdition(
+        { ...context, sourceFailures: durableSourceFailures },
+        validated,
+        normalized,
+      ),
     );
     await checkpoint(
       context, run, "publish", CompositionSchema,

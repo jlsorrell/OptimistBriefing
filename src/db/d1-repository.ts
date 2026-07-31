@@ -1963,7 +1963,8 @@ export class D1BriefingRepository implements BriefingRepository {
               'workflow_checkpoint',
               'workflow_attempt',
               'workflow_attempt_failed',
-              'preference_snapshot'
+              'preference_snapshot',
+              'collection_source_failures'
             )`,
         )
         .bind(runCutoff),
@@ -2000,7 +2001,8 @@ export class D1BriefingRepository implements BriefingRepository {
               'workflow_checkpoint',
               'workflow_attempt',
               'workflow_attempt_failed',
-              'preference_snapshot'
+              'preference_snapshot',
+              'collection_source_failures'
             )`,
         )
         .bind(runCutoff),

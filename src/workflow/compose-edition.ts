@@ -10,6 +10,7 @@ import type {
   PipelineContext,
   ValidatedSummaryCandidate,
 } from "./types";
+import { boundedSourceFailureMetadata } from "../sources/collection-settlement";
 
 const SECTIONS = new Set<EditionSection>([
   "research",
@@ -49,6 +50,9 @@ export async function composeEdition(
 ): Promise<CompositionResult> {
   const valid = candidates.filter((candidate) => candidate.valid).slice(0, 8);
   const persistedItemIds = new Set(persistedItems.map(({ id }) => id));
+  const sourceFailures = boundedSourceFailureMetadata(
+    context.sourceFailures ?? [],
+  );
   const edition = {
     id: `edition:${context.runId}`,
     editionDate: context.editionDate,
@@ -57,7 +61,7 @@ export async function composeEdition(
     readingMinutes: valid.length === 0 ? null : 20,
     publishedAt: null,
     createdAt: context.now(),
-    metadata: { missingSections: [], sourceFailures: [...(context.sourceFailures ?? [])] } as EditionMetadata,
+    metadata: { missingSections: [], sourceFailures } as EditionMetadata,
   };
 
   const entries: EditionEntry[] = valid.map((candidate, position) => {
@@ -86,7 +90,7 @@ export async function composeEdition(
     };
   });
   const missing = missingSections(entries);
-  edition.metadata = { missingSections: missing, sourceFailures: [...(context.sourceFailures ?? [])] };
+  edition.metadata = { missingSections: missing, sourceFailures };
   const complete = entries.length >= 6 && entries.length <= 8 && missing.length === 0;
   const partial = !complete && missing.length === 0;
   return {
@@ -94,6 +98,6 @@ export async function composeEdition(
     entries,
     status: complete ? "published" : partial ? "partial" : "failed",
     missingSections: missing,
-    sourceFailures: context.sourceFailures ?? [],
+    sourceFailures,
   };
 }

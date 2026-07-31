@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  boundedSourceFailureLabels,
   settleSourceCollections,
 } from "../../../src/sources/collection-settlement";
 import { SourceFetchError } from "../../../src/sources/http-client";
@@ -89,5 +90,27 @@ describe("settleSourceCollections", () => {
     expect(JSON.stringify(result)).not.toContain(
       "private synchronous detail",
     );
+  });
+
+  it("bounds broad-outage labels after suffixing in deterministic unique order", () => {
+    const failures = [
+      { sourceId: "a".repeat(200), kind: "fetch" as const },
+      { sourceId: "duplicate", kind: "parse" as const },
+      { sourceId: "duplicate", kind: "parse" as const },
+      ...Array.from({ length: 70 }, (_, index) => ({
+        sourceId: `source-${String(index).padStart(2, "0")}`,
+        kind: "timeout" as const,
+      })),
+    ];
+
+    const labels = boundedSourceFailureLabels(failures);
+
+    expect(labels).toHaveLength(64);
+    expect(labels).toEqual([...labels].sort());
+    expect(new Set(labels).size).toBe(labels.length);
+    expect(labels.every((label) => [...label].length <= 200)).toBe(true);
+    expect(labels).toContain("duplicate:parse");
+    expect(labels.find((label) => label.endsWith(":fetch")))
+      .toHaveLength(200);
   });
 });

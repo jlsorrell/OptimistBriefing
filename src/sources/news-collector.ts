@@ -165,6 +165,30 @@ function isNewsCatalogSource(source: SourceRecord): boolean {
   );
 }
 
+function failedCatalogAdapter(
+  sourceId: string,
+  error: unknown,
+): NewsSourceAdapter {
+  const failure =
+    error instanceof z.ZodError ||
+      error instanceof SyntaxError ||
+      error instanceof SourceFetchError
+      ? error
+      : new SyntaxError("Invalid catalog source configuration.", {
+          cause: error,
+        });
+  return {
+    sourceId,
+    collect: async () => {
+      throw failure;
+    },
+  };
+}
+
+function catalogInputMayBeNews(source: SourceRecord): boolean {
+  return source.enabled && isNewsCatalogSource(source);
+}
+
 function normalizedText(value: string | null | undefined): string | null {
   const normalized = value?.replace(/\s+/g, " ").trim() ?? "";
   return normalized.length === 0 ? null : normalized;
@@ -701,97 +725,122 @@ export function createNewsCollectorFromCatalog(
   const directFeeds: ConfiguredNewsFeed[] = [];
   const discoveryAdapters: NewsSourceAdapter[] = [];
   const forecastAdapters: NewsSourceAdapter[] = [];
-  const sources = options.sources.map((source) =>
-    SourceRecordSchema.parse(source),
-  );
+  const sourceOrder: string[] = [];
 
-  for (const source of sources) {
-    if (!source.enabled || !isNewsCatalogSource(source)) continue;
-    if (source.discoveryMechanism === "rss") {
-      directFeeds.push({
-        source: {
-          id: source.id,
-          canonicalName: source.canonicalName,
-          canonicalUrl: source.canonicalUrl,
-          role: source.role,
-          enabled: source.enabled,
-          sectionEligibility: [...source.sectionEligibility],
-          restrictions: source.restrictions,
-        },
-        feedUrl: source.restrictions.feedUrl,
-        feedUrlPolicy: source.restrictions.urlPolicy,
-        articleUrlPolicy: source.restrictions.urlPolicy,
-      });
+  for (const input of options.sources) {
+    let source: SourceRecord;
+    try {
+      source = SourceRecordSchema.parse(input);
+    } catch (error) {
+      if (input.enabled !== false) {
+        discoveryAdapters.push(failedCatalogAdapter(input.id, error));
+        sourceOrder.push(input.id);
+      }
       continue;
     }
-    const collectionSource = ResearchSourceRecordSchema.parse(source);
-    if (source.discoveryMechanism === "page") {
-      discoveryAdapters.push(
-        new DirectPageAdapter(
-          options.http,
-          collectionSource,
-          catalogString(source, "pageUrl"),
-          catalogPolicy(source),
-          catalogListing(source),
-        ),
-      );
-      continue;
-    }
-    if (source.discoveryMechanism !== "api") continue;
+    if (!catalogInputMayBeNews(source)) continue;
+    sourceOrder.push(source.id);
+    try {
+      if (source.discoveryMechanism === "rss") {
+        directFeeds.push({
+          source: {
+            id: source.id,
+            canonicalName: source.canonicalName,
+            canonicalUrl: source.canonicalUrl,
+            role: source.role,
+            enabled: source.enabled,
+            sectionEligibility: [...source.sectionEligibility],
+            restrictions: source.restrictions,
+          },
+          feedUrl: source.restrictions.feedUrl,
+          feedUrlPolicy: source.restrictions.urlPolicy,
+          articleUrlPolicy: source.restrictions.urlPolicy,
+        });
+        continue;
+      }
+      const collectionSource = ResearchSourceRecordSchema.parse(source);
+      if (source.discoveryMechanism === "page") {
+        discoveryAdapters.push(
+          new DirectPageAdapter(
+            options.http,
+            collectionSource,
+            catalogString(source, "pageUrl"),
+            catalogPolicy(source),
+            catalogListing(source),
+          ),
+        );
+        continue;
+      }
+      if (source.discoveryMechanism !== "api") {
+        throw new SyntaxError("Unsupported news discovery mechanism.");
+      }
 
-    const apiUrl = catalogString(source, "apiUrl");
-    if (source.id === "gdelt") {
-      if (
-        apiUrl !==
-        "https://api.gdeltproject.org/api/v2/doc/doc"
-      ) {
-        throw new TypeError("GDELT catalog endpoint is not pinned.");
+      const apiUrl = catalogString(source, "apiUrl");
+      if (source.id === "gdelt") {
+        if (
+          apiUrl !==
+          "https://api.gdeltproject.org/api/v2/doc/doc"
+        ) {
+          throw new SourceFetchError({
+            sourceId: source.id,
+            status: null,
+            retryable: false,
+            failureKind: "policy",
+            reason: "catalog endpoint is not pinned",
+          });
+        }
+        discoveryAdapters.push(
+          new GdeltAdapter(
+            options.http,
+            collectionSource,
+            options.gdelt ?? {
+              query: "(AI OR technology OR policy)",
+              maxRecords: 100,
+            },
+          ),
+        );
+        continue;
       }
-      discoveryAdapters.push(
-        new GdeltAdapter(
-          options.http,
-          collectionSource,
-          options.gdelt ?? {
-            query: "(AI OR technology OR policy)",
-            maxRecords: 100,
-          },
-        ),
-      );
-      continue;
-    }
-    if (source.id === "polymarket") {
-      if (
-        apiUrl !==
-        "https://gamma-api.polymarket.com/markets"
-      ) {
-        throw new TypeError("Polymarket catalog endpoint is not pinned.");
+      if (source.id === "polymarket") {
+        if (
+          apiUrl !==
+          "https://gamma-api.polymarket.com/markets"
+        ) {
+          throw new SourceFetchError({
+            sourceId: source.id,
+            status: null,
+            retryable: false,
+            failureKind: "policy",
+            reason: "catalog endpoint is not pinned",
+          });
+        }
+        forecastAdapters.push(
+          new PolymarketAdapter(
+            options.http,
+            collectionSource,
+            options.polymarket ?? {
+              minimumLiquidity: 100_000,
+              minimumAbsoluteChange: 0.1,
+            },
+          ),
+        );
+        continue;
       }
-      forecastAdapters.push(
-        new PolymarketAdapter(
-          options.http,
-          collectionSource,
-          options.polymarket ?? {
-            minimumLiquidity: 100_000,
-            minimumAbsoluteChange: 0.1,
-          },
-        ),
-      );
-      continue;
+      if (catalogString(source, "apiFormat") === "federal-register-v1") {
+        discoveryAdapters.push(
+          new FederalRegisterAdapter(
+            options.http,
+            collectionSource,
+            apiUrl,
+            catalogPolicy(source),
+          ),
+        );
+        continue;
+      }
+      throw new SyntaxError("Unsupported news catalog API source.");
+    } catch (error) {
+      discoveryAdapters.push(failedCatalogAdapter(source.id, error));
     }
-    if (catalogString(source, "apiFormat") === "federal-register-v1") {
-      discoveryAdapters.push(
-        new FederalRegisterAdapter(
-          options.http,
-          collectionSource,
-          apiUrl,
-          catalogPolicy(source),
-        ),
-      );
-      continue;
-    }
-    throw new TypeError(
-      `Unsupported news catalog API source: ${source.id}`,
-    );
   }
 
   return new NewsCollector({
@@ -799,8 +848,6 @@ export function createNewsCollectorFromCatalog(
     directFeeds,
     discoveryAdapters,
     forecastAdapters,
-    sourceOrder: sources
-      .filter((source) => source.enabled && isNewsCatalogSource(source))
-      .map(({ id }) => id),
+    sourceOrder,
   });
 }

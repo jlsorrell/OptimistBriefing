@@ -1027,6 +1027,15 @@ describe("D1BriefingRepository", () => {
       env.DB.prepare(
         "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
       ).bind(
+        "old-source-failures",
+        "old-artifact-run",
+        "collection_source_failures",
+        "[\"reuters:fetch\"]",
+        "2026-04-01T00:00:00.000Z",
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
         "old-orphan-checkpoint", null, "workflow_checkpoint",
         "{\"step\":\"collect\",\"artifact\":{\"payload\":\"orphaned private payload\"}}",
         "2026-04-01T00:00:00.000Z",
@@ -1067,7 +1076,7 @@ describe("D1BriefingRepository", () => {
     expect(report).toEqual({
       deletedUnselectedCandidates: 0,
       deletedWorkflowRuns: 1,
-      deletedWorkflowArtifacts: 5,
+      deletedWorkflowArtifacts: 6,
       deletedDiagnosticLogs: 1,
     });
     await repo.recordRetentionAudit("2026-07-29T10:00:00.000Z", report);

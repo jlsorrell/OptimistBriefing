@@ -639,6 +639,153 @@ describe("catalog-driven news collection", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("isolates malformed page setup and collects its healthy page sibling", async () => {
+    const fetch = vi.fn(async () =>
+      new Response(
+        `<article><a href="/story">Healthy page item</a><time datetime="2026-07-29T07:00:00.000Z"></time></article>`,
+        { headers: { "content-type": "text/html" } },
+      )
+    );
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      sources: [
+        catalogSource({
+          id: "malformed-page",
+          canonicalName: "Malformed Page",
+          canonicalUrl: "https://malformed-page.example/",
+          role: "reporting",
+          discoveryMechanism: "page",
+          restrictions: {
+            bodyRetrieval: "forbidden",
+            paywall: "none",
+            contentUse: "metadata-only",
+            pageUrl: "https://malformed-page.example/news",
+            urlPolicy: policy("malformed-page.example", ["/"]),
+            listing: { itemSelector: "article" },
+          },
+        }),
+        catalogSource({
+          id: "healthy-page",
+          canonicalName: "Healthy Page",
+          canonicalUrl: "https://healthy-page.example/",
+          role: "reporting",
+          discoveryMechanism: "page",
+          restrictions: {
+            bodyRetrieval: "forbidden",
+            paywall: "none",
+            contentUse: "metadata-only",
+            pageUrl: "https://healthy-page.example/news",
+            urlPolicy: policy("healthy-page.example", ["/"]),
+            listing: {
+              itemSelector: "article",
+              linkSelector: "a",
+              dateSelector: "time",
+              dateAttribute: "datetime",
+              maxItems: 10,
+              maxBodyFetches: 0,
+            },
+          },
+        }),
+      ],
+    });
+
+    await expect(collector.collect(fixedWindow())).resolves.toMatchObject({
+      candidates: [expect.objectContaining({ sourceId: "healthy-page" })],
+      succeededSourceIds: ["healthy-page"],
+      failures: [{ sourceId: "malformed-page", kind: "parse" }],
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("isolates an unpinned API endpoint and collects its healthy API sibling", async () => {
+    const fetch = vi.fn(async () =>
+      Response.json({
+        results: [{
+          document_number: "2026-54321",
+          title: "Healthy sibling API document",
+          html_url:
+            "https://www.federalregister.gov/documents/2026/07/29/2026-54321/healthy-sibling",
+          publication_date: "2026-07-29",
+          type: "Notice",
+          abstract: "Bounded government evidence.",
+        }],
+      })
+    );
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      sources: [
+        catalogSource({
+          id: "gdelt",
+          canonicalName: "GDELT",
+          canonicalUrl: "https://www.gdeltproject.org/",
+          role: "reporting",
+          discoveryMechanism: "api",
+          restrictions: {
+            bodyRetrieval: "forbidden",
+            paywall: "none",
+            contentUse: "metadata-only",
+            apiUrl: "https://attacker.example/gdelt",
+            apiFormat: "gdelt-v2",
+          },
+        }),
+        catalogSource({
+          id: "unsupported-api",
+          canonicalName: "Unsupported API",
+          canonicalUrl: "https://unsupported-api.example/",
+          role: "reporting",
+          discoveryMechanism: "api",
+          restrictions: {
+            bodyRetrieval: "forbidden",
+            paywall: "none",
+            contentUse: "metadata-only",
+            apiUrl: "https://unsupported-api.example/v1/news",
+            apiFormat: "unknown-v1",
+            urlPolicy: policy("unsupported-api.example", ["/v1/"]),
+          },
+        }),
+        catalogSource({
+          id: "federal-register",
+          canonicalName: "Federal Register",
+          canonicalUrl: "https://www.federalregister.gov/",
+          role: "primary",
+          discoveryMechanism: "api",
+          sectionEligibility: ["ai_policy"],
+          restrictions: {
+            bodyRetrieval: "permitted",
+            paywall: "none",
+            contentUse: "open-government",
+            apiUrl:
+              "https://www.federalregister.gov/api/v1/documents.json",
+            apiFormat: "federal-register-v1",
+            urlPolicy: policy("www.federalregister.gov", [
+              "/api/v1/documents.json",
+              "/documents/",
+            ]),
+          },
+        }),
+      ],
+    });
+
+    await expect(collector.collect(fixedWindow())).resolves.toMatchObject({
+      candidates: [expect.objectContaining({
+        sourceId: "federal-register",
+        title: "Healthy sibling API document",
+      })],
+      succeededSourceIds: ["federal-register"],
+      failures: [
+        { sourceId: "gdelt", kind: "policy" },
+        { sourceId: "unsupported-api", kind: "parse" },
+      ],
+    });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
   it("constructs a usable Federal Register API adapter with typed policy", async () => {
     const fetch = vi.fn(async (input) => {
       const url = String(input);

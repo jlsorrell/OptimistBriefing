@@ -47,6 +47,20 @@ export const ScheduledModelConfigSchema = z.object({
   EMBEDDING_UNIT_PRICE_USD: PositiveMoneyBindingSchema,
 }).strict();
 
+function uniqueModelUnitPrices(
+  entries: readonly (readonly [model: string, unitPriceUsd: number])[],
+): Readonly<Record<string, number>> {
+  const prices = new Map<string, number>();
+  for (const [model, unitPriceUsd] of entries) {
+    const existing = prices.get(model);
+    if (existing !== undefined && existing !== unitPriceUsd) {
+      throw new Error(`CONFLICTING_MODEL_UNIT_PRICE:${model}`);
+    }
+    prices.set(model, unitPriceUsd);
+  }
+  return Object.fromEntries(prices);
+}
+
 type WorkflowStepLike = {
   do<T>(
     name: string,
@@ -169,26 +183,22 @@ export function createBudgetedPipelineRuntimeFactory(
     ASSESSMENT_UNIT_PRICE_USD: env.ASSESSMENT_UNIT_PRICE_USD,
     EMBEDDING_UNIT_PRICE_USD: env.EMBEDDING_UNIT_PRICE_USD,
   });
+  const unitPricesUsd = uniqueModelUnitPrices([
+    [config.SUMMARY_MODEL, config.SUMMARY_UNIT_PRICE_USD],
+    [config.ASSESSMENT_MODEL, config.ASSESSMENT_UNIT_PRICE_USD],
+    [config.EMBEDDING_MODEL, config.EMBEDDING_UNIT_PRICE_USD],
+  ]);
   return async ({ runId }) => {
     const repository = new D1BriefingRepository(env.DB);
     const ledger = new CostLedger({
       monthlyLimitUsd: config.MONTHLY_BUDGET_USD,
-      unitPricesUsd: {
-        [config.SUMMARY_MODEL]: config.SUMMARY_UNIT_PRICE_USD,
-        [config.ASSESSMENT_MODEL]: config.ASSESSMENT_UNIT_PRICE_USD,
-        [config.EMBEDDING_MODEL]: config.EMBEDDING_UNIT_PRICE_USD,
-      },
+      unitPricesUsd,
     });
     for (const record of await repository.listMonthlyModelUsage(monthStart(clock()))) {
       ledger.record(record);
     }
     const recordUsage = async (usage: Parameters<CostLedger["record"]>[0]) => {
       await repository.recordModelUsage(runId, ledger.record(usage));
-    };
-    const unitPricesUsd = {
-      [config.SUMMARY_MODEL]: config.SUMMARY_UNIT_PRICE_USD,
-      [config.ASSESSMENT_MODEL]: config.ASSESSMENT_UNIT_PRICE_USD,
-      [config.EMBEDDING_MODEL]: config.EMBEDDING_UNIT_PRICE_USD,
     };
     const budgetCallbacks = createD1ModelBudgetCallbacks(repository, {
       runId,

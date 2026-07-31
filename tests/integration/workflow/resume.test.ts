@@ -9,6 +9,7 @@ import type {
   StructuredSummary,
 } from "../../../src/contracts/editorial";
 import {
+  createBudgetedPipelineRuntimeFactory,
   createD1ModelBudgetCallbacks,
   RunParamsSchema,
   ScheduledModelConfigSchema,
@@ -444,6 +445,116 @@ describe("durable workflow checkpoint execution", () => {
     expect(await store.readPreferenceSnapshot(runId)).toEqual(preferred);
   });
 
+  it("uses immutable defaults for a corrupt stored preference snapshot", async () => {
+    const baseline = approvedBaselinePreferences();
+    const repository = new D1BriefingRepository(env.DB);
+    await repository.updatePreferences({
+      ...baseline,
+      topicWeights: {
+        ...baseline.topicWeights,
+        "alignment-interpretability": 2,
+      },
+    });
+    const runId = "corrupt-preference-snapshot";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2036-04-05",
+      status: "pending",
+      currentStep: null,
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    await env.DB.prepare(
+      `INSERT INTO audit_events (id, run_id, event_type, event_json, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+    ).bind(
+      `preference_snapshot:${runId}`,
+      runId,
+      "preference_snapshot",
+      "{corrupt immutable snapshot",
+      now,
+    ).run();
+
+    const snapshot = await loadOrCreatePreferenceSnapshot(store, runId);
+
+    expect(snapshot.topicWeights["alignment-interpretability"]).toBe(1);
+    expect(snapshot.feedbackHistory).toEqual([]);
+    expect(await env.DB.prepare(
+      "SELECT event_json FROM audit_events WHERE id = ?",
+    ).bind(`preference_snapshot:${runId}`).first()).toEqual({
+      event_json: "{corrupt immutable snapshot",
+    });
+  });
+
+  it("snapshots defaults when current stored preferences are invalid", async () => {
+    await env.DB.prepare(
+      "UPDATE preferences SET topic_weights_json = ?",
+    ).bind('{"alignment-interpretability":"invalid"}').run();
+    const runId = "invalid-current-preferences";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2036-04-06",
+      status: "pending",
+      currentStep: null,
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+
+    const snapshot = await loadOrCreatePreferenceSnapshot(store, runId);
+
+    expect(snapshot.topicWeights["alignment-interpretability"]).toBe(1);
+    expect(await store.readPreferenceSnapshot(runId)).toEqual(snapshot);
+  });
+
+  it("fails open to default ranking for invalid supplied preferences", async () => {
+    const baseline = approvedBaselinePreferences();
+    const invalidPreferences = {
+      ...baseline,
+      topicWeights: { "alignment-interpretability": Number.NaN },
+      baseline,
+      feedbackHistory: [],
+    } as ReaderPreferences;
+    const alignmentItem: Item = {
+      ...item("invalid-supplied-preferences", "research"),
+      primaryTopic: "alignment-interpretability",
+      metadata: { workflow: { version: 1 } },
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2036-04-07",
+      runId: "invalid-supplied-preferences",
+      store: new ResumeStore(),
+      now: () => now,
+      preferences: invalidPreferences,
+      providers: {
+        summary: new FakeModelProvider({
+          embeddingBatches: [[
+            [0.6, 0.8],
+            [1, 0],
+            [1, 0],
+            [1, 0],
+          ]],
+        }),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    const enriched = await context.enrich([alignmentItem]);
+
+    expect((enriched[0]?.metadata.workflow as { topicalFit?: number })
+      .topicalFit).toBe(0.6);
+  });
+
   it("authorizes every paid request against live D1 reservations", async () => {
     const runId = "live-budget-runtime";
     await env.DB.prepare(
@@ -641,6 +752,37 @@ describe("durable workflow checkpoint execution", () => {
       ASSESSMENT_UNIT_PRICE_USD: "0.001",
       EMBEDDING_UNIT_PRICE_USD: "0.001",
     })).toThrow();
+  });
+
+  it("rejects conflicting prices for one model before runtime construction", () => {
+    let dbAccesses = 0;
+    const database = new Proxy({}, {
+      get() {
+        dbAccesses += 1;
+        throw new Error("DB must not be accessed for invalid model pricing.");
+      },
+    }) as D1Database;
+    const base = {
+      DB: database,
+      OPENAI_API_KEY: "secret",
+      SUMMARY_MODEL: "shared-model",
+      ASSESSMENT_MODEL: "shared-model",
+      EMBEDDING_MODEL: "embedding-model",
+      MONTHLY_BUDGET_USD: "10",
+      SUMMARY_UNIT_PRICE_USD: "0.001",
+      ASSESSMENT_UNIT_PRICE_USD: "0.002",
+      EMBEDDING_UNIT_PRICE_USD: "0.0001",
+    };
+
+    expect(() => createBudgetedPipelineRuntimeFactory(base)).toThrow(
+      "CONFLICTING_MODEL_UNIT_PRICE:shared-model",
+    );
+    expect(dbAccesses).toBe(0);
+    expect(() => createBudgetedPipelineRuntimeFactory({
+      ...base,
+      ASSESSMENT_UNIT_PRICE_USD: "0.001",
+    })).not.toThrow();
+    expect(dbAccesses).toBe(0);
   });
 
   it("coordinates the local-date Workflow ID and skips a published run", async () => {

@@ -175,6 +175,7 @@ export type PipelineContext = {
   ) => Promise<readonly ValidatedSummaryCandidate[]>;
   estimateCostUsd?: (step: PipelineStep, output: unknown) => number;
   sourceFailures?: readonly string[];
+  loadSourceFailures?: () => Promise<readonly string[]>;
   checkpointExecutor?: PipelineCheckpointExecutor;
   budgetPolicy?: BudgetPolicy;
 };
