@@ -8,6 +8,7 @@
     "test": "vitest run",
     "test:worker": "vitest run --config vitest.worker.config.ts",
     "test:e2e": "playwright test",
+    "test:e2e:preview": "node --import tsx scripts/run-preview-e2e.ts",
     "evaluate": "node --import tsx scripts/evaluate-golden-set.ts",
     "seed:dev": "node --import tsx scripts/seed-dev.ts",
     "dev:integration": "node --import tsx scripts/start-local-integration.ts",
