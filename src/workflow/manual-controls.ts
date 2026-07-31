@@ -8,7 +8,7 @@ import {
 } from "./run-editorial-pipeline";
 import {
   continueScheduledWorkflowInstance,
-  createScheduledWorkflowInstance,
+  createScheduledWorkflowBatch,
   type ScheduledWorkflowBinding,
 } from "./schedule";
 import type { PipelineRun } from "./types";
@@ -38,30 +38,22 @@ function pendingRun(editionDate: string): PipelineRun {
   };
 }
 
-async function workflowInstanceWasAccepted(
-  workflow: ScheduledWorkflowBinding,
-  id: string,
-): Promise<boolean> {
-  try {
-    const instance = await workflow.get(id);
-    return (await instance.status()).status !== "unknown";
-  } catch {
-    return false;
-  }
-}
-
-async function releasePendingClaim(
+async function recordCreateFailure(
   db: D1Database,
-  runId: string,
+  run: PipelineRun,
 ): Promise<void> {
   await db.prepare(
-    `DELETE FROM workflow_runs
+    `UPDATE workflow_runs
+     SET status = 'retryable',
+         retryable = 1,
+         failure_code = 'WORKFLOW_CREATE_FAILED',
+         updated_at = ?
      WHERE id = ?
        AND status = 'pending'
        AND current_step IS NULL
        AND retryable = 0
        AND attempt_count = 0`,
-  ).bind(runId).run();
+  ).bind(new Date().toISOString(), run.id).run();
 }
 
 export function createDurableWorkflowLauncher(
@@ -72,21 +64,19 @@ export function createDurableWorkflowLauncher(
   return {
     async start(input) {
       const runId = input.editionDate;
-      await store.createRun(pendingRun(input.editionDate));
+      const run = pendingRun(input.editionDate);
+      await store.createRun(run);
+      let created: readonly unknown[];
       try {
-        await createScheduledWorkflowInstance(workflow, {
+        created = await createScheduledWorkflowBatch(workflow, {
           editionDate: input.editionDate,
           runId,
         });
       } catch (error) {
-        if (
-          await workflowInstanceWasAccepted(workflow, input.editionDate)
-        ) {
-          throw new WorkflowRunAlreadyExistsError();
-        }
-        await releasePendingClaim(db, runId);
+        await recordCreateFailure(db, run);
         throw error;
       }
+      if (created.length === 0) throw new WorkflowRunAlreadyExistsError();
       await store.audit(
         runId,
         "manual_run_started",

@@ -289,6 +289,7 @@ describe("coordinateScheduledBriefing", () => {
           created.push(input);
           return {};
         },
+        createBatch: async () => [],
         get: async () => {
           throw new Error("get must not be called");
         },
@@ -317,6 +318,7 @@ describe("coordinateScheduledBriefing", () => {
           workflowCalls += 1;
           return {};
         },
+        createBatch: async () => [],
         get: async () => {
           workflowCalls += 1;
           throw new Error("get must not be called");
@@ -348,6 +350,7 @@ describe("coordinateScheduledBriefing", () => {
           actions.push("create");
           return {};
         },
+        createBatch: async () => [],
         get: async (id) => {
           actions.push(`get:${id}`);
           return {

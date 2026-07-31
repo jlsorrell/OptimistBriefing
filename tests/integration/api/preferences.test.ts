@@ -87,6 +87,15 @@ class RecordingWorkflow {
     return instance;
   }
 
+  async createBatch(inputs: WorkflowCreateInput[]) {
+    const created = [];
+    for (const input of inputs) {
+      if (input?.id !== undefined && this.instances.has(input.id)) continue;
+      created.push(await this.create(input));
+    }
+    return created;
+  }
+
   async get(id: string) {
     const instance = this.instances.get(id);
     if (instance === undefined) throw new Error("Workflow instance not found.");
@@ -321,38 +330,87 @@ describe("reader controls API", () => {
     },
   );
 
-  it("releases an untouched D1 claim when Workflow creation is rejected", async () => {
+  it("keeps the D1 claim for an accepted batch duplicate when lookup fails", async () => {
     inlineLauncherCalls.count = 0;
-    let rejectCreate = true;
-    const accepted = new RecordingWorkflow();
+    const workflow = {
+      create: async () => {
+        throw new Error("Workflow instance ID is already used.");
+      },
+      createBatch: async () => [],
+      get: async () => {
+        throw new Error("Workflow status unavailable.");
+      },
+    };
+
+    const response = await worker.fetch(
+      manualStartRequest("2026-08-02"),
+      workerEnv(workflow),
+    );
+
+    expect(response.status).toBe(409);
+    await expect(
+      new D1BriefingRepository(env.DB).getWorkflowRun("2026-08-02"),
+    ).resolves.toMatchObject({
+      id: "2026-08-02",
+      status: "pending",
+      retryable: false,
+    });
+    expect(inlineLauncherCalls.count).toBe(0);
+  });
+
+  it("retains a retryable claim after a batch failure and resumes it", async () => {
+    inlineLauncherCalls.count = 0;
+    let rejectBatch = true;
+    const created: WorkflowCreateInput[] = [];
+    const instance = {
+      status: async () => ({ status: "unknown" }),
+      restart: async () => undefined,
+      resume: async () => undefined,
+    };
     const workflow = {
       create: async (input: WorkflowCreateInput) => {
-        if (rejectCreate) throw new Error("Workflow API unavailable.");
-        return accepted.create(input);
+        if (rejectBatch) throw new Error("Workflow API unavailable.");
+        created.push(structuredClone(input));
+        return instance;
       },
-      get: async () => ({
-        status: async () => ({ status: "unknown" }),
-        restart: async () => undefined,
-        resume: async () => undefined,
-      }),
+      createBatch: async (inputs: WorkflowCreateInput[]) => {
+        if (rejectBatch) throw new Error("Workflow API unavailable.");
+        return Promise.all(inputs.map((input) => workflow.create(input)));
+      },
+      get: async () => instance,
     };
 
     const rejected = await worker.fetch(
-      manualStartRequest("2026-08-01"),
+      manualStartRequest("2026-08-03"),
       workerEnv(workflow),
     );
     expect(rejected.status).toBe(500);
     await expect(
-      new D1BriefingRepository(env.DB).getWorkflowRun("2026-08-01"),
-    ).resolves.toBeNull();
+      new D1BriefingRepository(env.DB).getWorkflowRun("2026-08-03"),
+    ).resolves.toMatchObject({
+      id: "2026-08-03",
+      status: "retryable",
+      retryable: true,
+      failureCode: "WORKFLOW_CREATE_FAILED",
+    });
 
-    rejectCreate = false;
-    const retried = await worker.fetch(
-      manualStartRequest("2026-08-01"),
+    rejectBatch = false;
+    const resumed = await worker.fetch(
+      new Request(
+        "https://briefing.example/api/admin/runs/2026-08-03/resume",
+        {
+          method: "POST",
+          headers: { "CF-Access-Jwt-Assertion": "signed-token" },
+        },
+      ),
       workerEnv(workflow),
     );
-    expect(retried.status).toBe(202);
-    expect(accepted.created).toHaveLength(1);
+    expect(resumed.status).toBe(202);
+    expect(created).toEqual([{
+      id: "2026-08-03",
+      params: { editionDate: "2026-08-03", runId: "2026-08-03" },
+      retention: { successRetention: "90 days", errorRetention: "90 days" },
+    }]);
     expect(inlineLauncherCalls.count).toBe(0);
   });
 

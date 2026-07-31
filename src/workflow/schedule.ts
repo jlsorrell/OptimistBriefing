@@ -21,15 +21,20 @@ export type ScheduledWorkflowInstance = {
   resume(): Promise<void>;
 };
 
+export type ScheduledWorkflowCreateInput = {
+  id: string;
+  params: { editionDate: string; runId: string };
+  retention: {
+    successRetention: "90 days";
+    errorRetention: "90 days";
+  };
+};
+
 export type ScheduledWorkflowBinding = {
-  create(input: {
-    id: string;
-    params: { editionDate: string; runId: string };
-    retention: {
-      successRetention: "90 days";
-      errorRetention: "90 days";
-    };
-  }): Promise<unknown>;
+  create(input: ScheduledWorkflowCreateInput): Promise<unknown>;
+  createBatch(
+    inputs: ScheduledWorkflowCreateInput[],
+  ): Promise<readonly unknown[]>;
   get(id: string): Promise<ScheduledWorkflowInstance>;
 };
 
@@ -43,11 +48,10 @@ type WorkflowRunIdentity = {
   runId: string;
 };
 
-export function createScheduledWorkflowInstance(
-  workflow: ScheduledWorkflowBinding,
+function scheduledWorkflowCreateInput(
   input: WorkflowRunIdentity,
-): Promise<unknown> {
-  return workflow.create({
+): ScheduledWorkflowCreateInput {
+  return {
     id: input.editionDate,
     params: {
       editionDate: input.editionDate,
@@ -57,7 +61,21 @@ export function createScheduledWorkflowInstance(
       successRetention: "90 days",
       errorRetention: "90 days",
     },
-  });
+  };
+}
+
+export function createScheduledWorkflowInstance(
+  workflow: ScheduledWorkflowBinding,
+  input: WorkflowRunIdentity,
+): Promise<unknown> {
+  return workflow.create(scheduledWorkflowCreateInput(input));
+}
+
+export function createScheduledWorkflowBatch(
+  workflow: ScheduledWorkflowBinding,
+  input: WorkflowRunIdentity,
+): Promise<readonly unknown[]> {
+  return workflow.createBatch([scheduledWorkflowCreateInput(input)]);
 }
 
 export async function continueScheduledWorkflowInstance(
