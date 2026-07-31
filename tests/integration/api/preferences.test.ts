@@ -1,11 +1,48 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { createApp } from "../../../src/api/app";
 import { ApiErrorSchema } from "../../../src/contracts/api";
 import type { EditionEntry, Item } from "../../../src/contracts/editorial";
 import { READER_PROFILE } from "../../../src/config/reader-profile";
 import { D1BriefingRepository } from "../../../src/db/d1-repository";
+import { coordinateScheduledBriefing } from "../../../src/workflow/schedule";
+import worker, { type Env } from "../../../src/worker";
+
+const inlineLauncherCalls = vi.hoisted(() => ({ count: 0 }));
+
+vi.mock(
+  "../../../src/workflow/run-editorial-pipeline",
+  async (importOriginal) => {
+    const original = await importOriginal<
+      typeof import("../../../src/workflow/run-editorial-pipeline")
+    >();
+    return {
+      ...original,
+      createD1WorkflowLauncher: () => ({
+        start: async ({ editionDate }: { editionDate: string }) => {
+          inlineLauncherCalls.count += 1;
+          return { runId: editionDate };
+        },
+        resume: async () => {
+          inlineLauncherCalls.count += 1;
+        },
+      }),
+    };
+  },
+);
+
+vi.mock("../../../src/auth/access", async (importOriginal) => {
+  const original = await importOriginal<
+    typeof import("../../../src/auth/access")
+  >();
+  return {
+    ...original,
+    createAccessVerifier: () => async () => ({
+      email: "  READER@EXAMPLE.COM  ",
+    }),
+  };
+});
 
 declare module "cloudflare:test" {
   interface ProvidedEnv {
@@ -17,6 +54,79 @@ const authenticated = {
   "CF-Access-Jwt-Assertion": "signed-token",
   "content-type": "application/json",
 };
+
+type WorkflowCreateInput = Parameters<
+  Env["DAILY_BRIEFING"]["create"]
+>[0];
+
+class RecordingWorkflow {
+  readonly created: WorkflowCreateInput[] = [];
+  readonly instances = new Map<string, {
+    status(): Promise<{ status: string }>;
+    restart(): Promise<void>;
+    resume(): Promise<void>;
+  }>();
+
+  constructor(
+    private readonly afterCreate?: () => Promise<void>,
+  ) {}
+
+  async create(input: WorkflowCreateInput) {
+    if (input?.id === undefined) throw new Error("Workflow ID is required.");
+    if (this.instances.has(input.id)) {
+      throw new Error("Workflow instance ID is already used.");
+    }
+    const instance = {
+      status: async () => ({ status: "queued" }),
+      restart: async () => undefined,
+      resume: async () => undefined,
+    };
+    this.instances.set(input.id, instance);
+    this.created.push(structuredClone(input));
+    await this.afterCreate?.();
+    return instance;
+  }
+
+  async get(id: string) {
+    const instance = this.instances.get(id);
+    if (instance === undefined) throw new Error("Workflow instance not found.");
+    return instance;
+  }
+}
+
+function workerEnv(workflow: object): Env {
+  return {
+    DB: env.DB,
+    CLOUDFLARE_ACCESS_TEAM_DOMAIN: "briefing.cloudflareaccess.com",
+    CLOUDFLARE_ACCESS_AUDIENCE: "briefing-audience",
+    ALLOWED_EMAILS: "reader@example.com",
+    OPENAI_API_KEY: "unused",
+    SUMMARY_MODEL: "unused-summary",
+    ASSESSMENT_MODEL: "unused-assessment",
+    EMBEDDING_MODEL: "unused-embedding",
+    MONTHLY_BUDGET_USD: "10",
+    SUMMARY_UNIT_PRICE_USD: "0.001",
+    ASSESSMENT_UNIT_PRICE_USD: "0.001",
+    EMBEDDING_UNIT_PRICE_USD: "0.001",
+    DAILY_BRIEFING: workflow as Env["DAILY_BRIEFING"],
+  };
+}
+
+function deferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
+function manualStartRequest(editionDate: string): Request {
+  return new Request("https://briefing.example/api/admin/runs", {
+    method: "POST",
+    headers: authenticated,
+    body: JSON.stringify({ editionDate }),
+  });
+}
 
 function app() {
   return createApp({
@@ -106,6 +216,146 @@ async function publishArchiveFixtures(prefix: string) {
 }
 
 describe("reader controls API", () => {
+  it("dispatches a manual start to the durable Workflow without provider work in fetch", async () => {
+    inlineLauncherCalls.count = 0;
+    const workflow = new RecordingWorkflow();
+
+    const response = await worker.fetch(
+      manualStartRequest("2026-07-30"),
+      workerEnv(workflow),
+    );
+
+    expect(response.status).toBe(202);
+    await expect(response.json()).resolves.toEqual({ runId: "2026-07-30" });
+    expect(workflow.created).toEqual([{
+      id: "2026-07-30",
+      params: { editionDate: "2026-07-30", runId: "2026-07-30" },
+      retention: { successRetention: "90 days", errorRetention: "90 days" },
+    }]);
+    expect(inlineLauncherCalls.count).toBe(0);
+    await expect(
+      new D1BriefingRepository(env.DB).getWorkflowRun("2026-07-30"),
+    ).resolves.toMatchObject({
+      id: "2026-07-30",
+      editionDate: "2026-07-30",
+      status: "pending",
+    });
+    const audit = await env.DB.prepare(
+      "SELECT event_json FROM audit_events WHERE event_type = ?",
+    ).bind("manual_run_started").first<{ event_json: string }>();
+    expect(JSON.parse(audit!.event_json)).toEqual({
+      actorEmail: "reader@example.com",
+    });
+  });
+
+  it.each([
+    ["manual", 202],
+    ["scheduled", 409],
+  ] as const)(
+    "claims one pending D1 run when the %s start wins the race",
+    async (winner, expectedStatus) => {
+    inlineLauncherCalls.count = 0;
+    const created = deferred();
+    const release = deferred();
+    const workflow = new RecordingWorkflow(async () => {
+      created.resolve();
+      await release.promise;
+    });
+    const editionDate = winner === "manual" ? "2026-07-30" : "2026-07-31";
+    const instant = winner === "manual"
+      ? new Date("2026-07-30T08:30:00.000Z")
+      : new Date("2026-07-31T08:30:00.000Z");
+    let responsePromise: Promise<Response>;
+    let scheduledPromise: Promise<void>;
+    if (winner === "manual") {
+      responsePromise = worker.fetch(
+        manualStartRequest(editionDate),
+        workerEnv(workflow),
+      );
+      await created.promise;
+      scheduledPromise = coordinateScheduledBriefing(
+        {
+          listRuns: () =>
+            new D1BriefingRepository(env.DB).listWorkflowRuns(),
+          workflow,
+        },
+        instant,
+      );
+    } else {
+      scheduledPromise = coordinateScheduledBriefing(
+        {
+          listRuns: async () => [],
+          workflow,
+        },
+        instant,
+      );
+      await created.promise;
+      responsePromise = worker.fetch(
+        manualStartRequest(editionDate),
+        workerEnv(workflow),
+      );
+    }
+    release.resolve();
+    const [response] = await Promise.all([
+      responsePromise,
+      scheduledPromise,
+    ]);
+
+    expect(response.status).toBe(expectedStatus);
+    expect(workflow.created).toHaveLength(1);
+    expect(workflow.instances.size).toBe(1);
+    expect(inlineLauncherCalls.count).toBe(0);
+    const runs = await env.DB.prepare(
+      `SELECT id, edition_date, status
+       FROM workflow_runs WHERE edition_date = ?`,
+    ).bind(editionDate).all<{
+      id: string;
+      edition_date: string;
+      status: string;
+    }>();
+    expect(runs.results).toEqual([{
+      id: editionDate,
+      edition_date: editionDate,
+      status: "pending",
+    }]);
+    },
+  );
+
+  it("releases an untouched D1 claim when Workflow creation is rejected", async () => {
+    inlineLauncherCalls.count = 0;
+    let rejectCreate = true;
+    const accepted = new RecordingWorkflow();
+    const workflow = {
+      create: async (input: WorkflowCreateInput) => {
+        if (rejectCreate) throw new Error("Workflow API unavailable.");
+        return accepted.create(input);
+      },
+      get: async () => ({
+        status: async () => ({ status: "unknown" }),
+        restart: async () => undefined,
+        resume: async () => undefined,
+      }),
+    };
+
+    const rejected = await worker.fetch(
+      manualStartRequest("2026-08-01"),
+      workerEnv(workflow),
+    );
+    expect(rejected.status).toBe(500);
+    await expect(
+      new D1BriefingRepository(env.DB).getWorkflowRun("2026-08-01"),
+    ).resolves.toBeNull();
+
+    rejectCreate = false;
+    const retried = await worker.fetch(
+      manualStartRequest("2026-08-01"),
+      workerEnv(workflow),
+    );
+    expect(retried.status).toBe(202);
+    expect(accepted.created).toHaveLength(1);
+    expect(inlineLauncherCalls.count).toBe(0);
+  });
+
   it.each([
     ["POST", "/api/feedback"],
     ["GET", "/api/preferences"],

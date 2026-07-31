@@ -1358,7 +1358,10 @@ export async function runEditorialPipeline(
   if (run.status === "published" || (run.status === "failed" && !run.retryable)) {
     return result(context.runId, run.status);
   }
-  if (run.status === "partial" && run.retryable) {
+  if (
+    (run.status === "partial" || run.status === "failed") &&
+    run.retryable
+  ) {
     await context.store.invalidateFrom(context.runId, "collect");
   }
   run = {
@@ -1424,7 +1427,8 @@ export async function runEditorialPipeline(
       ...(await context.store.getRun(context.runId) ?? run),
       status: composition.status,
       currentStep: "publish" as const,
-      retryable: composition.status === "partial",
+      retryable:
+        composition.status === "partial" || composition.status === "failed",
       updatedAt: context.now(),
       failureCode: composition.status === "failed" ? "MINIMUM_COVERAGE_FAILED" : null,
     };

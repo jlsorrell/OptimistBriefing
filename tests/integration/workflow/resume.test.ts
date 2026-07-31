@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type {
   Edition,
@@ -25,6 +25,41 @@ import type {
   PipelineStore,
 } from "../../../src/workflow/types";
 import { coordinateScheduledBriefing } from "../../../src/workflow/schedule";
+import worker, { type Env } from "../../../src/worker";
+
+const inlineLauncherCalls = vi.hoisted(() => ({ count: 0 }));
+
+vi.mock(
+  "../../../src/workflow/run-editorial-pipeline",
+  async (importOriginal) => {
+    const original = await importOriginal<
+      typeof import("../../../src/workflow/run-editorial-pipeline")
+    >();
+    return {
+      ...original,
+      createD1WorkflowLauncher: () => ({
+        start: async ({ editionDate }: { editionDate: string }) => ({
+          runId: editionDate,
+        }),
+        resume: async () => {
+          inlineLauncherCalls.count += 1;
+        },
+      }),
+    };
+  },
+);
+
+vi.mock("../../../src/auth/access", async (importOriginal) => {
+  const original = await importOriginal<
+    typeof import("../../../src/auth/access")
+  >();
+  return {
+    ...original,
+    createAccessVerifier: () => async () => ({
+      email: "reader@example.com",
+    }),
+  };
+});
 
 declare module "cloudflare:test" {
   interface ProvidedEnv {
@@ -33,6 +68,36 @@ declare module "cloudflare:test" {
 }
 
 const now = "2026-07-29T08:30:00.000Z";
+
+function resumeWorkerEnv(workflow: object): Env {
+  return {
+    DB: env.DB,
+    CLOUDFLARE_ACCESS_TEAM_DOMAIN: "briefing.cloudflareaccess.com",
+    CLOUDFLARE_ACCESS_AUDIENCE: "briefing-audience",
+    ALLOWED_EMAILS: "reader@example.com",
+    OPENAI_API_KEY: "unused",
+    SUMMARY_MODEL: "unused-summary",
+    ASSESSMENT_MODEL: "unused-assessment",
+    EMBEDDING_MODEL: "unused-embedding",
+    MONTHLY_BUDGET_USD: "10",
+    SUMMARY_UNIT_PRICE_USD: "0.001",
+    ASSESSMENT_UNIT_PRICE_USD: "0.001",
+    EMBEDDING_UNIT_PRICE_USD: "0.001",
+    DAILY_BRIEFING: workflow as Env["DAILY_BRIEFING"],
+  };
+}
+
+async function createRetryableRun(runId: string, editionDate: string) {
+  await env.DB.prepare(
+    `INSERT INTO workflow_runs (
+      id, edition_date, status, current_step, retryable, attempt_count,
+      failure_code, estimated_cost_usd, created_at, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    runId, editionDate, "failed", "publish", 1, 1,
+    "MINIMUM_COVERAGE_FAILED", 0, now, now,
+  ).run();
+}
 
 function item(id: string, section: string): Item {
   return {
@@ -79,6 +144,7 @@ class ResumeStore implements PipelineStore {
   readonly artifacts = new Map<string, CheckpointArtifact>();
   readonly attempts = new Map<PipelineStep, number>();
   readonly editions = new Map<string, EditionWithEntries>();
+  readonly invalidatedFrom: string[] = [];
 
   async getRun(runId: string) { return this.runs.get(runId) ?? null; }
   async createRun(run: PipelineRun) { this.runs.set(run.id, run); }
@@ -98,7 +164,10 @@ class ResumeStore implements PipelineStore {
     return attempt;
   }
   async failAttempt() { /* failure is represented by the run */ }
-  async invalidateFrom() { this.artifacts.clear(); }
+  async invalidateFrom(runId: string, step: PipelineStep) {
+    this.invalidatedFrom.push(runId, step);
+    this.artifacts.clear();
+  }
   async createDraft() { /* composition is persisted atomically later */ }
   async replaceEntries() { /* composition is persisted atomically later */ }
   async publish() { /* composition is persisted atomically later */ }
@@ -196,6 +265,61 @@ function resumableContext(
 }
 
 describe("durable workflow checkpoint execution", () => {
+  it.each([
+    ["paused", "resume"],
+    ["errored", "restart"],
+    ["terminated", "restart"],
+    ["complete", "restart"],
+    ["unknown", "create"],
+  ] as const)(
+    "routes manual resume for a %s Workflow instance through %s",
+    async (workflowStatus, expectedAction) => {
+      inlineLauncherCalls.count = 0;
+      const statuses = [
+        "paused",
+        "errored",
+        "terminated",
+        "complete",
+        "unknown",
+      ] as const;
+      const sequence = statuses.indexOf(workflowStatus) + 1;
+      const editionDate = `2035-01-${String(sequence).padStart(2, "0")}`;
+      const runId = `manual-resume-${workflowStatus}`;
+      await createRetryableRun(runId, editionDate);
+      const actions: string[] = [];
+      const instance = {
+        status: async () => ({ status: workflowStatus }),
+        resume: async () => { actions.push("resume"); },
+        restart: async () => { actions.push("restart"); },
+      };
+      const workflow = {
+        get: async (id: string) => {
+          actions.push(`get:${id}`);
+          return instance;
+        },
+        create: async (input: unknown) => {
+          actions.push("create");
+          return { ...instance, input };
+        },
+      };
+
+      const response = await worker.fetch(
+        new Request(
+          `https://briefing.example/api/admin/runs/${runId}/resume`,
+          {
+            method: "POST",
+            headers: { "CF-Access-Jwt-Assertion": "signed-token" },
+          },
+        ),
+        resumeWorkerEnv(workflow),
+      );
+
+      expect(response.status).toBe(202);
+      expect(actions).toEqual([`get:${editionDate}`, expectedAction]);
+      expect(inlineLauncherCalls.count).toBe(0);
+    },
+  );
+
   it.each(PIPELINE_STEPS)(
     "resumes after an injected %s failure without repeating completed work",
     async (checkpoint) => {
@@ -210,8 +334,44 @@ describe("durable workflow checkpoint execution", () => {
         Object.fromEntries(PIPELINE_STEPS.map((step) => [step, 1])),
       );
       for (const calls of context.calls.values()) expect(calls).toBe(1);
+      expect(context.store.invalidatedFrom).toEqual([]);
     },
   );
+
+  it("refreshes collection when retrying failed minimum coverage", async () => {
+    const context = resumableContext("publish");
+    const candidates = [
+      item("research", "research"),
+      item("world", "world"),
+      item("technology", "technology"),
+      item("ai-policy", "ai_policy"),
+      item("dmv", "dmv"),
+      item("baltimore", "baltimore"),
+    ];
+    let localAvailable = false;
+    context.collect = async () => candidates.filter((candidate) =>
+      localAvailable ||
+      !["dmv", "baltimore"].includes(candidate.metadata.section as string)
+    );
+    context.checkpointExecutor = async (_step, execute) => execute();
+
+    const first = await runEditorialPipeline(context);
+    expect(first.status).toBe("failed");
+    expect(context.store.runs.get(context.runId)).toMatchObject({
+      status: "failed",
+      retryable: true,
+      failureCode: "MINIMUM_COVERAGE_FAILED",
+    });
+
+    localAvailable = true;
+    await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+      status: "published",
+    });
+    expect(context.store.invalidatedFrom).toEqual([
+      context.runId,
+      "collect",
+    ]);
+  });
 
   it("strictly validates bounded workflow payload and model configuration", () => {
     expect(RunParamsSchema.parse({ editionDate: "2026-07-29" })).toEqual({

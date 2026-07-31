@@ -2,12 +2,9 @@ import { createAccessVerifier, parseAllowedEmails } from "./auth/access";
 import { createApp } from "./api/app";
 import { internalErrorResponse } from "./api/errors";
 import { D1BriefingRepository } from "./db/d1-repository";
-import { createD1WorkflowLauncher } from "./workflow/run-editorial-pipeline";
+import { createDurableWorkflowLauncher } from "./workflow/manual-controls";
 import { coordinateScheduledBriefing } from "./workflow/schedule";
-import {
-  createBudgetedPipelineRuntimeFactory,
-  type RunParams,
-} from "./workflow/daily-briefing-workflow";
+import type { RunParams } from "./workflow/daily-briefing-workflow";
 export { DailyBriefingWorkflow } from "./workflow/daily-briefing-workflow";
 export { coordinateScheduledBriefing };
 
@@ -38,10 +35,7 @@ export default {
           audience: env.CLOUDFLARE_ACCESS_AUDIENCE,
           allowedEmails: parseAllowedEmails(env.ALLOWED_EMAILS),
         }),
-        workflow: createD1WorkflowLauncher(
-          env.DB,
-          createBudgetedPipelineRuntimeFactory(env),
-        ),
+        workflow: createDurableWorkflowLauncher(env.DB, env.DAILY_BRIEFING),
       });
       return app.fetch(request);
     } catch {

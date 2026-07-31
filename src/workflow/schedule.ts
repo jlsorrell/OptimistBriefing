@@ -38,6 +38,47 @@ export type ScheduledBriefingDependencies = {
   workflow: ScheduledWorkflowBinding;
 };
 
+type WorkflowRunIdentity = {
+  editionDate: string;
+  runId: string;
+};
+
+export function createScheduledWorkflowInstance(
+  workflow: ScheduledWorkflowBinding,
+  input: WorkflowRunIdentity,
+): Promise<unknown> {
+  return workflow.create({
+    id: input.editionDate,
+    params: {
+      editionDate: input.editionDate,
+      runId: input.runId,
+    },
+    retention: {
+      successRetention: "90 days",
+      errorRetention: "90 days",
+    },
+  });
+}
+
+export async function continueScheduledWorkflowInstance(
+  workflow: ScheduledWorkflowBinding,
+  input: WorkflowRunIdentity,
+): Promise<void> {
+  const instance = await workflow.get(input.editionDate);
+  const state = await instance.status();
+  if (state.status === "unknown") {
+    await createScheduledWorkflowInstance(workflow, input);
+  } else if (state.status === "paused") {
+    await instance.resume();
+  } else if (
+    state.status === "errored" ||
+    state.status === "terminated" ||
+    state.status === "complete"
+  ) {
+    await instance.restart();
+  }
+}
+
 function localParts(instant: Date, timeZone: string): Record<string, string> {
   return Object.fromEntries(new Intl.DateTimeFormat("en-US", {
     timeZone,
@@ -84,25 +125,15 @@ export async function coordinateScheduledBriefing(
   });
   if (!decision.run) return;
   if (run?.retryable) {
-    const instance = await dependencies.workflow.get(initial.editionDate);
-    const state = await instance.status();
-    if (state.status === "unknown") {
-      await dependencies.workflow.create({
-        id: initial.editionDate,
-        params: { editionDate: initial.editionDate, runId: run.id },
-        retention: { successRetention: "90 days", errorRetention: "90 days" },
-      });
-    } else if (state.status === "paused") {
-      await instance.resume();
-    } else if (state.status !== "running" && state.status !== "queued") {
-      await instance.restart();
-    }
+    await continueScheduledWorkflowInstance(dependencies.workflow, {
+      editionDate: initial.editionDate,
+      runId: run.id,
+    });
     return;
   }
   if (run !== null) return;
-  await dependencies.workflow.create({
-    id: initial.editionDate,
-    params: { editionDate: initial.editionDate, runId: initial.editionDate },
-    retention: { successRetention: "90 days", errorRetention: "90 days" },
+  await createScheduledWorkflowInstance(dependencies.workflow, {
+    editionDate: initial.editionDate,
+    runId: initial.editionDate,
   });
 }
