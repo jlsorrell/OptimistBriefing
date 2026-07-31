@@ -6,6 +6,7 @@ export default defineConfig({
     exclude: [
       ...configDefaults.exclude,
       "tests/e2e/**",
+      "tests/preview-e2e/**",
       "tests/integration/**/*.test.ts",
     ],
   },
