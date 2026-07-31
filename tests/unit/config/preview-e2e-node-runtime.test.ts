@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
-import { chmod, lstat, mkdtemp, mkdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -45,16 +45,17 @@ class FakePreviewChild extends EventEmitter {
 }
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(temporaryParents.splice(0).map((path) => rm(path, { force: true, recursive: true })));
 });
 
 describe("preview E2E Node runtime", () => {
   it("creates the authentication directory with mode 0700", async () => {
-    const parent = await createTemporaryParent();
-
-    const directory = await createPreviewTempDirectory(parent);
+    const directory = await createPreviewTempDirectory();
+    temporaryParents.push(directory);
 
     expect(directory).toMatch(new RegExp(`${PREVIEW_TEMP_PREFIX}.+`));
+    expect(dirname(await realpath(directory))).toBe(await realpath(tmpdir()));
     expect((await stat(directory)).mode & 0o777).toBe(0o700);
   });
 
@@ -73,9 +74,7 @@ describe("preview E2E Node runtime", () => {
     };
     const context = {
       newPage: vi.fn().mockResolvedValue(page),
-      storageState: vi.fn(async ({ path }: { path: string }) => {
-        await writeFile(path, "{}", { mode: 0o666 });
-      }),
+      storageState: vi.fn().mockResolvedValue({}),
     };
     const browser = {
       newContext: vi.fn().mockResolvedValue(context),
@@ -94,6 +93,92 @@ describe("preview E2E Node runtime", () => {
     await expect(readFile(storageStatePath, "utf8")).resolves.toBe("{}");
   });
 
+  it("captures state in memory before creating a single-link protected leaf", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const storageStatePath = join(tempDirectory, "storage-state.json");
+    const outsideDirectory = await createTemporaryParent();
+    const outsideLink = join(outsideDirectory, "leaked-state.json");
+    const capturedState = { cookies: [], origins: [] };
+    const frame = {};
+    const page = {
+      on: vi.fn(),
+      off: vi.fn(),
+      mainFrame: vi.fn(() => frame),
+      goto: vi.fn().mockResolvedValue(null),
+      waitForURL: vi.fn().mockResolvedValue(null),
+      waitForFunction: vi.fn().mockResolvedValue(null),
+    };
+    const context = {
+      newPage: vi.fn().mockResolvedValue(page),
+      storageState: vi.fn(async (options?: { path: string }) => {
+        if (options !== undefined) {
+          await writeFile(options.path, JSON.stringify(capturedState), { mode: 0o600 });
+          await link(options.path, outsideLink);
+        }
+        return capturedState;
+      }),
+    };
+    const browser = {
+      newContext: vi.fn().mockResolvedValue(context),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await capturePreviewAccessState(
+      { baseURL, storageStatePath },
+      { launch: vi.fn().mockResolvedValue(browser) },
+    );
+
+    const metadata = await lstat(storageStatePath);
+    expect(metadata.nlink).toBe(1);
+    await expect(stat(outsideLink)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(storageStatePath, "utf8")).resolves.toBe(
+      JSON.stringify(capturedState),
+    );
+  });
+
+  it("does not write state after the protected parent is replaced", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const storageStatePath = join(tempDirectory, "storage-state.json");
+    const movedDirectory = `${tempDirectory}-moved`;
+    const replacementDirectory = await createTemporaryParent();
+    temporaryParents.push(movedDirectory);
+    const capturedState = { cookies: [], origins: [] };
+    const frame = {};
+    const page = {
+      on: vi.fn(),
+      off: vi.fn(),
+      mainFrame: vi.fn(() => frame),
+      goto: vi.fn().mockResolvedValue(null),
+      waitForURL: vi.fn().mockResolvedValue(null),
+      waitForFunction: vi.fn().mockResolvedValue(null),
+    };
+    const context = {
+      newPage: vi.fn().mockResolvedValue(page),
+      storageState: vi.fn(async (options?: { path: string }) => {
+        await rename(tempDirectory, movedDirectory);
+        await symlink(replacementDirectory, tempDirectory);
+        if (options !== undefined) {
+          await writeFile(options.path, JSON.stringify(capturedState), { mode: 0o600 });
+        }
+        return capturedState;
+      }),
+    };
+    const browser = {
+      newContext: vi.fn().mockResolvedValue(context),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(capturePreviewAccessState(
+      { baseURL, storageStatePath },
+      { launch: vi.fn().mockResolvedValue(browser) },
+    )).rejects.toThrow("Preview storage state was not captured securely");
+    await expect(stat(join(replacementDirectory, "storage-state.json"))).rejects.toMatchObject({
+      code: "ENOENT",
+    });
+  });
+
   it("rejects every preexisting storage-state leaf before launching Chromium", async () => {
     const tempDirectory = await createPreviewTempDirectory();
     temporaryParents.push(tempDirectory);
@@ -109,9 +194,7 @@ describe("preview E2E Node runtime", () => {
     };
     const context = {
       newPage: vi.fn().mockResolvedValue(page),
-      storageState: vi.fn(async ({ path }: { path: string }) => {
-        await writeFile(path, "{}", { mode: 0o600 });
-      }),
+      storageState: vi.fn().mockResolvedValue({}),
     };
     const browser = {
       newContext: vi.fn().mockResolvedValue(context),
@@ -137,7 +220,7 @@ describe("preview E2E Node runtime", () => {
     expect(launch).not.toHaveBeenCalled();
   });
 
-  it("rejects a symlink created in place of captured storage state", async () => {
+  it("rejects a symlink created before the atomic storage-state leaf", async () => {
     const tempDirectory = await createPreviewTempDirectory();
     temporaryParents.push(tempDirectory);
     const storageStatePath = join(tempDirectory, "storage-state.json");
@@ -154,8 +237,9 @@ describe("preview E2E Node runtime", () => {
     };
     const context = {
       newPage: vi.fn().mockResolvedValue(page),
-      storageState: vi.fn(async ({ path }: { path: string }) => {
-        await symlink(symlinkTarget, path);
+      storageState: vi.fn(async () => {
+        await symlink(symlinkTarget, storageStatePath);
+        return {};
       }),
     };
     const browser = {
@@ -340,34 +424,86 @@ describe("preview E2E Node runtime", () => {
     await expect(capture).rejects.toThrow("Preview harness terminated");
   });
 
-  it("removes only exact-prefix directories under the supplied temporary parent", async () => {
-    const parent = await createTemporaryParent();
-    const allowedDirectory = join(parent, `${PREVIEW_TEMP_PREFIX}cleanup`);
-    const unrelatedDirectory = join(parent, "unrelated");
-    await mkdir(allowedDirectory, { mode: 0o700 });
-    await mkdir(unrelatedDirectory);
+  it("returns on abort before a pending launch and closes a late browser", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const storageStatePath = join(tempDirectory, "storage-state.json");
+    const abortController = new AbortController();
+    const newContext = vi.fn().mockRejectedValue(new Error("browser closed"));
+    const close = vi.fn().mockResolvedValue(undefined);
+    const lateBrowser = { newContext, close };
+    let resolveLaunch: ((browser: typeof lateBrowser) => void) | undefined;
+    let markLaunchStarted: (() => void) | undefined;
+    const launchStarted = new Promise<void>((resolve) => { markLaunchStarted = resolve; });
+    const launch = vi.fn(() => {
+      markLaunchStarted!();
+      return new Promise<typeof lateBrowser>((resolve) => { resolveLaunch = resolve; });
+    });
+    const outcome = capturePreviewAccessState(
+      { baseURL, storageStatePath },
+      { launch },
+      abortController.signal,
+    ).then(
+      () => "resolved" as const,
+      () => "rejected" as const,
+    );
+    await launchStarted;
+    abortController.abort("SIGTERM");
+    const settledBeforeLateResolution = await Promise.race([
+      outcome.then(() => true),
+      new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+    ]);
+    resolveLaunch!(lateBrowser);
 
-    await removePreviewTempDirectory(allowedDirectory, parent);
+    await expect(outcome).resolves.toBe("rejected");
+    expect(settledBeforeLateResolution).toBe(true);
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+    expect(newContext).not.toHaveBeenCalled();
+  });
+
+  it("removes only exact-prefix directories under the supplied temporary parent", async () => {
+    const allowedDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(allowedDirectory);
+    const unrelatedDirectory = await createTemporaryParent();
+
+    await removePreviewTempDirectory(allowedDirectory);
 
     await expect(stat(allowedDirectory)).rejects.toThrow();
-    await expect(removePreviewTempDirectory(unrelatedDirectory, parent)).rejects.toThrow(
+    await expect(removePreviewTempDirectory(unrelatedDirectory)).rejects.toThrow(
       "Refusing unsafe preview cleanup target",
     );
     await expect(stat(unrelatedDirectory)).resolves.toBeDefined();
   });
 
   it("rejects a symlinked cleanup directory without touching its target", async () => {
-    const parent = await createTemporaryParent();
-    const targetDirectory = join(parent, "cleanup-target");
-    const linkedDirectory = join(parent, `${PREVIEW_TEMP_PREFIX}cleanup-link`);
-    await mkdir(targetDirectory, { mode: 0o700 });
+    const targetDirectory = await createTemporaryParent();
+    const linkedDirectory = join(tmpdir(), `${PREVIEW_TEMP_PREFIX}cleanup-link-${Date.now()}`);
+    temporaryParents.push(linkedDirectory);
     await writeFile(join(targetDirectory, "keep.txt"), "keep");
     await symlink(targetDirectory, linkedDirectory);
 
-    await expect(removePreviewTempDirectory(linkedDirectory, parent)).rejects.toThrow(
+    await expect(removePreviewTempDirectory(linkedDirectory)).rejects.toThrow(
       "Refusing unsafe preview temporary directory",
     );
     await expect(readFile(join(targetDirectory, "keep.txt"), "utf8")).resolves.toBe("keep");
+  });
+
+  it("rejects cleanup roots outside the operating-system temp directory", async () => {
+    const untrustedParent = await mkdtemp(join(process.cwd(), "preview-untrusted-root-"));
+    temporaryParents.push(untrustedParent);
+    const directory = await mkdtemp(join(untrustedParent, PREVIEW_TEMP_PREFIX));
+    await chmod(directory, 0o700);
+    await writeFile(join(directory, "keep.txt"), "keep");
+
+    const removeWithUnexpectedRoot = removePreviewTempDirectory as unknown as (
+      path: string,
+      temporaryRoot: string,
+    ) => Promise<void>;
+
+    await expect(removeWithUnexpectedRoot(directory, untrustedParent)).rejects.toThrow(
+      "Refusing unsafe preview cleanup target",
+    );
+    await expect(readFile(join(directory, "keep.txt"), "utf8")).resolves.toBe("keep");
   });
 
   it("uses the first concurrent signal and relays only after shutdown", async () => {
@@ -411,6 +547,34 @@ describe("preview E2E Node runtime", () => {
     await Promise.resolve();
     expect(settled).toBe(false);
     child.emit("exit", null, "SIGTERM");
+    child.emit("close", null, "SIGTERM");
+
+    await expect(running).resolves.toBe(1);
+    expect(writeOutput).toHaveBeenCalledWith(
+      "Preview checks failed; re-authenticate and retry.\n",
+      "stderr",
+    );
+  });
+
+  it("escalates an unresponsive child and settles after a bounded fallback", async () => {
+    vi.useFakeTimers();
+    const env = await createProtectedSuiteEnvironment();
+    const child = new FakePreviewChild();
+    const abortController = new AbortController();
+    const writeOutput = vi.fn();
+    const running = runPreviewSuite(env, abortController.signal, {
+      platform: "linux",
+      spawnProcess: vi.fn(() => child) as never,
+      writeOutput,
+      terminationGraceMilliseconds: 5,
+      terminationFallbackMilliseconds: 5,
+    });
+
+    abortController.abort("SIGTERM");
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    await vi.advanceTimersByTimeAsync(5);
+    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    await vi.advanceTimersByTimeAsync(5);
 
     await expect(running).resolves.toBe(1);
     expect(writeOutput).toHaveBeenCalledWith(
@@ -432,6 +596,7 @@ describe("preview E2E Node runtime", () => {
     child.stdout.write("https://accounts.google.com/login?state=sensitive\n");
     child.stderr.write("<body>Sign in with Google secret page</body>\n");
     child.emit("exit", 4, null);
+    child.emit("close", 4, null);
 
     await expect(running).resolves.toBe(4);
     expect(writeOutput).toHaveBeenCalledTimes(1);
@@ -441,6 +606,29 @@ describe("preview E2E Node runtime", () => {
     );
     expect(writeOutput.mock.calls.flat().join(" ")).not.toContain("sensitive");
     expect(writeOutput.mock.calls.flat().join(" ")).not.toContain("Sign in with Google");
+  });
+
+  it("flushes successful output only after close drains late pipe chunks", async () => {
+    const env = await createProtectedSuiteEnvironment();
+    const child = new FakePreviewChild();
+    const writeOutput = vi.fn();
+    const running = runPreviewSuite(env, new AbortController().signal, {
+      platform: "linux",
+      spawnProcess: vi.fn(() => child) as never,
+      writeOutput,
+    });
+
+    child.stdout.write("before-exit\n");
+    child.emit("exit", 0, null);
+    child.stdout.write("after-exit\n");
+    child.emit("close", 0, null);
+
+    await expect(running).resolves.toBe(0);
+    expect(writeOutput).toHaveBeenCalledOnce();
+    expect(writeOutput).toHaveBeenCalledWith(
+      "before-exit\nafter-exit\n",
+      "stdout",
+    );
   });
 
   it("rejects an unprotected suite state before spawning Playwright", async () => {

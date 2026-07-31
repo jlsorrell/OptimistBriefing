@@ -36,7 +36,7 @@ interface PreviewPage {
 
 interface PreviewContext {
   newPage(): Promise<PreviewPage>;
-  storageState(input: { path: string }): Promise<unknown>;
+  storageState(): Promise<unknown>;
 }
 
 interface PreviewBrowser {
@@ -59,21 +59,23 @@ interface PreviewSuiteOptions {
     },
   ) => ChildProcess;
   writeOutput?: (text: string, destination: "stdout" | "stderr") => void;
+  terminationGraceMilliseconds?: number;
+  terminationFallbackMilliseconds?: number;
 }
 
-export async function createPreviewTempDirectory(
-  systemTempDirectory = tmpdir(),
-): Promise<string> {
-  const tempDirectory = await mkdtemp(join(systemTempDirectory, PREVIEW_TEMP_PREFIX));
+const DEFAULT_TERMINATION_GRACE_MILLISECONDS = 2_000;
+const DEFAULT_TERMINATION_FALLBACK_MILLISECONDS = 2_000;
+
+export async function createPreviewTempDirectory(): Promise<string> {
+  const tempDirectory = await mkdtemp(join(tmpdir(), PREVIEW_TEMP_PREFIX));
   await chmod(tempDirectory, 0o700);
   return tempDirectory;
 }
 
 export async function removePreviewTempDirectory(
   tempDirectory: string,
-  systemTempDirectory = tmpdir(),
 ): Promise<void> {
-  await rm(assertProtectedTemporaryDirectory(tempDirectory, systemTempDirectory), {
+  await rm(assertProtectedTemporaryDirectory(tempDirectory), {
     force: true,
     recursive: true,
   });
@@ -89,13 +91,25 @@ function isPlaywrightNavigationError(error: unknown): boolean {
 async function resolveCaptureAccessStateInput(input: {
   baseURL: string;
   storageStatePath: string;
-}): Promise<{ baseURL: string; storageStatePath: string }> {
+}): Promise<{
+  baseURL: string;
+  tempDirectory: string;
+  tempDirectoryDevice: number;
+  tempDirectoryInode: number;
+  storageStatePath: string;
+}> {
   const baseURL = resolvePreviewBaseURL(input.baseURL);
+  let tempDirectory: string;
   let storageStatePath: string;
+  let tempDirectoryDevice: number;
+  let tempDirectoryInode: number;
   try {
-    const tempDirectory = assertProtectedTemporaryDirectory(
+    tempDirectory = assertProtectedTemporaryDirectory(
       dirname(input.storageStatePath),
     );
+    const metadata = await lstat(tempDirectory);
+    tempDirectoryDevice = metadata.dev;
+    tempDirectoryInode = metadata.ino;
     storageStatePath = resolvePreviewStorageStatePath(
       tempDirectory,
       input.storageStatePath,
@@ -106,7 +120,15 @@ async function resolveCaptureAccessStateInput(input: {
   try {
     await lstat(storageStatePath);
   } catch (error) {
-    if (isFileSystemError(error, "ENOENT")) return { baseURL, storageStatePath };
+    if (isFileSystemError(error, "ENOENT")) {
+      return {
+        baseURL,
+        tempDirectory,
+        tempDirectoryDevice,
+        tempDirectoryInode,
+        storageStatePath,
+      };
+    }
     throw new Error("Preview storage state must be absent before authentication");
   }
   throw new Error("Preview storage state must be absent before authentication");
@@ -116,32 +138,124 @@ function isFileSystemError(error: unknown, code: string): boolean {
   return error instanceof Error && "code" in error && error.code === code;
 }
 
-async function protectCapturedStorageState(storageStatePath: string): Promise<void> {
-  let handle;
+async function assertCaptureDirectoryIdentity(input: {
+  tempDirectory: string;
+  tempDirectoryDevice: number;
+  tempDirectoryInode: number;
+}): Promise<void> {
+  const candidate = assertProtectedTemporaryDirectory(input.tempDirectory);
+  const metadata = await lstat(candidate);
+  if (
+    metadata.dev !== input.tempDirectoryDevice ||
+    metadata.ino !== input.tempDirectoryInode
+  ) {
+    throw new Error("preview directory changed");
+  }
+}
+
+async function assertOpenStorageStateIdentity(
+  handle: Awaited<ReturnType<typeof open>>,
+  input: {
+    tempDirectory: string;
+    tempDirectoryDevice: number;
+    tempDirectoryInode: number;
+    storageStatePath: string;
+  },
+): Promise<void> {
+  await assertCaptureDirectoryIdentity(input);
+  const [descriptor, leaf] = await Promise.all([
+    handle.stat(),
+    lstat(input.storageStatePath),
+  ]);
+  if (
+    !descriptor.isFile() ||
+    descriptor.nlink !== 1 ||
+    (descriptor.mode & 0o777) !== 0o600 ||
+    leaf.isSymbolicLink() ||
+    !leaf.isFile() ||
+    leaf.nlink !== 1 ||
+    (leaf.mode & 0o777) !== 0o600 ||
+    leaf.dev !== descriptor.dev ||
+    leaf.ino !== descriptor.ino
+  ) {
+    throw new Error("unsafe storage state");
+  }
+}
+
+async function persistCapturedStorageState(
+  state: unknown,
+  input: {
+    tempDirectory: string;
+    tempDirectoryDevice: number;
+    tempDirectoryInode: number;
+    storageStatePath: string;
+  },
+): Promise<void> {
+  let serializedState: string;
   try {
-    handle = await open(
-      storageStatePath,
-      constants.O_RDONLY | constants.O_NOFOLLOW,
-    );
-    const before = await handle.stat();
-    if (!before.isFile()) throw new Error("not a regular file");
-    await handle.chmod(0o600);
-    const [after, leaf] = await Promise.all([handle.stat(), lstat(storageStatePath)]);
-    if (
-      !after.isFile() ||
-      (after.mode & 0o777) !== 0o600 ||
-      leaf.isSymbolicLink() ||
-      !leaf.isFile() ||
-      (leaf.mode & 0o777) !== 0o600 ||
-      leaf.dev !== after.dev ||
-      leaf.ino !== after.ino
-    ) {
-      throw new Error("unsafe storage state");
-    }
+    const serialized = JSON.stringify(state);
+    if (serialized === undefined) throw new Error("missing storage state");
+    serializedState = serialized;
   } catch {
+    throw new Error("Preview storage state was not captured securely");
+  }
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  let wroteState = false;
+  try {
+    await assertCaptureDirectoryIdentity(input);
+    handle = await open(
+      input.storageStatePath,
+      constants.O_WRONLY |
+        constants.O_CREAT |
+        constants.O_EXCL |
+        constants.O_NOFOLLOW,
+      0o600,
+    );
+    await handle.chmod(0o600);
+    await assertOpenStorageStateIdentity(handle, input);
+    await handle.writeFile(serializedState, { encoding: "utf8" });
+    wroteState = true;
+    await handle.sync();
+    await assertOpenStorageStateIdentity(handle, input);
+  } catch {
+    if (wroteState && handle !== undefined) {
+      try {
+        await handle.truncate(0);
+        await handle.sync();
+      } catch {
+        // Best-effort scrubbing still returns only the generic safe error.
+      }
+    }
     throw new Error("Preview storage state was not captured securely");
   } finally {
     await handle?.close();
+  }
+}
+
+async function launchPreviewBrowser(
+  browserDriver: PreviewChromium,
+  signal: AbortSignal,
+): Promise<PreviewBrowser> {
+  if (signal.aborted) throw new Error("Preview harness terminated.");
+  let rejectAbort: (error: Error) => void = () => undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectAbort = reject;
+  });
+  const abortListener = () => {
+    rejectAbort(new Error("Preview harness terminated."));
+  };
+  signal.addEventListener("abort", abortListener, { once: true });
+  const launched = browserDriver.launch({ headless: false }).then(async (browser) => {
+    if (signal.aborted) {
+      await browser.close().catch(() => undefined);
+      throw new Error("Preview harness terminated.");
+    }
+    return browser;
+  });
+  try {
+    return await Promise.race([launched, aborted]);
+  } finally {
+    signal.removeEventListener("abort", abortListener);
   }
 }
 
@@ -150,9 +264,9 @@ export async function capturePreviewAccessState(
   browserDriver: PreviewChromium = chromium,
   signal: AbortSignal = new AbortController().signal,
 ): Promise<void> {
-  const { baseURL, storageStatePath } = await resolveCaptureAccessStateInput(input);
-  if (signal.aborted) throw new Error("Preview harness terminated.");
-  const browser = await browserDriver.launch({ headless: false });
+  const captureInput = await resolveCaptureAccessStateInput(input);
+  const { baseURL } = captureInput;
+  const browser = await launchPreviewBrowser(browserDriver, signal);
   let closePromise: Promise<void> | undefined;
   const closeBrowser = () => {
     closePromise ??= browser.close();
@@ -196,8 +310,8 @@ export async function capturePreviewAccessState(
               undefined,
               { timeout: 300_000 },
             );
-            await context.storageState({ path: storageStatePath });
-            await protectCapturedStorageState(storageStatePath);
+            const storageState = await context.storageState();
+            await persistCapturedStorageState(storageState, captureInput);
           })(),
         ]);
       } finally {
@@ -296,12 +410,36 @@ export async function runPreviewSuite(
     child.stdout?.on("data", (chunk: Buffer | string) => stdout.push(String(chunk)));
     child.stderr?.on("data", (chunk: Buffer | string) => stderr.push(String(chunk)));
     let settled = false;
+    let graceTimer: NodeJS.Timeout | undefined;
+    let fallbackTimer: NodeJS.Timeout | undefined;
+    const clearTerminationTimers = () => {
+      if (graceTimer !== undefined) clearTimeout(graceTimer);
+      if (fallbackTimer !== undefined) clearTimeout(fallbackTimer);
+    };
     const abortListener = () => {
-      child.kill(abortSignalName(signal));
+      try {
+        child.kill(abortSignalName(signal));
+      } catch {
+        // Escalation and fallback below still bound shutdown.
+      }
+      graceTimer = setTimeout(() => {
+        if (settled) return;
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // The bounded fallback still releases cleanup.
+        }
+        fallbackTimer = setTimeout(
+          () => settle(1),
+          options.terminationFallbackMilliseconds ??
+            DEFAULT_TERMINATION_FALLBACK_MILLISECONDS,
+        );
+      }, options.terminationGraceMilliseconds ?? DEFAULT_TERMINATION_GRACE_MILLISECONDS);
     };
     const settle = (code: number) => {
       if (settled) return;
       settled = true;
+      clearTerminationTimers();
       signal.removeEventListener("abort", abortListener);
       if (code === 0) {
         if (stdout.length > 0) writeOutput(stdout.join(""), "stdout");
@@ -312,7 +450,7 @@ export async function runPreviewSuite(
       resolve(code);
     };
     child.once("error", () => settle(1));
-    child.once("exit", (code, childSignal) => {
+    child.once("close", (code, childSignal) => {
       settle(normalizeChildExitCode(code, childSignal));
     });
     signal.addEventListener("abort", abortListener, { once: true });

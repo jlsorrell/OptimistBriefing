@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -7,7 +7,6 @@ import {
   PREVIEW_ORIGIN,
   PREVIEW_TEMP_PREFIX,
   assertAuthenticationNavigation,
-  assertTemporaryDirectory,
   normalizeChildExitCode,
   resolvePreviewBaseURL,
   resolvePreviewRuntimeEnvironment,
@@ -107,6 +106,19 @@ describe("preview E2E environment", () => {
     })).toThrow("Preview storage state must be the protected temporary file");
   });
 
+  it("rejects a storage-state file with another hard link", async () => {
+    const { tempDirectory, storageStatePath } = await createProtectedRuntimeState();
+    const outsideDirectory = await mkdtemp(join(tmpdir(), "preview-runtime-hardlink-"));
+    temporaryPaths.push(outsideDirectory);
+    await link(storageStatePath, join(outsideDirectory, "linked-state.json"));
+
+    expect(() => resolvePreviewRuntimeEnvironment({
+      OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
+      OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
+      OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
+    })).toThrow("Preview storage state must be the protected temporary file");
+  });
+
   it("rejects a symlinked or non-0700 runtime directory", async () => {
     const { tempDirectory, storageStatePath } = await createProtectedRuntimeState();
     await chmod(tempDirectory, 0o755);
@@ -127,15 +139,6 @@ describe("preview E2E environment", () => {
       OPTIMIST_PREVIEW_TEMP_DIR: linkedDirectory,
       OPTIMIST_PREVIEW_STORAGE_STATE: join(linkedDirectory, "storage-state.json"),
     })).toThrow("Preview storage state must be the protected temporary file");
-  });
-
-  it("rejects broad or unrelated cleanup targets", () => {
-    expect(() => assertTemporaryDirectory(tmpdir())).toThrow(
-      "Refusing unsafe preview cleanup target",
-    );
-    expect(() => assertTemporaryDirectory(join(tmpdir(), "unrelated"))).toThrow(
-      "Refusing unsafe preview cleanup target",
-    );
   });
 
   it("preserves child exit codes and maps signals to failure", () => {

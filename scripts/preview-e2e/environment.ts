@@ -22,12 +22,9 @@ export function assertAuthenticationNavigation(value: string): void {
   }
 }
 
-export function assertTemporaryDirectory(
-  path: string,
-  systemTempDirectory = tmpdir(),
-): string {
+function assertTemporaryDirectory(path: string): string {
   const candidate = resolve(path);
-  if (dirname(candidate) !== resolve(systemTempDirectory) ||
+  if (dirname(candidate) !== resolve(tmpdir()) ||
       !basename(candidate).startsWith(PREVIEW_TEMP_PREFIX)) {
     throw new Error("Refusing unsafe preview cleanup target");
   }
@@ -36,16 +33,15 @@ export function assertTemporaryDirectory(
 
 export function assertProtectedTemporaryDirectory(
   path: string,
-  systemTempDirectory = tmpdir(),
 ): string {
-  const candidate = assertTemporaryDirectory(path, systemTempDirectory);
+  const candidate = assertTemporaryDirectory(path);
   try {
     const metadata = lstatSync(candidate);
     if (
       metadata.isSymbolicLink() ||
       !metadata.isDirectory() ||
       (metadata.mode & 0o777) !== 0o700 ||
-      dirname(realpathSync(candidate)) !== realpathSync(systemTempDirectory)
+      dirname(realpathSync(candidate)) !== realpathSync(tmpdir())
     ) {
       throw new Error("unsafe directory");
     }
@@ -66,16 +62,12 @@ export function resolvePreviewStorageStatePath(
   return candidate;
 }
 
-export function assertProtectedStorageStateFile(
+function assertProtectedStorageStateFile(
   tempDirectory: string,
   storageStatePath: string,
-  systemTempDirectory = tmpdir(),
 ): string {
   try {
-    const protectedDirectory = assertProtectedTemporaryDirectory(
-      tempDirectory,
-      systemTempDirectory,
-    );
+    const protectedDirectory = assertProtectedTemporaryDirectory(tempDirectory);
     const candidate = resolvePreviewStorageStatePath(
       protectedDirectory,
       storageStatePath,
@@ -84,6 +76,7 @@ export function assertProtectedStorageStateFile(
     if (
       metadata.isSymbolicLink() ||
       !metadata.isFile() ||
+      metadata.nlink !== 1 ||
       (metadata.mode & 0o777) !== 0o600
     ) {
       throw new Error("unsafe storage state");
