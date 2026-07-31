@@ -1,5 +1,5 @@
 import { applyD1Migrations, env } from "cloudflare:test";
-import type { D1Migration } from "@cloudflare/vitest-pool-workers/config";
+import type { D1Migration } from "@cloudflare/vitest-pool-workers";
 import { describe, expect, it } from "vitest";
 
 import { D1BriefingRepository } from "../../../src/db/d1-repository";

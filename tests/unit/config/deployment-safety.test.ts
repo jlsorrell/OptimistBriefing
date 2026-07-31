@@ -11,16 +11,18 @@ describe("deployment configuration", () => {
       compatibility_date?: string;
     };
     const workerConfig = readFileSync("vitest.worker.config.ts", "utf8");
-    const compatibilityDateMatch = workerConfig.match(
-      /compatibilityDate:\s*["']([^"']+)["']/,
-    );
+    const compatibilityDateMatches = [
+      ...workerConfig.matchAll(
+        /^\s*compatibilityDate:\s*["']([^"']+)["'],?\s*$/gm,
+      ),
+    ];
 
     expect(packageJson.scripts.deploy).toBe(
       "npm run build && wrangler deploy --keep-vars",
     );
-    expect(compatibilityDateMatch).not.toBeNull();
+    expect(compatibilityDateMatches).toHaveLength(1);
 
-    const workerCompatibilityDate = compatibilityDateMatch?.[1];
+    const workerCompatibilityDate = compatibilityDateMatches[0]?.[1];
     expect(workerCompatibilityDate).toBe(wrangler.compatibility_date);
     expect(workerCompatibilityDate).toBe("2026-07-29");
   });
