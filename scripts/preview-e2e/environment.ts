@@ -6,13 +6,10 @@ export const PREVIEW_ORIGIN =
 export const PREVIEW_TEMP_PREFIX = "optimist-preview-e2e-";
 
 export function resolvePreviewBaseURL(value: string | undefined): string {
-  const url = new URL(value ?? PREVIEW_ORIGIN);
-  if (url.origin !== PREVIEW_ORIGIN || url.username !== "" ||
-      url.password !== "" || url.port !== "" || url.pathname !== "/" ||
-      url.search !== "" || url.hash !== "") {
-    throw new Error("Preview E2E may only target the isolated preview origin");
+  if (value === undefined || value === PREVIEW_ORIGIN || value === `${PREVIEW_ORIGIN}/`) {
+    return PREVIEW_ORIGIN;
   }
-  return url.origin;
+  throw new Error("Preview E2E may only target the isolated preview origin");
 }
 
 export function assertAuthenticationNavigation(value: string): void {

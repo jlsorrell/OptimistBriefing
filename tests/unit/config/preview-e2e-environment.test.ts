@@ -21,9 +21,13 @@ describe("preview E2E environment", () => {
     "http://optimist-briefing-preview.optimistindustries.workers.dev",
     "https://user@optimist-briefing-preview.optimistindustries.workers.dev",
     "https://optimist-briefing-preview.optimistindustries.workers.dev:8443",
+    "https://optimist-briefing-preview.optimistindustries.workers.dev:443/",
     "https://optimist-briefing-preview.optimistindustries.workers.dev/archive",
     "https://optimist-briefing-preview.optimistindustries.workers.dev/?debug=1",
+    "https://optimist-briefing-preview.optimistindustries.workers.dev/?",
     "https://optimist-briefing-preview.optimistindustries.workers.dev/#today",
+    "https://optimist-briefing-preview.optimistindustries.workers.dev/#",
+    "https://optimist-briefing-preview.optimistindustries.workers.dev/%2e",
     "https://optimistindustries.com",
     "https://another-worker.optimistindustries.workers.dev",
   ])("rejects unsafe target %s", (value) => {
