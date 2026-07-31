@@ -22,6 +22,7 @@ import {
   RawResearchCandidateSchema,
 } from "../sources/types";
 import type { BudgetPolicy } from "../models/cost-ledger";
+import type { ReaderPreferences } from "../db/repository";
 
 export const PIPELINE_STEPS = [
   "collect",
@@ -113,6 +114,11 @@ export type PipelineStore = {
   getRun(runId: string): Promise<PipelineRun | null>;
   createRun(run: PipelineRun): Promise<void>;
   saveRun(run: PipelineRun): Promise<void>;
+  readPreferenceSnapshot(runId: string): Promise<ReaderPreferences | null>;
+  savePreferenceSnapshot(
+    runId: string,
+    preferences: ReaderPreferences,
+  ): Promise<void>;
   readCheckpoint(runId: string, step: PipelineStep): Promise<boolean>;
   saveCheckpoint(
     runId: string,

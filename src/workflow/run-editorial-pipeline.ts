@@ -1,6 +1,11 @@
 import { composeEdition } from "./compose-edition";
 import { publishEdition } from "./publish-edition";
 import { D1BriefingRepository } from "../db/d1-repository";
+import {
+  approvedBaselinePreferences,
+  ReaderPreferencesSchema,
+  type ReaderPreferences,
+} from "../db/repository";
 import { z } from "zod";
 import { SourceHttpClient } from "../sources/http-client";
 import { createNewsCollectorFromCatalog } from "../sources/news-collector";
@@ -31,6 +36,7 @@ import {
   type SectionBudgets,
   type ShortlistPreferences,
 } from "../editorial/shortlist";
+import { APPROVED_SECTION_MAXIMA } from "../editorial/shortlist";
 import { editorialSignals } from "../editorial/editorial-signals";
 import { READER_PROFILE } from "../config/reader-profile";
 import { ArxivAdapter } from "../sources/arxiv";
@@ -380,6 +386,41 @@ export class D1PipelineStore implements PipelineStore {
     ).run();
   }
 
+  async readPreferenceSnapshot(
+    runId: string,
+  ): Promise<ReaderPreferences | null> {
+    const record = await this.db.prepare(
+      `SELECT event_json FROM audit_events
+       WHERE run_id = ? AND event_type = ?
+       ORDER BY created_at DESC, id DESC
+       LIMIT 1`,
+    ).bind(runId, "preference_snapshot").first<{ event_json: string }>();
+    if (record === null) return null;
+    try {
+      return ReaderPreferencesSchema.parse(JSON.parse(record.event_json));
+    } catch (error) {
+      throw new Error("INVALID_PREFERENCE_SNAPSHOT", { cause: error });
+    }
+  }
+
+  async savePreferenceSnapshot(
+    runId: string,
+    preferences: ReaderPreferences,
+  ): Promise<void> {
+    const validPreferences = ReaderPreferencesSchema.parse(preferences);
+    await this.db.prepare(
+      `INSERT OR IGNORE INTO audit_events (
+        id, run_id, event_type, event_json, created_at
+      ) VALUES (?, ?, ?, ?, ?)`,
+    ).bind(
+      `preference_snapshot:${runId}`,
+      runId,
+      "preference_snapshot",
+      JSON.stringify(validPreferences),
+      new Date().toISOString(),
+    ).run();
+  }
+
   async readCheckpoint(runId: string, step: (typeof PIPELINE_STEPS)[number]): Promise<boolean> {
     return (await this.readArtifact(runId, step)) !== null;
   }
@@ -539,6 +580,7 @@ export type ProductionPipelineContextOptions = {
   runId: string;
   store: PipelineStore;
   now: () => string;
+  preferences?: ReaderPreferences;
   providers: PipelineProviders;
   collectCandidates: () => Promise<readonly CollectedCandidate[]>;
   persistItems?: (items: readonly Item[]) => Promise<void>;
@@ -546,6 +588,68 @@ export type ProductionPipelineContextOptions = {
   checkpointExecutor?: PipelineContext["checkpointExecutor"];
   budgetPolicy?: BudgetPolicy;
 };
+
+function defaultReaderPreferences(): ReaderPreferences {
+  const baseline = approvedBaselinePreferences();
+  return ReaderPreferencesSchema.parse({
+    ...baseline,
+    baseline,
+    feedbackHistory: [],
+  });
+}
+
+function parsedPreferences(
+  preferences: ReaderPreferences | undefined,
+): ReaderPreferences {
+  return preferences === undefined
+    ? defaultReaderPreferences()
+    : ReaderPreferencesSchema.parse(preferences);
+}
+
+export async function loadOrCreatePreferenceSnapshot(
+  store: D1PipelineStore,
+  runId: string,
+): Promise<ReaderPreferences> {
+  const existing = await store.readPreferenceSnapshot(runId);
+  if (existing !== null) return existing;
+  const current = ReaderPreferencesSchema.parse(
+    await store.repository.getPreferences(),
+  );
+  await store.savePreferenceSnapshot(runId, current);
+  const stored = await store.readPreferenceSnapshot(runId);
+  if (stored === null) throw new Error("PREFERENCE_SNAPSHOT_NOT_SAVED");
+  return stored;
+}
+
+export async function ensurePipelineRun(
+  store: PipelineStore,
+  runId: string,
+  editionDate: string,
+  now: string,
+): Promise<PipelineRun> {
+  const existing = await store.getRun(runId);
+  if (existing !== null) return existing;
+  const run: PipelineRun = {
+    id: runId,
+    editionDate,
+    status: "pending",
+    currentStep: null,
+    retryable: false,
+    attemptCount: 0,
+    estimatedCostUsd: 0,
+    createdAt: now,
+    updatedAt: now,
+    failureCode: null,
+  };
+  try {
+    await store.createRun(run);
+    return run;
+  } catch (error) {
+    const accepted = await store.getRun(runId);
+    if (accepted !== null) return accepted;
+    throw error;
+  }
+}
 
 function workflowPayload(item: Item): WorkflowItemPayload {
   return WorkflowItemPayloadSchema.parse(item.metadata.workflow);
@@ -716,17 +820,99 @@ function selectionReasons(item: Item): readonly string[] {
   );
 }
 
+function clamped(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function adjustedRelevance(
+  relevance: number,
+  configuredWeights: readonly number[],
+): number {
+  if (configuredWeights.length === 0) return clamped(relevance);
+  const average = configuredWeights.reduce(
+    (sum, weight) => sum + weight,
+    0,
+  ) / configuredWeights.length;
+  return clamped(relevance * average);
+}
+
+function validBudget(
+  value: number | undefined,
+  maximum: number,
+): number | undefined {
+  return value !== undefined &&
+      Number.isInteger(value) &&
+      value >= 0 &&
+      value <= maximum
+    ? value
+    : undefined;
+}
+
+function preferredSectionBudgets(
+  preferences: ReaderPreferences,
+): SectionBudgets {
+  const configured = preferences.sectionBudgets;
+  const localBudgets = [
+    validBudget(configured.dmv, APPROVED_SECTION_MAXIMA.dmvAndBaltimore),
+    validBudget(
+      configured.baltimore,
+      APPROVED_SECTION_MAXIMA.dmvAndBaltimore,
+    ),
+  ].filter((budget): budget is number => budget !== undefined);
+  const local = localBudgets.length === 0
+    ? undefined
+    : Math.max(...localBudgets);
+  return {
+    morningBrief:
+      validBudget(
+        configured.morning_brief,
+        APPROVED_SECTION_MAXIMA.morningBrief,
+      ) ?? READER_PROFILE.sectionBudgets.morningBrief,
+    featuredResearch:
+      validBudget(
+        configured.research,
+        APPROVED_SECTION_MAXIMA.featuredResearch,
+      ) ?? READER_PROFILE.sectionBudgets.featuredResearch,
+    researchRadar:
+      validBudget(
+        configured.research_radar,
+        APPROVED_SECTION_MAXIMA.researchRadar,
+      ) ?? READER_PROFILE.sectionBudgets.researchRadar,
+    world:
+      validBudget(configured.world, APPROVED_SECTION_MAXIMA.world) ??
+      READER_PROFILE.sectionBudgets.world,
+    technology:
+      validBudget(
+        configured.technology,
+        APPROVED_SECTION_MAXIMA.technology,
+      ) ?? READER_PROFILE.sectionBudgets.technology,
+    aiPolicy:
+      validBudget(
+        configured.ai_policy,
+        APPROVED_SECTION_MAXIMA.aiPolicy,
+      ) ?? READER_PROFILE.sectionBudgets.aiPolicy,
+    dmvAndBaltimore:
+      local ?? READER_PROFILE.sectionBudgets.dmvAndBaltimore,
+    forecastSignals:
+      validBudget(
+        configured.forecast,
+        APPROVED_SECTION_MAXIMA.forecastSignals,
+      ) ?? READER_PROFILE.sectionBudgets.forecastSignals,
+  };
+}
+
 function applyResearchBudget(
   items: readonly Item[],
   policy: BudgetPolicy | undefined,
+  budgets: SectionBudgets,
 ): Item[] {
   if (policy === undefined) return [...items];
   const maximumRadar = policy.state === "hard_stop"
     ? 0
     : policy.state === "degraded"
-      ? 1
-      : READER_PROFILE.sectionBudgets.researchRadar;
-  const maximumFeatured = READER_PROFILE.sectionBudgets.featuredResearch;
+      ? Math.min(1, budgets.researchRadar)
+      : budgets.researchRadar;
+  const maximumFeatured = budgets.featuredResearch;
   let researchIndex = 0;
   return items.flatMap((item) => {
     if (item.kind !== "paper" && item.kind !== "blog") return [item];
@@ -761,6 +947,8 @@ function isRawCollectedCandidate(
 export function createProductionPipelineContext(
   options: ProductionPipelineContextOptions,
 ): PipelineContext {
+  const preferences = parsedPreferences(options.preferences);
+  const configuredBudgets = preferredSectionBudgets(preferences);
   return {
     editionDate: options.editionDate,
     runId: options.runId,
@@ -784,7 +972,11 @@ export function createProductionPipelineContext(
       ? {}
       : { persistItems: options.persistItems }),
     enrich: async (items) => {
-      const budgetedItems = applyResearchBudget(items, options.budgetPolicy);
+      const budgetedItems = applyResearchBudget(
+        items,
+        options.budgetPolicy,
+        configuredBudgets,
+      );
       if (budgetedItems.length === 0) return [];
       const profileTexts = profileEmbeddingTexts();
       const vectors = z.array(
@@ -813,11 +1005,33 @@ export function createProductionPipelineContext(
             cosineSimilarity(embedding, profileVector),
           ),
         );
+        const topicWeight = preferences.topicWeights[item.primaryTopic];
+        const sourceWeights = [
+          ...new Set(item.sourceRefs.map(({ id }) => id)),
+        ].flatMap((sourceId) => {
+          const weight = preferences.sourceWeights[sourceId];
+          return weight === undefined ? [] : [weight];
+        });
         return withWorkflowPayload(
           item,
           item.kind === "paper" || item.kind === "blog"
-            ? { embedding, topicalFit: relevance }
-            : { embedding, personalRelevance: relevance },
+            ? {
+                embedding,
+                topicalFit: adjustedRelevance(
+                  relevance,
+                  topicWeight === undefined ? [] : [topicWeight],
+                ),
+              }
+            : {
+                embedding,
+                personalRelevance: adjustedRelevance(
+                  relevance,
+                  [
+                    ...(topicWeight === undefined ? [] : [topicWeight]),
+                    ...sourceWeights,
+                  ],
+                ),
+              },
         );
       });
     },
@@ -955,12 +1169,12 @@ export function createProductionPipelineContext(
         },
       };
       const budgets: SectionBudgets = {
-        ...READER_PROFILE.sectionBudgets,
+        ...configuredBudgets,
         researchRadar: options.budgetPolicy?.state === "hard_stop"
           ? 0
           : options.budgetPolicy?.state === "degraded"
-            ? Math.min(1, READER_PROFILE.sectionBudgets.researchRadar)
-            : READER_PROFILE.sectionBudgets.researchRadar,
+            ? Math.min(1, configuredBudgets.researchRadar)
+            : configuredBudgets.researchRadar,
       };
       const selected = selectShortlist(
         candidates,
@@ -978,7 +1192,7 @@ export function createProductionPipelineContext(
         .filter((item) => !morningIds.has(item.id))
         .slice(0, Math.min(
           budgets.researchRadar,
-          Math.max(0, READER_PROFILE.sectionBudgets.morningBrief - morning.length),
+          Math.max(0, budgets.morningBrief - morning.length),
         ))
         .map((item) => ({ id: item.id, section: "research_radar" as const }));
       const ordered = [...morning, ...radar];
@@ -1099,7 +1313,10 @@ export function createD1ProductionPipelineContext(
   editionDate: string,
   runId: string,
   providers: PipelineProviders,
-  options: Pick<ProductionPipelineContextOptions, "checkpointExecutor" | "budgetPolicy"> = {},
+  options: Pick<
+    ProductionPipelineContextOptions,
+    "checkpointExecutor" | "budgetPolicy" | "preferences"
+  > = {},
 ): PipelineContext {
   const now = () => new Date().toISOString();
   const sourceFailures: string[] = [];
@@ -1217,6 +1434,13 @@ export function createD1WorkflowLauncher(
     async start(input) {
       const runId = crypto.randomUUID();
       try {
+        await ensurePipelineRun(
+          store,
+          runId,
+          input.editionDate,
+          new Date().toISOString(),
+        );
+        const preferences = await loadOrCreatePreferenceSnapshot(store, runId);
         const configured = await runtime(runId, input.editionDate);
         await runEditorialPipeline(createD1ProductionPipelineContext(
           store,
@@ -1224,8 +1448,8 @@ export function createD1WorkflowLauncher(
           runId,
           configured.providers,
           configured.budgetPolicy === undefined
-            ? {}
-            : { budgetPolicy: configured.budgetPolicy },
+            ? { preferences }
+            : { budgetPolicy: configured.budgetPolicy, preferences },
         ));
       } catch (error) {
         await store.audit(
@@ -1249,6 +1473,10 @@ export function createD1WorkflowLauncher(
         throw new WorkflowResumeUnavailableError();
       }
       await store.audit(run.id, "manual_run_resumed", input.actorEmail);
+      const preferences = await loadOrCreatePreferenceSnapshot(
+        store,
+        run.id,
+      );
       const configured = await runtime(run.id, run.editionDate);
       await runEditorialPipeline(createD1ProductionPipelineContext(
         store,
@@ -1256,8 +1484,8 @@ export function createD1WorkflowLauncher(
         run.id,
         configured.providers,
         configured.budgetPolicy === undefined
-          ? {}
-          : { budgetPolicy: configured.budgetPolicy },
+          ? { preferences }
+          : { budgetPolicy: configured.budgetPolicy, preferences },
       ));
     },
   };

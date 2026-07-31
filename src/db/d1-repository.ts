@@ -1962,7 +1962,8 @@ export class D1BriefingRepository implements BriefingRepository {
             AND event_type IN (
               'workflow_checkpoint',
               'workflow_attempt',
-              'workflow_attempt_failed'
+              'workflow_attempt_failed',
+              'preference_snapshot'
             )`,
         )
         .bind(runCutoff),
@@ -1998,7 +1999,8 @@ export class D1BriefingRepository implements BriefingRepository {
             AND event_type IN (
               'workflow_checkpoint',
               'workflow_attempt',
-              'workflow_attempt_failed'
+              'workflow_attempt_failed',
+              'preference_snapshot'
             )`,
         )
         .bind(runCutoff),

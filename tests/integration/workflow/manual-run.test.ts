@@ -28,10 +28,16 @@ import {
   createD1WorkflowLauncher,
   WorkflowRunAlreadyExistsError,
 } from "../../../src/workflow/run-editorial-pipeline";
-import type { BriefingRepository } from "../../../src/db/repository";
+import {
+  approvedBaselinePreferences,
+  ReaderPreferencesSchema,
+  type BriefingRepository,
+  type ReaderPreferences,
+} from "../../../src/db/repository";
 import { D1BriefingRepository } from "../../../src/db/d1-repository";
 import { FakeModelProvider } from "../../../src/models/fake-provider";
 import { clusterNews } from "../../../src/editorial/cluster";
+import { composeEdition } from "../../../src/workflow/compose-edition";
 import type {
   GenerateObjectRequest,
   ModelProvider,
@@ -48,6 +54,21 @@ declare module "cloudflare:test" {
 }
 
 const now = "2026-07-30T09:00:00.000Z";
+
+function fixturePreferences(
+  overrides: Partial<Pick<
+    ReaderPreferences,
+    "topicWeights" | "sourceWeights" | "sectionBudgets"
+  >> = {},
+): ReaderPreferences {
+  const baseline = approvedBaselinePreferences();
+  return ReaderPreferencesSchema.parse({
+    ...baseline,
+    ...overrides,
+    baseline,
+    feedbackHistory: [],
+  });
+}
 
 function fixtureItem(id: string, section: string): Item {
   return {
@@ -418,6 +439,7 @@ class FixtureStore implements PipelineStore {
   readonly artifacts = new Map<string, unknown>();
   readonly runs = new Map<string, PipelineRun>();
   readonly editions = new Map<string, EditionWithEntries>();
+  readonly preferenceSnapshots = new Map<string, ReaderPreferences>();
 
   async getRun(runId: string) {
     return this.runs.get(runId) ?? null;
@@ -432,6 +454,22 @@ class FixtureStore implements PipelineStore {
 
   async saveRun(run: PipelineRun) {
     this.runs.set(run.id, run);
+  }
+
+  async readPreferenceSnapshot(runId: string) {
+    return this.preferenceSnapshots.get(runId) ?? null;
+  }
+
+  async savePreferenceSnapshot(
+    runId: string,
+    preferences: ReaderPreferences,
+  ) {
+    if (!this.preferenceSnapshots.has(runId)) {
+      this.preferenceSnapshots.set(
+        runId,
+        ReaderPreferencesSchema.parse(preferences),
+      );
+    }
   }
 
   async readCheckpoint(runId: string, step: string) {
@@ -567,6 +605,47 @@ describe("manual editorial run", () => {
     expect(await Promise.all(PIPELINE_STEPS.map((step) => context.store.readCheckpoint("run-fixture", step)))).toEqual(
       PIPELINE_STEPS.map(() => true),
     );
+  });
+
+  it("preserves the calculated shortlist reasons in the persisted edition", async () => {
+    // This fails if composition replaces the shortlist's actual reasons.
+    const item = fixtureItem("reasoned-research", "research");
+    const shortlistedSelectionReasons = [
+      "Strong topical fit (91%).",
+      "Strong technical quality (88%).",
+    ];
+    const shortlisted = ItemSchema.parse({
+      ...item,
+      metadata: {
+        ...item.metadata,
+        workflow: {
+          version: 1,
+          section: "research",
+          selectionReasons: shortlistedSelectionReasons,
+        },
+      },
+    });
+    const context = fixturePipelineContext({
+      runId: "run-selection-reasons",
+    });
+    const composition = await composeEdition(
+      context,
+      [{
+        item: shortlisted,
+        summary: fixtureSummary(shortlisted),
+        valid: true,
+      }],
+      [item],
+    );
+    await context.store.persistEdition(
+      composition.edition,
+      composition.entries,
+      "partial",
+    );
+    const persistedEdition = await context.store.getLatestEdition();
+
+    expect(persistedEdition?.entries[0]!.selectionReasons)
+      .toEqual(shortlistedSelectionReasons);
   });
 
   it("delegates every durable checkpoint through an optional executor while the manual path remains direct", async () => {
@@ -1057,6 +1136,191 @@ describe("manual editorial run", () => {
     expect(new Set(shortlisted.map((item) => item.metadata.section))).toEqual(
       new Set(["research", "world", "dmv"]),
     );
+  });
+
+  it("applies topic and source weights to relevance without disabling candidates", async () => {
+    // This fails if ranking ignores either configured weight, or treats zero as
+    // source authorization instead of a relevance signal.
+    const summary = new FakeModelProvider({
+      embeddingBatches: [[
+        [0.6, 0.8],
+        [0.6, 0.8],
+        [1, 0],
+        [1, 0],
+        [1, 0],
+      ]],
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-12",
+      runId: "run-preference-weighting",
+      store: new FixtureStore(),
+      now: () => now,
+      preferences: fixturePreferences({
+        topicWeights: {
+          ...approvedBaselinePreferences().topicWeights,
+          "alignment-interpretability": 2,
+          technology: 1,
+        },
+        sourceWeights: { nist: 0 },
+      }),
+      providers: {
+        summary,
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [
+        rawResearchCandidate(
+          "2607.40101",
+          "Mechanistic interpretability for oversight",
+        ),
+        rawNewsCandidate("nist", "technology"),
+      ],
+    });
+
+    const enriched = await context.enrich(
+      await context.normalize(await context.collect()),
+    );
+    const research = enriched.find((item) => item.kind === "paper");
+    const news = enriched.find((item) => item.kind === "article");
+    const researchWorkflow = research?.metadata.workflow as
+      | { topicalFit?: number }
+      | undefined;
+    const newsWorkflow = news?.metadata.workflow as
+      | { personalRelevance?: number }
+      | undefined;
+
+    expect(researchWorkflow?.topicalFit).toBe(1);
+    expect(newsWorkflow?.personalRelevance).toBeCloseTo(0.3, 12);
+    expect(news).toBeDefined();
+  });
+
+  it("uses bounded preference section budgets for the shortlist", async () => {
+    // This fails if shortlisting continues to use only READER_PROFILE budgets.
+    const assessment = {
+      technicalQuality: 0.9,
+      novelty: 0.8,
+      strengths: ["The abstract describes a concrete method."],
+      limitations: ["Only abstract evidence was supplied."],
+      rationale: "The available abstract supports a strong assessment.",
+      accessLevel: "abstract" as const,
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-13",
+      runId: "run-preference-budgets",
+      store: new FixtureStore(),
+      now: () => now,
+      preferences: fixturePreferences({
+        sectionBudgets: {
+          morning_brief: 1,
+          research: 1,
+          research_radar: 0,
+          world: 1,
+          technology: 0,
+          ai_policy: 0,
+          dmv: 0,
+          baltimore: 0,
+          forecast: 0,
+        },
+      }),
+      providers: {
+        summary: new FakeModelProvider({
+          embeddingBatches: [[
+            [1, 0],
+            [1, 0],
+            [1, 0],
+            [1, 0],
+            [1, 0],
+          ]],
+        }),
+        assessment: new FakeModelProvider({
+          generatedObjects: [assessment],
+        }),
+      },
+      collectCandidates: async () => [
+        rawResearchCandidate(
+          "2607.40102",
+          "Mechanistic interpretability with a bounded briefing",
+        ),
+        rawNewsCandidate("world-budget", "world"),
+      ],
+    });
+
+    const collected = await context.collect();
+    const normalized = await context.normalize(collected);
+    const enriched = await context.enrich(normalized);
+    const prefiltered = await context.prefilter(enriched);
+    const assessed = await context.assess(prefiltered);
+    const scored = await context.score(assessed);
+    const clustered = await context.cluster(scored);
+
+    await expect(context.shortlist(clustered)).resolves.toHaveLength(1);
+  });
+
+  it("uses the larger valid local preference as the combined DMV and Baltimore budget", async () => {
+    // This fails if the combined shortlist budget ignores either local control
+    // or adds them together beyond the requested local reading depth.
+    const candidates = [
+      rawNewsCandidate("dmv-budget-one", "dmv"),
+      rawNewsCandidate("baltimore-budget-one", "baltimore"),
+      rawNewsCandidate("baltimore-budget-two", "baltimore"),
+    ];
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-14",
+      runId: "run-local-preference-budget",
+      store: new FixtureStore(),
+      now: () => now,
+      preferences: fixturePreferences({
+        sectionBudgets: {
+          dmv: 1,
+          baltimore: 2,
+        },
+      }),
+      providers: {
+        summary: new FakeModelProvider({
+          embeddingBatches: [[
+            [1, 0],
+            [1, 0],
+            [1, 0],
+            [1, 0],
+            [1, 0],
+            [1, 0],
+          ]],
+        }),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => candidates,
+    });
+    const normalized = await context.normalize(await context.collect());
+    const enriched = await context.enrich(normalized);
+    const scored = await context.score(await context.prefilter(enriched));
+    const clustered = await context.cluster(scored);
+
+    const shortlisted = await context.shortlist(clustered);
+    expect(shortlisted).toHaveLength(2);
+    expect(shortlisted.every((item) =>
+      item.metadata.section === "dmv" ||
+      item.metadata.section === "baltimore"
+    )).toBe(true);
+  });
+
+  it("rejects explicitly malformed reader preferences", () => {
+    // This fails if an invalid supplied snapshot is silently replaced by defaults.
+    expect(() => createProductionPipelineContext({
+      editionDate: "2033-01-15",
+      runId: "run-invalid-preferences",
+      store: new FixtureStore(),
+      now: () => now,
+      preferences: {
+        ...fixturePreferences(),
+        topicWeights: {
+          "alignment-interpretability": Number.NaN,
+        },
+      },
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    })).toThrow();
   });
 
   it("rejects a claim when its cited source lacks the claimed evidence", async () => {

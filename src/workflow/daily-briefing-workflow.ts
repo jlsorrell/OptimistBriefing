@@ -15,6 +15,8 @@ import { shouldRunAt } from "./schedule";
 import {
   D1PipelineStore,
   createD1ProductionPipelineContext,
+  ensurePipelineRun,
+  loadOrCreatePreferenceSnapshot,
   runEditorialPipeline,
   type PipelineRuntimeFactory,
 } from "./run-editorial-pipeline";
@@ -236,12 +238,21 @@ export class DailyBriefingWorkflow extends WorkflowEntrypoint<Env, RunParams> {
       runId,
       editionDate,
     });
+    const store = new D1PipelineStore(this.env.DB);
+    await ensurePipelineRun(
+      store,
+      runId,
+      editionDate,
+      now.toISOString(),
+    );
+    const preferences = await loadOrCreatePreferenceSnapshot(store, runId);
     const context = createD1ProductionPipelineContext(
-      new D1PipelineStore(this.env.DB),
+      store,
       editionDate,
       runId,
       runtime.providers,
       {
+        preferences,
         ...(runtime.budgetPolicy === undefined
           ? {}
           : { budgetPolicy: runtime.budgetPolicy }),

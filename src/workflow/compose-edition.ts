@@ -77,7 +77,11 @@ export async function composeEdition(
       section: sectionFor(candidate),
       position,
       summary: candidate.summary,
-      selectionReasons: ["Validated for this edition."],
+      selectionReasons:
+        workflow.success &&
+          (workflow.data.selectionReasons?.length ?? 0) > 0
+          ? [...(workflow.data.selectionReasons ?? [])]
+          : ["Selected by the editorial shortlist."],
       sourceRefs: candidate.item.sourceRefs,
     };
   });

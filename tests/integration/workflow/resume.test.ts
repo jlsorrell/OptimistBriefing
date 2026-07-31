@@ -14,8 +14,17 @@ import {
   ScheduledModelConfigSchema,
 } from "../../../src/workflow/daily-briefing-workflow";
 import { D1BriefingRepository } from "../../../src/db/d1-repository";
-import { BudgetHardStopError } from "../../../src/models/budget-gate";
 import {
+  approvedBaselinePreferences,
+  ReaderPreferencesSchema,
+  type ReaderPreferences,
+} from "../../../src/db/repository";
+import { BudgetHardStopError } from "../../../src/models/budget-gate";
+import { FakeModelProvider } from "../../../src/models/fake-provider";
+import {
+  createD1PipelineStore,
+  createProductionPipelineContext,
+  loadOrCreatePreferenceSnapshot,
   PIPELINE_STEPS,
   runEditorialPipeline,
 } from "../../../src/workflow/run-editorial-pipeline";
@@ -147,10 +156,25 @@ class ResumeStore implements PipelineStore {
   readonly attempts = new Map<PipelineStep, number>();
   readonly editions = new Map<string, EditionWithEntries>();
   readonly invalidatedFrom: string[] = [];
+  readonly preferenceSnapshots = new Map<string, ReaderPreferences>();
 
   async getRun(runId: string) { return this.runs.get(runId) ?? null; }
   async createRun(run: PipelineRun) { this.runs.set(run.id, run); }
   async saveRun(run: PipelineRun) { this.runs.set(run.id, run); }
+  async readPreferenceSnapshot(runId: string) {
+    return this.preferenceSnapshots.get(runId) ?? null;
+  }
+  async savePreferenceSnapshot(
+    runId: string,
+    preferences: ReaderPreferences,
+  ) {
+    if (!this.preferenceSnapshots.has(runId)) {
+      this.preferenceSnapshots.set(
+        runId,
+        ReaderPreferencesSchema.parse(preferences),
+      );
+    }
+  }
   async readCheckpoint(runId: string, step: PipelineStep) {
     return this.artifacts.has(`${runId}:${step}`);
   }
@@ -267,6 +291,162 @@ function resumableContext(
 }
 
 describe("durable workflow checkpoint execution", () => {
+  it("keeps the first preference snapshot across a retry and gives a new run current settings", async () => {
+    // This fails if a resume rereads mutable global preferences.
+    const repository = new D1BriefingRepository(env.DB);
+    const baseline = approvedBaselinePreferences();
+    await repository.updatePreferences({
+      ...baseline,
+      topicWeights: {
+        ...baseline.topicWeights,
+        "alignment-interpretability": 2,
+      },
+    });
+    const firstRunId = "preference-snapshot-resume";
+    const firstStore = createD1PipelineStore(env.DB);
+    await firstStore.createRun({
+      id: firstRunId,
+      editionDate: "2036-04-01",
+      status: "retryable",
+      currentStep: "collect",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: "TRANSIENT",
+    });
+    const firstSnapshot = await loadOrCreatePreferenceSnapshot(
+      firstStore,
+      firstRunId,
+    );
+    await firstStore.saveCheckpoint(firstRunId, "collect", {
+      output: [],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 0,
+      estimatedCostUsd: 0,
+    });
+
+    await repository.updatePreferences({
+      ...baseline,
+      topicWeights: {
+        ...baseline.topicWeights,
+        "alignment-interpretability": 0,
+      },
+    });
+    const resumedSnapshot = await loadOrCreatePreferenceSnapshot(
+      firstStore,
+      firstRunId,
+    );
+    const newRunId = "preference-snapshot-new-run";
+    const newStore = createD1PipelineStore(env.DB);
+    await newStore.createRun({
+      id: newRunId,
+      editionDate: "2036-04-02",
+      status: "pending",
+      currentStep: null,
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const newSnapshot = await loadOrCreatePreferenceSnapshot(
+      newStore,
+      newRunId,
+    );
+    const topicalFit = async (
+      runId: string,
+      preferences: ReaderPreferences,
+    ): Promise<number | undefined> => {
+      const alignmentItem: Item = {
+        ...item(`alignment-${runId}`, "research"),
+        primaryTopic: "alignment-interpretability",
+        metadata: { workflow: { version: 1 } },
+      };
+      const context = createProductionPipelineContext({
+        editionDate: "2036-04-04",
+        runId,
+        store: new ResumeStore(),
+        now: () => now,
+        preferences,
+        providers: {
+          summary: new FakeModelProvider({
+            embeddingBatches: [[
+              [0.6, 0.8],
+              [1, 0],
+              [1, 0],
+              [1, 0],
+            ]],
+          }),
+          assessment: new FakeModelProvider(),
+        },
+        collectCandidates: async () => [],
+      });
+      const enriched = await context.enrich([alignmentItem]);
+      return (enriched[0]?.metadata.workflow as
+        | { topicalFit?: number }
+        | undefined)?.topicalFit;
+    };
+
+    expect(firstSnapshot.topicWeights["alignment-interpretability"]).toBe(2);
+    expect(resumedSnapshot.topicWeights["alignment-interpretability"]).toBe(2);
+    expect(newSnapshot.topicWeights["alignment-interpretability"]).toBe(0);
+    await expect(topicalFit("initial-ranking", firstSnapshot)).resolves.toBe(1);
+    await expect(topicalFit("resumed-ranking", resumedSnapshot)).resolves.toBe(1);
+    await expect(topicalFit("new-ranking", newSnapshot)).resolves.toBe(0);
+  });
+
+  it("stores exactly one immutable preference snapshot under concurrent retries", async () => {
+    // This fails if retries append or overwrite run-scoped preference state.
+    const repository = new D1BriefingRepository(env.DB);
+    const baseline = approvedBaselinePreferences();
+    await repository.updatePreferences({
+      ...baseline,
+      topicWeights: {
+        ...baseline.topicWeights,
+        "alignment-interpretability": 2,
+      },
+    });
+    const runId = "preference-snapshot-concurrent";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2036-04-03",
+      status: "pending",
+      currentStep: null,
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const preferred = await repository.getPreferences();
+
+    await Promise.all(
+      Array.from({ length: 8 }, () =>
+        store.savePreferenceSnapshot(runId, preferred)
+      ),
+    );
+    await store.savePreferenceSnapshot(runId, ReaderPreferencesSchema.parse({
+      ...preferred,
+      topicWeights: {
+        ...preferred.topicWeights,
+        "alignment-interpretability": 0,
+      },
+    }));
+    const events = await env.DB.prepare(
+      `SELECT event_json FROM audit_events
+       WHERE run_id = ? AND event_type = ?`,
+    ).bind(runId, "preference_snapshot").all<{ event_json: string }>();
+
+    expect(events.results).toHaveLength(1);
+    expect(await store.readPreferenceSnapshot(runId)).toEqual(preferred);
+  });
+
   it("authorizes every paid request against live D1 reservations", async () => {
     const runId = "live-budget-runtime";
     await env.DB.prepare(
