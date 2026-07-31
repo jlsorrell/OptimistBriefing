@@ -125,7 +125,6 @@ Expected: FAIL because `src/contracts/editorial.ts` does not exist.
     "build": "vite build",
     "check": "tsc --noEmit",
     "test": "vitest run",
-    "test:worker": "vitest run --config vitest.worker.config.ts",
     "test:e2e": "playwright test",
     "dev": "vite",
     "deploy": "npm run build && wrangler deploy"
@@ -140,7 +139,7 @@ Expected: FAIL because `src/contracts/editorial.ts` does not exist.
     "openai": "^5.0.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "zod": "^4.0.0"
+    "zod": "^3.25.0"
   },
   "devDependencies": {
     "@axe-core/playwright": "^4.0.0",
@@ -149,9 +148,12 @@ Expected: FAIL because `src/contracts/editorial.ts` does not exist.
     "@cloudflare/workers-types": "^4.0.0",
     "@playwright/test": "^1.0.0",
     "@testing-library/react": "^16.0.0",
+    "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.0.0",
+    "jsdom": "^26.0.0",
+    "tsx": "^4.0.0",
     "typescript": "^5.8.0",
     "vite": "^7.0.0",
     "vitest": "^3.0.0",
@@ -224,7 +226,8 @@ git commit -m "chore: establish briefing TypeScript contracts"
 - Create: `src/db/d1-repository.ts`
 - Create: `tests/integration/db/repository.test.ts`
 - Create: `vitest.worker.config.ts`
-- Modify: `wrangler.jsonc`
+- Create: `wrangler.jsonc`
+- Modify: `package.json`
 
 **Interfaces:**
 - Consumes: contracts from Task 1.
@@ -318,8 +321,13 @@ export interface BriefingRepository {
   ): Promise<void>;
   getLatestEdition(): Promise<EditionWithEntries | null>;
   getEditionByDate(editionDate: string): Promise<EditionWithEntries | null>;
+  listEditions(input: EditionListInput): Promise<EditionPage>;
+  searchArchive(input: ArchiveSearchInput): Promise<ArchiveSearchPage>;
   recordFeedback(input: FeedbackInput): Promise<void>;
   getPreferences(): Promise<ReaderPreferences>;
+  listSources(): Promise<readonly SourceRecord[]>;
+  createSource(input: CreateSourceInput): Promise<SourceRecord>;
+  updateSource(sourceId: string, input: UpdateSourceInput): Promise<SourceRecord>;
   getWorkflowRun(runId: string): Promise<WorkflowRun | null>;
   pruneExpiredData(now: string): Promise<RetentionReport>;
 }
@@ -333,6 +341,9 @@ never raw D1 rows.
 
 - [ ] **Step 5: Apply the migration in the test pool and run integration tests**
 
+Add `"test:worker": "vitest run --config vitest.worker.config.ts"` to
+`package.json` alongside the Worker test configuration.
+
 Run: `npm run test:worker -- tests/integration/db/repository.test.ts`
 
 Expected: PASS, including the draft-visibility assertion.
@@ -340,7 +351,7 @@ Expected: PASS, including the draft-visibility assertion.
 - [ ] **Step 6: Commit the persistence layer**
 
 ```bash
-git add wrangler.jsonc vitest.worker.config.ts src/db tests/integration/db
+git add package.json wrangler.jsonc vitest.worker.config.ts src/db tests/integration/db
 git commit -m "feat: add atomic D1 briefing repository"
 ```
 
@@ -453,6 +464,8 @@ git commit -m "feat: protect briefing API with Access identity"
 ### Task 4: Deliver the fixture-backed dashboard milestone
 
 **Files:**
+- Create: `index.html`
+- Create: `playwright.config.ts`
 - Create: `src/web/main.tsx`
 - Create: `src/web/App.tsx`
 - Create: `src/web/api-client.ts`
@@ -468,6 +481,7 @@ git commit -m "feat: protect briefing API with Access identity"
 - Create: `tests/unit/web/EditionView.test.tsx`
 - Create: `tests/e2e/dashboard.spec.ts`
 - Modify: `src/api/app.ts`
+- Modify: `package.json`
 
 **Interfaces:**
 - Consumes: `GET /api/edition/latest` returning `EditionWithEntries`.
@@ -505,6 +519,7 @@ Expected: FAIL because the React components do not exist.
 - one Polymarket signal labeled `forecast`
 
 Use fixed IDs and timestamps so screenshots and tests are stable.
+Add `"seed:dev": "tsx scripts/seed-dev.ts"` to `package.json`.
 
 - [ ] **Step 4: Implement the dashboard**
 
@@ -1283,6 +1298,7 @@ CI runs, in order:
 
 ```text
 npm ci
+npx playwright install --with-deps chromium
 npm run check
 npm test
 npm run test:worker
@@ -1316,7 +1332,7 @@ git commit -m "test: gate briefing quality and accessibility"
 - Create: `docs/runbooks/failed-edition.md`
 - Create: `docs/runbooks/cost-control.md`
 - Create: `docs/runbooks/privacy-and-retention.md`
-- Modify: `README.md`
+- Create: `README.md`
 - Modify: `wrangler.jsonc`
 
 **Interfaces:**

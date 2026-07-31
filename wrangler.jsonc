@@ -1,0 +1,28 @@
+{
+  "name": "optimist-briefing",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-07-29",
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/health", "/api/*"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "optimist-briefing",
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "src/db/migrations"
+    }
+  ],
+  "workflows": [
+    {
+      "binding": "DAILY_BRIEFING",
+      "name": "daily-briefing",
+      "class_name": "DailyBriefingWorkflow"
+    }
+  ],
+  "triggers": {
+    "crons": ["30 8 * * *", "30 9 * * *", "30 10 * * *"]
+  }
+}

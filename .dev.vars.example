@@ -1,0 +1,19 @@
+# Copy this file to .dev.vars for an explicitly approved local Worker smoke test.
+# Keep .dev.vars out of version control. Every value below is intentionally blank.
+
+# Secret
+OPENAI_API_KEY=
+
+# Nonsecret runtime configuration
+SUMMARY_MODEL=
+ASSESSMENT_MODEL=
+EMBEDDING_MODEL=
+CLOUDFLARE_ACCESS_TEAM_DOMAIN=
+CLOUDFLARE_ACCESS_AUDIENCE=
+MONTHLY_BUDGET_USD=
+SUMMARY_UNIT_PRICE_USD=
+ASSESSMENT_UNIT_PRICE_USD=
+EMBEDDING_UNIT_PRICE_USD=
+
+# Personal access-control data; store as an encrypted secret in production.
+ALLOWED_EMAILS=

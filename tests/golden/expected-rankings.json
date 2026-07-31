@@ -1,0 +1,22 @@
+{
+  "precisionAt": 5,
+  "minimumPrecision": 0.8,
+  "relevant": [
+    "highly-relevant-strong-paper",
+    "strong-unfamiliar-institution-paper",
+    "new-paper-no-citations",
+    "abstract-only-paper",
+    "solid-scaling-paper"
+  ],
+  "requiredHighValue": [
+    "highly-relevant-strong-paper",
+    "strong-unfamiliar-institution-paper",
+    "new-paper-no-citations",
+    "abstract-only-paper",
+    "solid-scaling-paper"
+  ],
+  "knownDistractors": [
+    "preferred-institution-weak-incremental-paper",
+    "sensational-low-value-research"
+  ]
+}

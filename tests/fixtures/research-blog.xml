@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Alignment Lab Notes</title>
+    <link>https://lab.example.org/</link>
+    <description>Research notes from the Alignment Lab</description>
+    <item>
+      <guid isPermaLink="true">https://lab.example.org/concept-geometry</guid>
+      <title>What concept geometry tells us about training</title>
+      <link>https://lab.example.org/concept-geometry?utm_source=rss</link>
+      <pubDate>Wed, 29 Jul 2026 04:00:00 GMT</pubDate>
+      <author>Researcher Example</author>
+      <description>
+        We discuss the evidence and limitations in
+        https://arxiv.org/abs/2607.00001 and explain why the training
+        trajectory matters.
+      </description>
+    </item>
+  </channel>
+</rss>

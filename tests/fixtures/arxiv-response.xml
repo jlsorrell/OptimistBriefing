@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom"
+      xmlns:arxiv="http://arxiv.org/schemas/atom">
+  <title>arXiv Query: briefing fixture</title>
+  <id>https://export.arxiv.org/api/query?search_query=all</id>
+  <updated>2026-07-29T08:30:00Z</updated>
+  <entry>
+    <id>https://arxiv.org/abs/2607.00001v2</id>
+    <updated>2026-07-29T03:00:00Z</updated>
+    <published>2026-07-28T22:00:00Z</published>
+    <title>Concept Geometry Evolves During Language Model Training</title>
+    <summary>
+      We measure how internal representations of stable concepts form and
+      reorganize during pretraining.
+    </summary>
+    <author><name>Ada Example</name></author>
+    <author><name>Grace Example</name></author>
+    <arxiv:primary_category term="cs.LG"/>
+    <category term="cs.LG"/>
+    <category term="cs.AI"/>
+    <link href="https://arxiv.org/abs/2607.00001v2" rel="alternate" type="text/html"/>
+    <link title="pdf" href="https://arxiv.org/pdf/2607.00001v2" rel="related" type="application/pdf"/>
+    <arxiv:doi>https://doi.org/10.1000/Example.2607.1</arxiv:doi>
+  </entry>
+</feed>
