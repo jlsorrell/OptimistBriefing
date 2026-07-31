@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 import { chromium } from "@playwright/test";
 
@@ -10,6 +10,7 @@ import {
   assertAuthenticationNavigation,
   assertTemporaryDirectory,
   normalizeChildExitCode,
+  resolvePreviewBaseURL,
   resolvePreviewRuntimeEnvironment,
 } from "./environment";
 import type { PreviewHarnessDependencies } from "./harness";
@@ -20,6 +21,7 @@ interface PreviewFrame {
 
 interface PreviewPage {
   on(event: "framenavigated", listener: (frame: PreviewFrame) => void): unknown;
+  off(event: "framenavigated", listener: (frame: PreviewFrame) => void): unknown;
   mainFrame(): PreviewFrame;
   goto(url: string, options: { waitUntil: "domcontentloaded" }): Promise<unknown>;
   waitForURL(url: string, options: { timeout: number }): Promise<unknown>;
@@ -65,14 +67,33 @@ export async function removePreviewTempDirectory(
 function isPlaywrightNavigationError(error: unknown): boolean {
   return error instanceof Error && (
     error.name === "TimeoutError" ||
-    /(?:navigation|timeout|net::err)/i.test(error.message)
+    /(?:navigation|timeout|timed out|net::err)/i.test(error.message)
   );
+}
+
+function resolveCaptureAccessStateInput(input: {
+  baseURL: string;
+  storageStatePath: string;
+}): { baseURL: string; storageStatePath: string } {
+  const baseURL = resolvePreviewBaseURL(input.baseURL);
+  const storageStatePath = resolve(input.storageStatePath);
+  let tempDirectory: string;
+  try {
+    tempDirectory = assertTemporaryDirectory(dirname(storageStatePath));
+  } catch {
+    throw new Error("Preview storage state must be the protected temporary file");
+  }
+  if (storageStatePath !== join(tempDirectory, "storage-state.json")) {
+    throw new Error("Preview storage state must be the protected temporary file");
+  }
+  return { baseURL, storageStatePath };
 }
 
 export async function capturePreviewAccessState(
   input: { baseURL: string; storageStatePath: string },
   browserDriver: PreviewChromium = chromium,
 ): Promise<void> {
+  const { baseURL, storageStatePath } = resolveCaptureAccessStateInput(input);
   const browser = await browserDriver.launch({ headless: false });
   try {
     const context = await browser.newContext();
@@ -81,27 +102,28 @@ export async function capturePreviewAccessState(
     const unexpectedNavigation = new Promise<never>((_resolve, reject) => {
       rejectUnexpectedNavigation = reject;
     });
-    page.on("framenavigated", (frame) => {
+    const navigationListener = (frame: PreviewFrame) => {
       if (frame !== page.mainFrame()) return;
       try {
         assertAuthenticationNavigation(frame.url());
       } catch (error) {
         rejectUnexpectedNavigation(error);
       }
-    });
+    };
+    page.on("framenavigated", navigationListener);
     try {
       await Promise.race([
         unexpectedNavigation,
         (async () => {
-          await page.goto(`${input.baseURL}/health`, { waitUntil: "domcontentloaded" });
-          await page.waitForURL(`${input.baseURL}/health`, { timeout: 300_000 });
+          await page.goto(`${baseURL}/health`, { waitUntil: "domcontentloaded" });
+          await page.waitForURL(`${baseURL}/health`, { timeout: 300_000 });
           await page.waitForFunction(
             () => document.body.textContent?.trim() === '{"status":"ok"}',
             undefined,
             { timeout: 300_000 },
           );
-          await context.storageState({ path: input.storageStatePath });
-          await chmod(input.storageStatePath, 0o600);
+          await context.storageState({ path: storageStatePath });
+          await chmod(storageStatePath, 0o600);
         })(),
       ]);
     } catch (error) {
@@ -109,6 +131,8 @@ export async function capturePreviewAccessState(
         throw new Error("Preview authentication did not complete; retry the command.");
       }
       throw error;
+    } finally {
+      page.off("framenavigated", navigationListener);
     }
   } finally {
     await browser.close();

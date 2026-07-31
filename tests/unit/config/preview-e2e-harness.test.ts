@@ -69,4 +69,25 @@ describe("preview E2E harness", () => {
 
     expect(deps.removeTempDirectory).toHaveBeenCalledOnce();
   });
+
+  it("cleans only once when signal cleanup runs before the suite finishes", async () => {
+    const deps = createDependencies();
+    let signalCleanup: (() => Promise<void>) | undefined;
+    let resolveSuite: ((code: number) => void) | undefined;
+    deps.registerSignalCleanup.mockImplementation((cleanup) => {
+      signalCleanup = cleanup;
+      return vi.fn();
+    });
+    deps.runPreviewSuite.mockImplementation(() => new Promise<number>((resolve) => {
+      resolveSuite = resolve;
+    }));
+
+    const running = runPreviewHarness({}, deps);
+    await vi.waitFor(() => expect(deps.runPreviewSuite).toHaveBeenCalledOnce());
+    await signalCleanup!();
+    resolveSuite!(0);
+
+    await expect(running).resolves.toBe(0);
+    expect(deps.removeTempDirectory).toHaveBeenCalledOnce();
+  });
 });
