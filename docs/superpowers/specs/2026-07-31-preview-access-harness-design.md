@@ -74,15 +74,16 @@ storage-state contents or redirect query strings.
 
 `playwright.preview.config.ts` is separate from the local configuration. It has
 no `webServer`, uses a preview-only test directory, requires the validated base
-URL and temporary storage-state path, retains traces only on failure, and runs
-serially with zero retries. It defines these Chromium projects:
+URL and temporary storage-state path, disables traces, screenshots, and video,
+and runs serially with zero retries. It defines these Chromium projects:
 
 - desktop: 1440 by 900;
 - tablet: 768 by 1024; and
 - mobile: 390 by 844.
 
-Traces and screenshots must not be committed. The suite must not attach token
-values or storage-state files to reports.
+The preview suite must not generate traces, screenshots, or video because those
+artifacts can contain Access cookies. It must not attach token values or
+storage-state files to reports.
 
 ### Preview tests
 
