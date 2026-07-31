@@ -2,8 +2,8 @@
 
 ## Status
 
-Repository-local implementation and fresh verification complete; independent
-review pending. No external action has been performed.
+Repository-local implementation is complete, independently approved, and
+freshly verified. No external action has been performed.
 
 ## Configuration correction
 
