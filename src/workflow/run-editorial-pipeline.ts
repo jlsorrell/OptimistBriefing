@@ -452,10 +452,15 @@ export class D1PipelineStore implements PipelineStore {
       boundedSourceFailureMetadata(sourceFailures),
     );
     await this.db.prepare(
-      `INSERT OR IGNORE INTO audit_events (
+      `INSERT INTO audit_events (
         id, run_id, event_type, event_json, created_at
       ) SELECT ?, ?, ?, ?, ?
-      WHERE EXISTS (SELECT 1 FROM workflow_runs WHERE id = ?)`,
+      WHERE EXISTS (SELECT 1 FROM workflow_runs WHERE id = ?)
+      ON CONFLICT(id) DO UPDATE SET
+        event_json = excluded.event_json,
+        created_at = excluded.created_at
+      WHERE audit_events.run_id = excluded.run_id
+        AND audit_events.event_type = excluded.event_type`,
     ).bind(
       `collection_source_failures:${runId}`,
       runId,

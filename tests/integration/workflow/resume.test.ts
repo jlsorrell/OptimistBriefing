@@ -445,6 +445,124 @@ describe("durable workflow checkpoint execution", () => {
     expect(await store.readPreferenceSnapshot(runId)).toEqual(preferred);
   });
 
+  it("replaces the deterministic source-failure snapshot on a real recollection", async () => {
+    const runId = "source-failure-recollection";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2036-04-08",
+      status: "running",
+      currentStep: "collect",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+
+    await store.saveCollectionSourceFailures(runId, ["first-source:fetch"]);
+    await env.DB.prepare(
+      "UPDATE audit_events SET created_at = ? WHERE id = ?",
+    ).bind(
+      "2000-01-01T00:00:00.000Z",
+      `collection_source_failures:${runId}`,
+    ).run();
+    await store.saveCollectionSourceFailures(runId, ["second-source:parse"]);
+
+    expect(await store.readCollectionSourceFailures(runId)).toEqual([
+      "second-source:parse",
+    ]);
+    const events = (await env.DB.prepare(
+      `SELECT id, created_at FROM audit_events
+       WHERE run_id = ? AND event_type = ?`,
+    ).bind(runId, "collection_source_failures").all<{
+      id: string;
+      created_at: string;
+    }>()).results;
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      id: `collection_source_failures:${runId}`,
+    });
+    expect(events[0]?.created_at).not.toBe("2000-01-01T00:00:00.000Z");
+  });
+
+  it("does not overwrite a deterministic ID owned by another run or event type", async () => {
+    const store = createD1PipelineStore(env.DB);
+    const runIds = [
+      "source-failure-owner",
+      "source-failure-run-conflict",
+      "source-failure-event-conflict",
+    ];
+    for (const [index, runId] of runIds.entries()) {
+      await store.createRun({
+        id: runId,
+        editionDate: `2036-04-${String(index + 9).padStart(2, "0")}`,
+        status: "running",
+        currentStep: "collect",
+        retryable: false,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+        failureCode: null,
+      });
+    }
+    await env.DB.batch([
+      env.DB.prepare(
+        `INSERT INTO audit_events (id, run_id, event_type, event_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).bind(
+        "collection_source_failures:source-failure-run-conflict",
+        "source-failure-owner",
+        "collection_source_failures",
+        '["owner:fetch"]',
+        now,
+      ),
+      env.DB.prepare(
+        `INSERT INTO audit_events (id, run_id, event_type, event_json, created_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).bind(
+        "collection_source_failures:source-failure-event-conflict",
+        "source-failure-event-conflict",
+        "source_updated",
+        '{"preserve":true}',
+        now,
+      ),
+    ]);
+
+    await store.saveCollectionSourceFailures(
+      "source-failure-run-conflict",
+      ["replacement:parse"],
+    );
+    await store.saveCollectionSourceFailures(
+      "source-failure-event-conflict",
+      ["replacement:parse"],
+    );
+
+    expect((await env.DB.prepare(
+      `SELECT id, run_id, event_type, event_json FROM audit_events
+       WHERE id IN (?, ?)
+       ORDER BY id`,
+    ).bind(
+      "collection_source_failures:source-failure-run-conflict",
+      "collection_source_failures:source-failure-event-conflict",
+    ).all()).results).toEqual([
+      {
+        id: "collection_source_failures:source-failure-event-conflict",
+        run_id: "source-failure-event-conflict",
+        event_type: "source_updated",
+        event_json: '{"preserve":true}',
+      },
+      {
+        id: "collection_source_failures:source-failure-run-conflict",
+        run_id: "source-failure-owner",
+        event_type: "collection_source_failures",
+        event_json: '["owner:fetch"]',
+      },
+    ]);
+  });
+
   it("uses immutable defaults for a corrupt stored preference snapshot", async () => {
     const baseline = approvedBaselinePreferences();
     const repository = new D1BriefingRepository(env.DB);

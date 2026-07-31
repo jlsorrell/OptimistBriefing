@@ -998,19 +998,31 @@ describe("manual editorial run", () => {
     await seedD1Items(items);
     let refreshed = false;
     let collectCalls = 0;
-    const context = d1FixturePipelineContext({
-      editionDate: "2033-02-02",
-      runId: "run-d1-partial-refresh",
-      collect: async () => {
-        collectCalls += 1;
-        return items;
-      },
-      synthesize: async (candidates) => candidates
-        .filter((item) =>
-          refreshed || ["research", "world", "dmv"].includes(item.id),
-        )
-        .map((item) => ({ item, summary: fixtureSummary(item) })),
-    });
+    const runId = "run-d1-partial-refresh";
+    const store = createD1PipelineStore(env.DB);
+    const context: PipelineContext = {
+      ...fixturePipelineContext({
+        editionDate: "2033-02-02",
+        runId,
+        collect: async () => {
+          collectCalls += 1;
+          await store.saveCollectionSourceFailures(
+            runId,
+            refreshed
+              ? ["refreshed-source:parse"]
+              : ["initial-source:fetch"],
+          );
+          return items;
+        },
+        synthesize: async (candidates) => candidates
+          .filter((item) =>
+            refreshed || ["research", "world", "dmv"].includes(item.id),
+          )
+          .map((item) => ({ item, summary: fixtureSummary(item) })),
+      }),
+      store,
+      loadSourceFailures: () => store.readCollectionSourceFailures(runId),
+    };
 
     await expect(runEditorialPipeline(context)).resolves.toMatchObject({
       status: "partial",
@@ -1027,6 +1039,9 @@ describe("manual editorial run", () => {
       ),
     ).toMatchObject({
       status: "published",
+      metadata: {
+        sourceFailures: ["refreshed-source:parse"],
+      },
       entries: expect.arrayContaining([
         expect.objectContaining({ itemId: "technology" }),
         expect.objectContaining({ itemId: "baltimore" }),
@@ -1977,10 +1992,6 @@ describe("manual editorial run", () => {
         "TRANSIENT_SUMMARY_FAILURE",
       );
       const fetchCallsAfterCollect = sourceFetch.mock.calls.length;
-      await firstStore.saveCollectionSourceFailures(
-        "run-fail-open-production",
-        ["changed-source:parse"],
-      );
       expect(await firstStore.readCollectionSourceFailures(
         "run-fail-open-production",
       )).toEqual(["reuters:fetch"]);
