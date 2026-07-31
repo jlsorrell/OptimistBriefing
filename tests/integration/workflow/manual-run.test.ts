@@ -952,10 +952,10 @@ describe("manual editorial run", () => {
       ...rawNewsCandidate("reuters", "world"),
       abstract: null,
       content: `${"evidence ".repeat(260)}COPYRIGHTED_BODY_TAIL`,
+      retrievedAt: "2026-07-29T08:30:00.000Z",
       metadata: {
         primarySection: "world",
         retention: "ephemeral-only",
-        expiresAt: "2026-10-27T08:30:00.000Z",
       },
     };
     const context = createProductionPipelineContext({
