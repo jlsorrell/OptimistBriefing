@@ -65,6 +65,7 @@ function queryTimestamp(value: string): string {
 }
 
 export class GdeltAdapter implements NewsSourceAdapter {
+  readonly sourceId: string;
   private readonly source: ResearchSourceRecord;
   private readonly options: z.output<typeof GdeltOptionsSchema>;
 
@@ -74,6 +75,7 @@ export class GdeltAdapter implements NewsSourceAdapter {
     options: GdeltOptions,
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
+    this.sourceId = this.source.id;
     this.options = GdeltOptionsSchema.parse(options);
   }
 

@@ -184,6 +184,7 @@ function normalizeMarket(input: unknown): NormalizedPolymarketMarket | null {
 }
 
 export class PolymarketAdapter implements NewsSourceAdapter {
+  readonly sourceId: string;
   private readonly source: ResearchSourceRecord;
   private readonly options: z.output<typeof PolymarketOptionsSchema>;
 
@@ -193,6 +194,7 @@ export class PolymarketAdapter implements NewsSourceAdapter {
     options: PolymarketOptions,
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
+    this.sourceId = this.source.id;
     if (this.source.role !== "forecast") {
       throw new TypeError("Polymarket must be configured with forecast role.");
     }

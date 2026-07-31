@@ -83,6 +83,7 @@ function normalizeWhitespace(value: string): string {
 }
 
 export class ArxivAdapter implements SourceAdapter {
+  readonly sourceId: string;
   private readonly source: ResearchSourceRecord;
   private readonly apiUrl: string;
   private readonly query: string;
@@ -95,6 +96,7 @@ export class ArxivAdapter implements SourceAdapter {
     options: ArxivAdapterOptions = {},
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
+    this.sourceId = this.source.id;
     this.apiUrl = assertSafeOutboundUrl(
       options.apiUrl ?? "https://export.arxiv.org/api/query",
       ARXIV_API_POLICY,

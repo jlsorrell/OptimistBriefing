@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:test";
 
 import {
@@ -23,6 +23,7 @@ import type { CheckpointArtifact } from "../../../src/workflow/types";
 import { createApp, type WorkflowLauncher } from "../../../src/api/app";
 import {
   createD1PipelineStore,
+  createD1ProductionPipelineContext,
   createProductionPipelineContext,
   createD1WorkflowLauncher,
   WorkflowRunAlreadyExistsError,
@@ -1106,6 +1107,7 @@ describe("manual editorial run", () => {
   });
 
   it("constructs manual-run providers and budget policy from the run-scoped runtime factory", async () => {
+    await env.DB.prepare("UPDATE sources SET enabled = 0").run();
     const factoryCalls: Array<{ runId: string; editionDate: string }> = [];
     const launcher = createD1WorkflowLauncher(
       env.DB,
@@ -1361,6 +1363,185 @@ describe("manual editorial run", () => {
     ).toEqual({ count: 0 });
   });
 
+  it("publishes with sufficient sources and exposes only a sanitized failed-feed ID", async () => {
+    const enabledSources = [
+      "arxiv",
+      "federal-register",
+      "nist",
+      "npr",
+      "openalex",
+      "reuters",
+      "semantic-scholar",
+      "wtop",
+      "wypr",
+    ];
+    await env.DB.prepare(
+      `UPDATE sources
+      SET enabled = CASE
+        WHEN id IN (${enabledSources.map(() => "?").join(", ")}) THEN 1
+        ELSE 0
+      END`,
+    ).bind(...enabledSources).run();
+    const retrievedAt = new Date();
+    const publishedAt = new Date(
+      retrievedAt.getTime() - 60 * 60 * 1_000,
+    ).toISOString();
+    const publicationDate = publishedAt.slice(0, 10);
+    const rss = (
+      title: string,
+      link: string,
+      guid: string,
+    ) => `<?xml version="1.0"?>
+      <rss version="2.0"><channel><item>
+        <title>${title}</title>
+        <link>${link}</link>
+        <guid>${guid}</guid>
+        <description>${title} has durable public evidence.</description>
+      </item></channel></rss>`;
+    const feedBodies = new Map<string, string>([
+      [
+        "https://www.nist.gov/news-events/news/rss.xml",
+        rss(
+          "Source nist certifies a quantum clock",
+          "https://www.nist.gov/news-events/news/quantum-clock",
+          "nist-clock",
+        ),
+      ],
+      [
+        "https://feeds.npr.org/1001/rss.xml",
+        rss(
+          "Source npr reports election observers",
+          "https://www.npr.org/sections/world/election-observers",
+          "npr-observers",
+        ),
+      ],
+      [
+        "https://wtop.com/feed/",
+        rss(
+          "Source wtop reports a Virginia transit bridge",
+          "https://wtop.com/virginia/transit-bridge",
+          "wtop-bridge",
+        ),
+      ],
+      [
+        "https://www.wypr.org/rss/local-news",
+        rss(
+          "Source wypr reports a Baltimore school clinic",
+          "https://www.wypr.org/wypr-news/baltimore-school-clinic",
+          "wypr-clinic",
+        ),
+      ],
+    ]);
+    const arxivFeed = `<?xml version="1.0"?>
+      <feed xmlns="http://www.w3.org/2005/Atom">
+        <entry>
+          <id>https://arxiv.org/abs/2607.12345v1</id>
+          <updated>${publishedAt}</updated>
+          <published>${publishedAt}</published>
+          <title>Mechanistic interpretability for reliable oversight</title>
+          <summary>A concrete interpretability method improves reliable oversight.</summary>
+          <author><name>Researcher Example</name></author>
+          <link href="https://arxiv.org/abs/2607.12345v1" rel="alternate" type="text/html" />
+          <category term="cs.AI" />
+        </entry>
+      </feed>`;
+    const sourceFetch = vi.fn(
+      async (input: string | URL | Request): Promise<Response> => {
+        const url = String(input);
+        if (url === "https://www.reutersagency.com/feed/") {
+          throw new Error("secret failed-feed URL and credential");
+        }
+        const feedBody = feedBodies.get(url);
+        if (feedBody !== undefined) {
+          return new Response(feedBody, {
+            headers: { "content-type": "application/rss+xml" },
+          });
+        }
+        if (url.startsWith("https://export.arxiv.org/api/query")) {
+          return new Response(arxivFeed, {
+            headers: { "content-type": "application/atom+xml" },
+          });
+        }
+        if (
+          url.startsWith(
+            "https://api.semanticscholar.org/graph/v1/paper/batch",
+          )
+        ) {
+          return new Response("[]", {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (
+          url.startsWith(
+            "https://www.federalregister.gov/api/v1/documents.json",
+          )
+        ) {
+          return Response.json({
+            results: [{
+              document_number: "2026-briefing-1",
+              title: "Federal Register schedules a public lands hearing",
+              html_url:
+                "https://www.federalregister.gov/documents/2026/briefing-1",
+              publication_date: publicationDate,
+              type: "Notice",
+              abstract:
+                "The notice schedules a public hearing with durable evidence.",
+            }],
+          });
+        }
+        if (
+          url.startsWith("https://www.nist.gov/") ||
+          url.startsWith("https://www.npr.org/") ||
+          url.startsWith("https://wtop.com/") ||
+          url.startsWith("https://www.wypr.org/")
+        ) {
+          return new Response(
+            "<html><article><p>Durable public evidence supports this development.</p></article></html>",
+            { headers: { "content-type": "text/html" } },
+          );
+        }
+        throw new Error(`Unexpected production-context URL: ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", sourceFetch);
+    try {
+      const store = createD1PipelineStore(env.DB);
+      const summary = new GroundedProductionProvider();
+      summary.failNextSummary = false;
+      const context = createD1ProductionPipelineContext(
+        store,
+        "2033-02-08",
+        "run-fail-open-production",
+        {
+          summary,
+          assessment: new FakeModelProvider({
+            generatedObjects: [{
+              technicalQuality: 0.9,
+              novelty: 0.8,
+              strengths: ["The abstract describes a concrete method."],
+              limitations: ["Only abstract evidence was supplied."],
+              rationale:
+                "The available abstract supports a strong assessment.",
+              accessLevel: "abstract",
+            }],
+          }),
+        },
+      );
+
+      await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+        status: "published",
+      });
+      const edition = await new D1BriefingRepository(env.DB)
+        .getEditionByDate("2033-02-08");
+      expect(edition?.metadata?.sourceFailures).toEqual(["reuters:fetch"]);
+      expect(JSON.stringify(edition?.metadata)).not.toContain(
+        "secret failed-feed URL",
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("returns the original published result for an idempotent retry", async () => {
     const context = fixturePipelineContext({ runId: "run-idempotent" });
     const first = await runEditorialPipeline(context);
@@ -1413,6 +1594,7 @@ describe("manual editorial run", () => {
   });
 
   it("returns RUN_ALREADY_EXISTS and audits duplicate D1-backed start requests", async () => {
+    await env.DB.prepare("UPDATE sources SET enabled = 0").run();
     const app = createApp({
       repository: new D1BriefingRepository(env.DB),
       authVerifier: async () => ({ email: "reader@example.com" }),

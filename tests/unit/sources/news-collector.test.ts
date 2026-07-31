@@ -163,9 +163,55 @@ async function newsCollectorWithFixtures() {
 }
 
 describe("NewsCollector", () => {
+  it("retains direct local results when a discovery adapter fails", async () => {
+    const localNews = await loadFixture("local-news.xml");
+    const directSource = source({
+      ...wyprSource,
+      restrictions: {
+        bodyRetrieval: "forbidden",
+        paywall: "none",
+        contentUse: "metadata-only",
+      },
+    });
+    const collector = new NewsCollector({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () =>
+          new Response(localNews, {
+            headers: { "content-type": "application/rss+xml" },
+          }),
+        ),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      directFeeds: [{
+        source: directSource,
+        feedUrl: "https://www.wypr.org/rss/local-news",
+        feedUrlPolicy: wyprFeedPolicy,
+        articleUrlPolicy: wyprArticlePolicy,
+      }],
+      discoveryAdapters: [{
+        sourceId: "gdelt",
+        collect: async () => {
+          throw new Error("private discovery detail");
+        },
+      }],
+      forecastAdapters: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates.map(({ sourceId }) => sourceId)).toEqual([
+      "wypr",
+    ]);
+    expect(result.succeededSourceIds).toEqual(["wypr"]);
+    expect(result.failures).toEqual([
+      { sourceId: "gdelt", kind: "unknown" },
+    ]);
+    expect(JSON.stringify(result)).not.toContain("private discovery detail");
+  });
+
   it("labels Polymarket data as forecast and never as corroborating reporting", async () => {
     const { collector } = await newsCollectorWithFixtures();
-    const items = await collector.collect(fixedWindow());
+    const { candidates: items } = await collector.collect(fixedWindow());
     const market = items.find((item) => item.kind === "forecast");
 
     expect(market?.sourceRole).toBe("forecast");
@@ -185,7 +231,7 @@ describe("NewsCollector", () => {
 
   it("keeps GDELT as non-corroborating discovery metadata, not article truth", async () => {
     const { collector } = await newsCollectorWithFixtures();
-    const items = await collector.collect(fixedWindow());
+    const { candidates: items } = await collector.collect(fixedWindow());
     const discovery = items.find(
       (item) => item.metadata.discoveryProvider === "GDELT",
     );
@@ -208,7 +254,7 @@ describe("NewsCollector", () => {
 
   it("retains direct source roles and extracts permitted HTML ephemerally", async () => {
     const { collector } = await newsCollectorWithFixtures();
-    const item = (await collector.collect(fixedWindow())).find(
+    const item = (await collector.collect(fixedWindow())).candidates.find(
       (candidate) => candidate.sourceId === "wypr",
     );
 
@@ -279,7 +325,9 @@ describe("NewsCollector", () => {
         forecastAdapters: [],
       });
 
-      expect((await collector.collect(fixedWindow()))[0]).toMatchObject({
+      expect(
+        (await collector.collect(fixedWindow())).candidates[0],
+      ).toMatchObject({
         sourceRole: role,
         canCorroborateFacts: false,
       });
@@ -320,7 +368,9 @@ describe("NewsCollector", () => {
       forecastAdapters: [],
     });
 
-    expect((await collector.collect(fixedWindow()))[0]).toMatchObject({
+    expect(
+      (await collector.collect(fixedWindow())).candidates[0],
+    ).toMatchObject({
       accessLevel: "metadata",
       content: null,
       metadata: {
@@ -357,7 +407,7 @@ describe("NewsCollector", () => {
       forecastAdapters: [],
     });
 
-    expect(await collector.collect(fixedWindow())).toEqual([
+    expect((await collector.collect(fixedWindow())).candidates).toEqual([
       expect.objectContaining({
         sourceId: "wypr",
         title: "Baltimore expands secure AI pilot",
@@ -395,7 +445,7 @@ describe("NewsCollector", () => {
       forecastAdapters: [],
     });
 
-    expect(await collector.collect(fixedWindow())).toEqual([]);
+    expect((await collector.collect(fixedWindow())).candidates).toEqual([]);
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
@@ -432,7 +482,7 @@ describe("NewsCollector", () => {
       forecastAdapters: [],
     });
 
-    expect(await collector.collect(fixedWindow())).toEqual([]);
+    expect((await collector.collect(fixedWindow())).candidates).toEqual([]);
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(fetch.mock.calls[1]?.[1]?.redirect).toBe("manual");
   });
@@ -586,7 +636,7 @@ describe("catalog-driven news collection", () => {
       ],
     });
 
-    const items = await collector.collect(fixedWindow());
+    const { candidates: items } = await collector.collect(fixedWindow());
     expect(
       items.find((item) => item.sourceId === "federal-register"),
     ).toMatchObject({
@@ -694,7 +744,7 @@ describe("catalog-driven news collection", () => {
         ],
       });
 
-      const items = await collector.collect(fixedWindow());
+      const { candidates: items } = await collector.collect(fixedWindow());
 
       expect(items).toEqual([
         expect.objectContaining({
@@ -770,7 +820,9 @@ describe("catalog-driven news collection", () => {
       ],
     });
 
-    expect((await collector.collect(fixedWindow()))[0]).toMatchObject({
+    expect(
+      (await collector.collect(fixedWindow())).candidates[0],
+    ).toMatchObject({
       eventFamilies: ["evaluation-standards"],
       materialFacts: expect.arrayContaining([
         { kind: "status", key: "event-status", value: "adopted" },
@@ -850,7 +902,7 @@ describe("catalog-driven news collection", () => {
         ],
       });
 
-      const result = await collector.collect(fixedWindow());
+      const { candidates: result } = await collector.collect(fixedWindow());
 
       expect(result[0]?.metadata.primarySection).toBe(
         sourceCase.expected,
@@ -920,7 +972,7 @@ describe("catalog-driven news collection", () => {
         ],
       });
 
-      const result = await collector.collect(fixedWindow());
+      const { candidates: result } = await collector.collect(fixedWindow());
 
       expect(result[0]?.metadata.primarySection).toBe(
         sourceCase.preferredSection,
@@ -978,7 +1030,7 @@ describe("catalog-driven news collection", () => {
       ],
     });
 
-    expect(await collector.collect(fixedWindow())).toEqual([
+    expect((await collector.collect(fixedWindow())).candidates).toEqual([
       expect.objectContaining({
         kind: "document",
         sourceId: "congress-gov",
@@ -1040,7 +1092,7 @@ describe("catalog-driven news collection", () => {
       ],
     });
 
-    const items = await collector.collect(fixedWindow());
+    const { candidates: items } = await collector.collect(fixedWindow());
     expect(items).toHaveLength(2);
     expect(items.map((item) => item.originalUrl)).toEqual([
       "https://dc.gov/release/dc-launches-ai-procurement-review",

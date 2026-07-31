@@ -92,6 +92,7 @@ function openAlexIdentifier(value: string): string {
 }
 
 export class OpenAlexAdapter implements ResearchEnricher {
+  readonly sourceId: string;
   private readonly source: ResearchSourceRecord;
   private readonly endpoint: string;
 
@@ -101,6 +102,7 @@ export class OpenAlexAdapter implements ResearchEnricher {
     endpoint = "https://api.openalex.org/works",
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
+    this.sourceId = this.source.id;
     this.endpoint = assertSafeOutboundUrl(
       endpoint,
       OPENALEX_POLICY,

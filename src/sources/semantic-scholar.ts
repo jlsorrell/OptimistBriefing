@@ -61,6 +61,7 @@ function unique(values: readonly string[]): string[] {
 }
 
 export class SemanticScholarAdapter implements ResearchEnricher {
+  readonly sourceId: string;
   private readonly source: ResearchSourceRecord;
   private readonly endpoint: string;
 
@@ -70,6 +71,7 @@ export class SemanticScholarAdapter implements ResearchEnricher {
     endpoint = "https://api.semanticscholar.org/graph/v1/paper/batch",
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
+    this.sourceId = this.source.id;
     this.endpoint = assertSafeOutboundUrl(
       endpoint,
       SEMANTIC_SCHOLAR_POLICY,

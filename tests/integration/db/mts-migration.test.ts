@@ -103,10 +103,10 @@ async function collectCanonicalMts(repo: D1BriefingRepository) {
     }),
     sources: [mtsSource],
   });
-  return collector.collect({
+  return (await collector.collect({
     from: "2026-07-28T00:00:00.000Z",
     to: "2026-07-29T12:00:00.000Z",
-  });
+  })).candidates;
 }
 
 describe("MTS canonical URL migration", () => {

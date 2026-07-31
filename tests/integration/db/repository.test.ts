@@ -308,10 +308,10 @@ describe("D1BriefingRepository", () => {
     });
 
     expect(
-      await collector.collect({
+      (await collector.collect({
         from: "2026-07-28T00:00:00.000Z",
         to: "2026-07-29T12:00:00.000Z",
-      }),
+      })).candidates,
     ).toEqual([
       expect.objectContaining({
         sourceId: "monitoring-the-situation",
@@ -325,7 +325,7 @@ describe("D1BriefingRepository", () => {
     ]);
   });
 
-  it("rejects an unrelated redirect from the configured MTS listing", async () => {
+  it("isolates an unrelated redirect from the configured MTS listing", async () => {
     const repo = new D1BriefingRepository(env.DB);
     const mtsSource = (await repo.listSources()).find(
       (source) => source.id === "monitoring-the-situation",
@@ -347,15 +347,16 @@ describe("D1BriefingRepository", () => {
       sources: [mtsSource],
     });
 
-    await expect(
-      collector.collect({
-        from: "2026-07-28T00:00:00.000Z",
-        to: "2026-07-29T12:00:00.000Z",
-      }),
-    ).rejects.toMatchObject({
-      name: "SourceFetchError",
-      failureKind: "policy",
-      retryable: false,
+    await expect(collector.collect({
+      from: "2026-07-28T00:00:00.000Z",
+      to: "2026-07-29T12:00:00.000Z",
+    })).resolves.toEqual({
+      candidates: [],
+      succeededSourceIds: [],
+      failures: [{
+        sourceId: "monitoring-the-situation",
+        kind: "policy",
+      }],
     });
   });
 
@@ -487,6 +488,55 @@ describe("D1BriefingRepository", () => {
     await expect(repo.listSources()).rejects.toBeInstanceOf(
       RepositoryValidationError,
     );
+  });
+
+  it("records healthy, degraded, and failing source outcomes without losing the last success", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const firstSuccess = "2026-07-29T08:00:00.000Z";
+
+    await repo.recordSourceOutcome("reuters", "success", firstSuccess);
+    expect(
+      (await repo.listSources()).find(({ id }) => id === "reuters"),
+    ).toMatchObject({
+      healthStatus: "healthy",
+      lastSuccessAt: firstSuccess,
+    });
+
+    await repo.recordSourceOutcome(
+      "reuters",
+      "fetch",
+      "2026-07-29T09:00:00.000Z",
+    );
+    expect(
+      (await repo.listSources()).find(({ id }) => id === "reuters"),
+    ).toMatchObject({
+      healthStatus: "degraded",
+      lastSuccessAt: firstSuccess,
+    });
+
+    await repo.recordSourceOutcome(
+      "reuters",
+      "policy",
+      "2026-07-29T10:00:00.000Z",
+    );
+    expect(
+      (await repo.listSources()).find(({ id }) => id === "reuters"),
+    ).toMatchObject({
+      healthStatus: "failing",
+      lastSuccessAt: firstSuccess,
+    });
+  });
+
+  it("rejects source outcomes for unknown catalog sources", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+
+    await expect(
+      repo.recordSourceOutcome(
+        "not-in-catalog",
+        "success",
+        "2026-07-29T08:00:00.000Z",
+      ),
+    ).rejects.toBeInstanceOf(RepositoryValidationError);
   });
 
   it("rejects non-JSON source restrictions with typed validation errors", async () => {

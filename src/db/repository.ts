@@ -19,6 +19,7 @@ import {
   type SourceRef,
   type StructuredSummary,
 } from "../contracts/editorial";
+import type { CollectionFailureKind } from "../sources/types";
 
 export type EditionListInput = {
   limit: number;
@@ -598,6 +599,11 @@ export interface BriefingRepository {
   removeFeedbackAdjustment(feedbackId: string): Promise<ReaderPreferences>;
   resetPreferences(): Promise<ReaderPreferences>;
   listSources(): Promise<readonly SourceRecord[]>;
+  recordSourceOutcome(
+    sourceId: string,
+    outcome: "success" | CollectionFailureKind,
+    occurredAt: string,
+  ): Promise<void>;
   createSource(input: CreateSourceInput): Promise<SourceRecord>;
   updateSource(
     sourceId: string,

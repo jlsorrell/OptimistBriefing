@@ -8,14 +8,17 @@ import {
   type OutboundUrlPolicy,
 } from "./outbound-url";
 import {
+  settleCollectionBatch,
+} from "./collection-settlement";
+import {
   CollectionWindowSchema,
   RawItemSchema,
   ResearchSourceRecordSchema,
+  type CollectionBatch,
   type CollectionWindow,
   type RawItem,
   type ResearchSourceInput,
   type ResearchSourceRecord,
-  type SourceAdapter,
 } from "./types";
 
 const RssItemSchema = z.object({
@@ -72,7 +75,7 @@ function relatedArxivIds(value: string): string[] {
   ];
 }
 
-export class RssAdapter implements SourceAdapter {
+export class RssAdapter {
   private readonly feeds: readonly ConfiguredFeed[];
 
   constructor(
@@ -94,84 +97,91 @@ export class RssAdapter implements SourceAdapter {
     }));
   }
 
-  async collect(window: CollectionWindow): Promise<RawItem[]> {
+  async collect(
+    window: CollectionWindow,
+  ): Promise<CollectionBatch<RawItem>> {
     const validWindow = CollectionWindowSchema.parse(window);
-    const collected = await Promise.all(
+    return settleCollectionBatch(
       this.feeds
         .filter((feed) => feed.source.enabled)
-        .map(async (feed): Promise<RawItem[]> => {
-          const response = await this.http.get(
-            feed.source,
-            feed.feedUrl,
-            feed.feedUrlPolicy === undefined
-              ? {}
-              : { urlPolicy: feed.feedUrlPolicy },
-          );
-          if (response.notModified || response.body === null) {
-            return [];
-          }
-          const parsedXml: unknown = new XMLParser({
-            ignoreAttributes: false,
-            removeNSPrefix: true,
-            trimValues: true,
-            parseTagValue: false,
-          }).parse(response.body);
-          const document = RssDocumentSchema.parse(parsedXml);
-          return asArray(document.rss.channel.item).flatMap((item) => {
-            let originalUrl: string;
-            try {
-              originalUrl = assertSafeOutboundUrl(
-                item.link,
-                feed.articleUrlPolicy,
-              ).toString();
-            } catch {
+        .map((feed) => ({
+          sourceId: feed.source.id,
+          collect: async (): Promise<RawItem[]> => {
+            const response = await this.http.get(
+              feed.source,
+              feed.feedUrl,
+              feed.feedUrlPolicy === undefined
+                ? {}
+                : { urlPolicy: feed.feedUrlPolicy },
+            );
+            if (response.notModified || response.body === null) {
               return [];
             }
-            const publishedAt =
-              item.pubDate === undefined
-                ? null
-                : new Date(item.pubDate).toISOString();
-            if (
-              publishedAt !== null &&
-              (publishedAt < validWindow.from || publishedAt > validWindow.to)
-            ) {
-              return [];
-            }
-            const rawDescription = item.encoded ?? item.description ?? "";
-            const description = normalizeWhitespace(rawDescription);
-            const guid =
-              typeof item.guid === "string"
-                ? item.guid
-                : item.guid?.["#text"];
-            return [
-              RawItemSchema.parse({
-                kind: "blog",
-                sourceId: feed.source.id,
-                sourceName: feed.source.canonicalName,
-                sourceRole: feed.source.role,
-                title: normalizeWhitespace(item.title),
-                originalUrl,
-                externalId: guid ?? originalUrl,
-                externalIds: [guid ?? originalUrl],
-                publishedAt,
-                retrievedAt: response.retrievedAt,
-                accessLevel: "secondary",
-                authors:
-                  item.author === undefined ? [] : [item.author.trim()],
-                institutions: [],
-                abstract: description.length === 0 ? null : description,
-                content: null,
-                relatedPaperIds: relatedArxivIds(
-                  `${originalUrl} ${rawDescription}`,
-                ),
-                metadata: {
-                  feedUrl: feed.feedUrl,
-                },
-              }),
-            ];
-          });
-        }),
+            const parsedXml: unknown = new XMLParser({
+              ignoreAttributes: false,
+              removeNSPrefix: true,
+              trimValues: true,
+              parseTagValue: false,
+            }).parse(response.body);
+            const document = RssDocumentSchema.parse(parsedXml);
+            return asArray(document.rss.channel.item).flatMap((item) => {
+              let originalUrl: string;
+              try {
+                originalUrl = assertSafeOutboundUrl(
+                  item.link,
+                  feed.articleUrlPolicy,
+                ).toString();
+              } catch {
+                return [];
+              }
+              const publishedAt =
+                item.pubDate === undefined
+                  ? null
+                  : new Date(item.pubDate).toISOString();
+              if (
+                publishedAt !== null &&
+                (publishedAt < validWindow.from ||
+                  publishedAt > validWindow.to)
+              ) {
+                return [];
+              }
+              const rawDescription =
+                item.encoded ?? item.description ?? "";
+              const description = normalizeWhitespace(rawDescription);
+              const guid =
+                typeof item.guid === "string"
+                  ? item.guid
+                  : item.guid?.["#text"];
+              return [
+                RawItemSchema.parse({
+                  kind: "blog",
+                  sourceId: feed.source.id,
+                  sourceName: feed.source.canonicalName,
+                  sourceRole: feed.source.role,
+                  title: normalizeWhitespace(item.title),
+                  originalUrl,
+                  externalId: guid ?? originalUrl,
+                  externalIds: [guid ?? originalUrl],
+                  publishedAt,
+                  retrievedAt: response.retrievedAt,
+                  accessLevel: "secondary",
+                  authors:
+                    item.author === undefined ? [] : [item.author.trim()],
+                  institutions: [],
+                  abstract:
+                    description.length === 0 ? null : description,
+                  content: null,
+                  relatedPaperIds: relatedArxivIds(
+                    `${originalUrl} ${rawDescription}`,
+                  ),
+                  metadata: {
+                    feedUrl: feed.feedUrl,
+                  },
+                }),
+              ];
+            });
+          },
+        })),
     );
-    return collected.flat();
   }
 }

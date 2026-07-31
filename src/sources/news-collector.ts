@@ -7,6 +7,9 @@ import {
   type SourceRecord,
 } from "../db/repository";
 import {
+  settleCollectionBatch,
+} from "./collection-settlement";
+import {
   extractReadableArticle,
   type ExtractedArticle,
 } from "./article-extractor";
@@ -27,6 +30,7 @@ import {
   CollectionWindowSchema,
   RawNewsCandidateSchema,
   ResearchSourceRecordSchema,
+  type CollectionBatch,
   type CollectionWindow,
   type NewsSourceAdapter,
   type RawNewsCandidate,
@@ -43,6 +47,7 @@ type NewsCollectorOptions = {
   directFeeds: readonly ConfiguredNewsFeed[];
   discoveryAdapters: readonly NewsSourceAdapter[];
   forecastAdapters: readonly NewsSourceAdapter[];
+  sourceOrder?: readonly string[];
 };
 
 const CatalogUrlPolicySchema = z.object({
@@ -190,6 +195,7 @@ function nestedElement(item: Element, selector: string): Element | null {
 }
 
 class DirectPageAdapter implements NewsSourceAdapter {
+  readonly sourceId: string;
   private readonly pageUrl: string;
 
   constructor(
@@ -199,6 +205,7 @@ class DirectPageAdapter implements NewsSourceAdapter {
     private readonly urlPolicy: OutboundUrlPolicy,
     private readonly listing: ListingPageConfig,
   ) {
+    this.sourceId = source.id;
     this.pageUrl = assertSafeOutboundUrl(pageUrl, urlPolicy).toString();
   }
 
@@ -379,6 +386,7 @@ class DirectPageAdapter implements NewsSourceAdapter {
 }
 
 class FederalRegisterAdapter implements NewsSourceAdapter {
+  readonly sourceId: string;
   private readonly apiUrl: string;
 
   constructor(
@@ -387,6 +395,7 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
     apiUrl: string,
     private readonly urlPolicy: OutboundUrlPolicy,
   ) {
+    this.sourceId = source.id;
     this.apiUrl = assertSafeOutboundUrl(apiUrl, urlPolicy).toString();
   }
 
@@ -490,6 +499,7 @@ export class NewsCollector {
     articleUrlPolicy: OutboundUrlPolicy;
   }[];
   private readonly rss: RssAdapter;
+  private readonly sourceOrder: readonly string[];
 
   constructor(private readonly options: NewsCollectorOptions) {
     this.directFeeds = options.directFeeds.map((feed) => ({
@@ -499,116 +509,171 @@ export class NewsCollector {
       articleUrlPolicy: feed.articleUrlPolicy,
     }));
     this.rss = new RssAdapter(options.http, options.directFeeds);
+    this.sourceOrder = options.sourceOrder ?? [
+      ...this.directFeeds.map(({ source }) => source.id),
+      ...options.discoveryAdapters.map(({ sourceId }) => sourceId),
+      ...options.forecastAdapters.map(({ sourceId }) => sourceId),
+    ];
   }
 
   private async collectDirect(
     window: CollectionWindow,
-  ): Promise<RawNewsCandidate[]> {
+  ): Promise<CollectionBatch<RawNewsCandidate>> {
     const configuredSources = new Map(
       this.directFeeds.map((feed) => [feed.source.id, feed]),
     );
-    const feedItems = await this.rss.collect(window);
-    const items = await Promise.all(
-      feedItems.map(async (item): Promise<RawNewsCandidate | null> => {
-        const feed = configuredSources.get(item.sourceId);
-        if (feed === undefined) {
-          throw new TypeError(
-            `RSS returned an unconfigured source: ${item.sourceId}`,
-          );
-        }
-        const source = feed.source;
-        const contentUse = restriction(
-          source,
-          "contentUse",
-          "metadata-only",
-        );
-        const paywall = restriction(source, "paywall", "unknown");
-        let extraction = noExtraction();
-        if (
-          transientExtractionPermitted(source)
-        ) {
-          try {
-            const response = await this.options.http.get(
-              source,
-              item.originalUrl,
-              {
-                headers: {
-                  accept: "text/html,application/xhtml+xml",
-                },
-                useValidators: false,
-                urlPolicy: feed.articleUrlPolicy,
-              },
-            );
-            if (response.body !== null) {
-              extraction = extractReadableArticle(
-                response.body,
-                response.finalUrl,
-                response.contentType,
-              );
-            }
-          } catch (error) {
-            if (
-              error instanceof SourceFetchError &&
-              error.failureKind === "policy"
-            ) {
-              return null;
-            }
-          }
-        }
+    const feeds = await this.rss.collect(window);
+    const collected = await settleCollectionBatch(
+      feeds.succeededSourceIds.map((sourceId) => ({
+        sourceId,
+        collect: async (): Promise<RawNewsCandidate[]> => {
+          const items = await Promise.all(
+            feeds.candidates
+              .filter((item) => item.sourceId === sourceId)
+              .map(async (item): Promise<RawNewsCandidate | null> => {
+                const feed = configuredSources.get(item.sourceId);
+                if (feed === undefined) {
+                  throw new TypeError(
+                    `RSS returned an unconfigured source: ${item.sourceId}`,
+                  );
+                }
+                const source = feed.source;
+                const contentUse = restriction(
+                  source,
+                  "contentUse",
+                  "metadata-only",
+                );
+                const paywall = restriction(
+                  source,
+                  "paywall",
+                  "unknown",
+                );
+                let extraction = noExtraction();
+                if (transientExtractionPermitted(source)) {
+                  try {
+                    const response = await this.options.http.get(
+                      source,
+                      item.originalUrl,
+                      {
+                        headers: {
+                          accept: "text/html,application/xhtml+xml",
+                        },
+                        useValidators: false,
+                        urlPolicy: feed.articleUrlPolicy,
+                      },
+                    );
+                    if (response.body !== null) {
+                      extraction = extractReadableArticle(
+                        response.body,
+                        response.finalUrl,
+                        response.contentType,
+                      );
+                    }
+                  } catch (error) {
+                    if (
+                      error instanceof SourceFetchError &&
+                      error.failureKind === "policy"
+                    ) {
+                      return null;
+                    }
+                  }
+                }
 
-        const kind =
-          source.role === "primary" ? "document" : "article";
-        const metadata = {
-          ...item.metadata,
-          extractionLevel: extraction.extractionLevel,
-          contentUse,
-          paywall,
-          retention: "ephemeral-only",
-        };
-        return RawNewsCandidateSchema.parse({
-          ...item,
-          kind,
-          accessLevel: extractionAccessLevel(extraction),
-          content: extraction.text,
-          canCorroborateFacts: canCorroborateFacts(source.role),
-          ...deriveNewsSignals({
-            kind,
-            title: item.title,
-            abstract: item.abstract,
-            content: extraction.text,
-            originalUrl: item.originalUrl,
-            sectionEligibility: source.sectionEligibility ?? [],
-            metadata,
-            preferredSection: source.restrictions.preferredSection,
-          }),
-        });
-      }),
+                const kind =
+                  source.role === "primary" ? "document" : "article";
+                const metadata = {
+                  ...item.metadata,
+                  extractionLevel: extraction.extractionLevel,
+                  contentUse,
+                  paywall,
+                  retention: "ephemeral-only",
+                };
+                return RawNewsCandidateSchema.parse({
+                  ...item,
+                  kind,
+                  accessLevel: extractionAccessLevel(extraction),
+                  content: extraction.text,
+                  canCorroborateFacts: canCorroborateFacts(
+                    source.role,
+                  ),
+                  ...deriveNewsSignals({
+                    kind,
+                    title: item.title,
+                    abstract: item.abstract,
+                    content: extraction.text,
+                    originalUrl: item.originalUrl,
+                    sectionEligibility: source.sectionEligibility ?? [],
+                    metadata,
+                    preferredSection:
+                      source.restrictions.preferredSection,
+                  }),
+                });
+              }),
+          );
+          return items.filter(
+            (item): item is RawNewsCandidate => item !== null,
+          );
+        },
+      })),
     );
-    return items.filter(
-      (item): item is RawNewsCandidate => item !== null,
-    );
+    return {
+      candidates: collected.candidates,
+      succeededSourceIds: collected.succeededSourceIds,
+      failures: [...feeds.failures, ...collected.failures],
+    };
   }
 
   async collect(
     window: CollectionWindow,
-  ): Promise<RawNewsCandidate[]> {
+  ): Promise<CollectionBatch<RawNewsCandidate>> {
     const validWindow = CollectionWindowSchema.parse(window);
     const [direct, discovered, forecasts] = await Promise.all([
       this.collectDirect(validWindow),
-      Promise.all(
-        this.options.discoveryAdapters.map((adapter) =>
-          adapter.collect(validWindow),
-        ),
+      settleCollectionBatch(
+        this.options.discoveryAdapters.map((adapter) => ({
+          sourceId: adapter.sourceId,
+          collect: () => adapter.collect(validWindow),
+        })),
       ),
-      Promise.all(
-        this.options.forecastAdapters.map((adapter) =>
-          adapter.collect(validWindow),
-        ),
+      settleCollectionBatch(
+        this.options.forecastAdapters.map((adapter) => ({
+          sourceId: adapter.sourceId,
+          collect: () => adapter.collect(validWindow),
+        })),
       ),
     ]);
-    return [...direct, ...discovered.flat(), ...forecasts.flat()].map(
+    const sourcePosition = new Map(
+      this.sourceOrder.map((sourceId, index) => [sourceId, index]),
+    );
+    const position = (sourceId: string) =>
+      sourcePosition.get(sourceId) ?? Number.MAX_SAFE_INTEGER;
+    const candidates = [
+      ...direct.candidates,
+      ...discovered.candidates,
+      ...forecasts.candidates,
+    ].map(
       (candidate) => RawNewsCandidateSchema.parse(candidate),
     );
+    candidates.sort(
+      (left, right) => position(left.sourceId) - position(right.sourceId),
+    );
+    const succeededSourceIds = [
+      ...direct.succeededSourceIds,
+      ...discovered.succeededSourceIds,
+      ...forecasts.succeededSourceIds,
+    ];
+    succeededSourceIds.sort(
+      (left, right) => position(left) - position(right),
+    );
+    const failures = [
+      ...direct.failures,
+      ...discovered.failures,
+      ...forecasts.failures,
+    ];
+    failures.sort(
+      (left, right) => position(left.sourceId) - position(right.sourceId),
+    );
+    return { candidates, succeededSourceIds, failures };
   }
 }
 
@@ -722,5 +787,8 @@ export function createNewsCollectorFromCatalog(
     directFeeds,
     discoveryAdapters,
     forecastAdapters,
+    sourceOrder: sources
+      .filter((source) => source.enabled && isNewsCatalogSource(source))
+      .map(({ id }) => id),
   });
 }

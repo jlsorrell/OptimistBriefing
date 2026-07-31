@@ -58,6 +58,10 @@ import {
   decodeEditionCursor,
   encodeEditionCursor,
 } from "../pagination/edition-cursor";
+import {
+  CollectionFailureKindSchema,
+  type CollectionFailureKind,
+} from "../sources/types";
 import { PIPELINE_STEPS } from "../workflow/types";
 
 const DateTimeSchema = z.string().datetime();
@@ -72,6 +76,10 @@ const ModelUsageRecordSchema = z.object({
 }).strict();
 const EditionDateSchema = EditionSchema.shape.editionDate;
 const NonemptyIdSchema = z.string().min(1);
+const SourceOutcomeSchema = z.union([
+  z.literal("success"),
+  CollectionFailureKindSchema,
+]);
 const PageInputSchema = z.object({
   limit: z.number().int().min(1).max(100),
   cursor: z.string().min(1).nullable(),
@@ -1525,6 +1533,52 @@ export class D1BriefingRepository implements BriefingRepository {
       .prepare("SELECT * FROM sources ORDER BY canonical_name, id")
       .all<SourceRow>();
     return result.results.map(sourceFromRow);
+  }
+
+  async recordSourceOutcome(
+    sourceId: string,
+    outcome: "success" | CollectionFailureKind,
+    occurredAt: string,
+  ): Promise<void> {
+    const validSourceId = validated(
+      NonemptyIdSchema,
+      sourceId,
+      "Invalid source ID",
+    );
+    const validOutcome = validated(
+      SourceOutcomeSchema,
+      outcome,
+      "Invalid source outcome",
+    );
+    const validOccurredAt = validated(
+      DateTimeSchema,
+      occurredAt,
+      "Invalid source outcome date",
+    );
+    const result = await this.db
+      .prepare(
+        `UPDATE sources
+        SET health_status = CASE
+          WHEN ? = 'success' THEN 'healthy'
+          WHEN health_status IN ('degraded', 'failing') THEN 'failing'
+          ELSE 'degraded'
+        END,
+        last_success_at = CASE
+          WHEN ? = 'success' THEN ?
+          ELSE last_success_at
+        END
+        WHERE id = ?`,
+      )
+      .bind(
+        validOutcome,
+        validOutcome,
+        validOccurredAt,
+        validSourceId,
+      )
+      .run();
+    if ((result.meta.changes ?? 0) !== 1) {
+      throw new RepositoryValidationError("Source not found");
+    }
   }
 
   async createSource(input: CreateSourceInput): Promise<SourceRecord> {

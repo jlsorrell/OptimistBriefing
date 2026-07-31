@@ -22,6 +22,7 @@ import { RssAdapter } from "../../../src/sources/rss";
 import { SemanticScholarAdapter } from "../../../src/sources/semantic-scholar";
 import type {
   CollectionWindow,
+  RawItem,
   ResearchSourceRecord,
 } from "../../../src/sources/types";
 
@@ -73,6 +74,28 @@ const blogSource = source({
   restrictions: { bodyRetrieval: "permitted" },
 });
 
+function rawPaper(sourceId = "arxiv"): RawItem {
+  return {
+    kind: "paper",
+    sourceId,
+    sourceName: "arXiv",
+    sourceRole: "primary",
+    title: "A bounded research result",
+    originalUrl: "https://arxiv.org/abs/2607.00001",
+    externalId: "arXiv:2607.00001",
+    externalIds: ["arXiv:2607.00001"],
+    publishedAt: "2026-07-29T08:00:00.000Z",
+    retrievedAt: "2026-07-29T08:30:00.000Z",
+    accessLevel: "abstract",
+    authors: ["Ada Example"],
+    institutions: ["MIT"],
+    abstract: "The research result has bounded evidence.",
+    content: null,
+    relatedPaperIds: [],
+    metadata: {},
+  };
+}
+
 function headerValue(init: RequestInit | undefined, name: string): string | null {
   return new Headers(init?.headers).get(name);
 }
@@ -123,14 +146,24 @@ async function collectorWithFixtures() {
     now: () => new Date("2026-07-29T08:30:00.000Z"),
     sleep: async () => undefined,
   });
+  const blogRss = new RssAdapter(http, [
+    { source: blogSource, feedUrl: "https://lab.example.org/feed.xml" },
+  ]);
 
   return {
     collector: new ResearchCollector({
       discoveryAdapters: [
         new ArxivAdapter(http, arxivSource),
-        new RssAdapter(http, [
-          { source: blogSource, feedUrl: "https://lab.example.org/feed.xml" },
-        ]),
+        {
+          sourceId: blogSource.id,
+          collect: async (window) => {
+            const batch = await blogRss.collect(window);
+            if (batch.failures.length > 0) {
+              throw new Error("BLOG_RSS_COLLECTION_FAILED");
+            }
+            return [...batch.candidates];
+          },
+        },
       ],
       enrichers: [
         new SemanticScholarAdapter(http, semanticScholarSource),
@@ -144,9 +177,64 @@ async function collectorWithFixtures() {
 }
 
 describe("ResearchCollector", () => {
+  it("retains a successful discovery adapter when another adapter fails", async () => {
+    const collector = new ResearchCollector({
+      discoveryAdapters: [
+        {
+          sourceId: "failed-research",
+          collect: async () => {
+            throw new Error("private discovery detail");
+          },
+        },
+        {
+          sourceId: "arxiv",
+          collect: async () => [rawPaper()],
+        },
+      ],
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates.map(({ sourceId }) => sourceId)).toEqual([
+      "arxiv",
+    ]);
+    expect(result.succeededSourceIds).toEqual(["arxiv"]);
+    expect(result.failures).toEqual([
+      { sourceId: "failed-research", kind: "unknown" },
+    ]);
+    expect(JSON.stringify(result)).not.toContain("private discovery detail");
+  });
+
+  it("retains prior candidates when an optional enricher fails", async () => {
+    const collector = new ResearchCollector({
+      discoveryAdapters: [{
+        sourceId: "arxiv",
+        collect: async () => [rawPaper()],
+      }],
+      enrichers: [{
+        sourceId: "semantic-scholar",
+        enrich: async () => {
+          throw new Error("private enrichment detail");
+        },
+      }],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]?.externalId).toBe("arXiv:2607.00001");
+    expect(result.succeededSourceIds).toEqual(["arxiv"]);
+    expect(result.failures).toEqual([
+      { sourceId: "semantic-scholar", kind: "unknown" },
+    ]);
+  });
+
   it("records abstract-only access without claiming full-paper access", async () => {
     const { collector } = await collectorWithFixtures();
-    const candidates = await collector.collect(fixedWindow());
+    const { candidates } = await collector.collect(fixedWindow());
     const paper = candidates.find(
       (candidate) => candidate.externalId === "arXiv:2607.00001",
     );
@@ -167,7 +255,7 @@ describe("ResearchCollector", () => {
 
   it("associates a blog post with its discussed arXiv paper", async () => {
     const { collector } = await collectorWithFixtures();
-    const candidates = await collector.collect(fixedWindow());
+    const { candidates } = await collector.collect(fixedWindow());
 
     expect(candidates.find((item) => item.kind === "blog")?.relatedPaperIds)
       .toContain("arXiv:2607.00001");
@@ -175,7 +263,7 @@ describe("ResearchCollector", () => {
 
   it("normalizes institution aliases before applying preferred signals", async () => {
     const { collector } = await collectorWithFixtures();
-    const paper = (await collector.collect(fixedWindow())).find(
+    const paper = (await collector.collect(fixedWindow())).candidates.find(
       (candidate) => candidate.kind === "paper",
     );
 
@@ -200,6 +288,54 @@ describe("ResearchCollector", () => {
     expect(
       requestedUrls.filter((url) => url.includes("api.openalex.org")),
     ).toHaveLength(1);
+  });
+});
+
+describe("RssAdapter", () => {
+  it("retains a valid feed when another feed is malformed", async () => {
+    const validFeed = await loadFixture("research-blog.xml");
+    const malformedSource = source({
+      id: "malformed-feed",
+      canonicalName: "Malformed Feed",
+      canonicalUrl: "https://malformed.example.org/",
+      role: "blog",
+    });
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      if (String(input) === "https://malformed.example.org/feed.xml") {
+        return new Response("<not-rss />", {
+          headers: { "content-type": "application/rss+xml" },
+        });
+      }
+      return new Response(validFeed, {
+        headers: { "content-type": "application/rss+xml" },
+      });
+    });
+    const adapter = new RssAdapter(
+      new SourceHttpClient({
+        fetch,
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      [
+        {
+          source: malformedSource,
+          feedUrl: "https://malformed.example.org/feed.xml",
+        },
+        {
+          source: blogSource,
+          feedUrl: "https://lab.example.org/feed.xml",
+        },
+      ],
+    );
+
+    const result = await adapter.collect(fixedWindow());
+
+    expect(result.candidates.map(({ sourceId }) => sourceId)).toEqual([
+      "alignment-lab",
+    ]);
+    expect(result.succeededSourceIds).toEqual(["alignment-lab"]);
+    expect(result.failures).toEqual([
+      { sourceId: "malformed-feed", kind: "parse" },
+    ]);
   });
 });
 

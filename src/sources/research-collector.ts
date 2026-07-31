@@ -1,7 +1,12 @@
 import {
+  settleCollectionBatch,
+} from "./collection-settlement";
+import {
   CollectionWindowSchema,
   RawItemSchema,
   RawResearchCandidateSchema,
+  type CollectionBatch,
+  type CollectionFailure,
   type CollectionWindow,
   type RawItem,
   type RawResearchCandidate,
@@ -94,16 +99,15 @@ export class ResearchCollector {
 
   async collect(
     window: CollectionWindow,
-  ): Promise<RawResearchCandidate[]> {
+  ): Promise<CollectionBatch<RawResearchCandidate>> {
     const validWindow = CollectionWindowSchema.parse(window);
-    const discovered = (
-      await Promise.all(
-        this.options.discoveryAdapters.map((adapter) =>
-          adapter.collect(validWindow),
-        ),
-      )
-    )
-      .flat()
+    const discovery = await settleCollectionBatch(
+      this.options.discoveryAdapters.map((adapter) => ({
+        sourceId: adapter.sourceId,
+        collect: () => adapter.collect(validWindow),
+      })),
+    );
+    const discovered = discovery.candidates
       .map((item) => RawItemSchema.parse(item))
       .filter(
         (item): item is RawItem & { kind: "paper" | "blog" } =>
@@ -112,11 +116,20 @@ export class ResearchCollector {
       .map(initialResearchCandidate);
 
     let enriched = discovered;
+    const succeededSourceIds = [...discovery.succeededSourceIds];
+    const failures: CollectionFailure[] = [...discovery.failures];
     for (const enricher of this.options.enrichers) {
-      enriched = await enricher.enrich(enriched);
-      enriched = enriched.map((candidate) =>
-        RawResearchCandidateSchema.parse(candidate),
-      );
+      const result = await settleCollectionBatch([{
+        sourceId: enricher.sourceId,
+        collect: () => enricher.enrich(enriched),
+      }]);
+      succeededSourceIds.push(...result.succeededSourceIds);
+      failures.push(...result.failures);
+      if (result.failures.length === 0) {
+        enriched = result.candidates.map((candidate) =>
+          RawResearchCandidateSchema.parse(candidate),
+        );
+      }
     }
 
     const paperContent = this.options.paperContent;
@@ -152,7 +165,7 @@ export class ResearchCollector {
       );
     }
 
-    return enriched.map((candidate) => {
+    const candidates = enriched.map((candidate) => {
       const institutions = unique(
         candidate.institutions.map(normalizeInstitutionName),
       );
@@ -164,5 +177,6 @@ export class ResearchCollector {
         ),
       });
     });
+    return { candidates, succeededSourceIds, failures };
   }
 }

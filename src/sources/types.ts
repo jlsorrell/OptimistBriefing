@@ -22,6 +22,14 @@ export const CollectionWindowSchema = z
     }
   });
 
+export const CollectionFailureKindSchema = z.enum([
+  "fetch",
+  "parse",
+  "policy",
+  "timeout",
+  "unknown",
+]);
+
 export const ResearchSourceRestrictionsSchema = z
   .object({
     bodyRetrieval: z.enum(["forbidden", "permitted"]).default("forbidden"),
@@ -149,6 +157,22 @@ export const RawNewsCandidateSchema = RawItemSchema.extend({
 });
 
 export type CollectionWindow = z.infer<typeof CollectionWindowSchema>;
+export type CollectionFailureKind = z.infer<
+  typeof CollectionFailureKindSchema
+>;
+export type CollectionFailure = {
+  sourceId: string;
+  kind: CollectionFailureKind;
+};
+export type SourceCollection<T> = {
+  sourceId: string;
+  collect(): Promise<readonly T[]>;
+};
+export type CollectionBatch<T> = {
+  candidates: readonly T[];
+  succeededSourceIds: readonly string[];
+  failures: readonly CollectionFailure[];
+};
 export type ResearchSourceRecord = z.infer<
   typeof ResearchSourceRecordSchema
 >;
@@ -178,16 +202,19 @@ export type EditorialSignalRecord = z.infer<
 >;
 
 export interface SourceAdapter {
+  readonly sourceId: string;
   collect(window: CollectionWindow): Promise<RawItem[]>;
 }
 
 export interface ResearchEnricher {
+  readonly sourceId: string;
   enrich(
     candidates: readonly RawResearchCandidate[],
   ): Promise<RawResearchCandidate[]>;
 }
 
 export interface NewsSourceAdapter {
+  readonly sourceId: string;
   collect(window: CollectionWindow): Promise<RawNewsCandidate[]>;
 }
 

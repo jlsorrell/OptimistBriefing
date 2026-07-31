@@ -514,7 +514,7 @@ export class D1PipelineStore implements PipelineStore {
   }
 }
 
-export function createD1PipelineStore(db: D1Database): PipelineStore {
+export function createD1PipelineStore(db: D1Database): D1PipelineStore {
   return new D1PipelineStore(db);
 }
 
@@ -1088,6 +1088,7 @@ export function createD1ProductionPipelineContext(
   options: Pick<ProductionPipelineContextOptions, "checkpointExecutor" | "budgetPolicy"> = {},
 ): PipelineContext {
   const now = () => new Date().toISOString();
+  const sourceFailures: string[] = [];
   return createProductionPipelineContext({
     editionDate,
     runId,
@@ -1095,8 +1096,10 @@ export function createD1ProductionPipelineContext(
     now,
     providers,
     ...options,
+    sourceFailures,
     persistItems: async (items) => store.repository.upsertItems(items),
     collectCandidates: async () => {
+      sourceFailures.length = 0;
       const sources = await store.repository.listSources();
       const source = (id: string) => {
         const match = sources.find((candidate) => candidate.id === id);
@@ -1105,11 +1108,20 @@ export function createD1ProductionPipelineContext(
       };
       const http = new SourceHttpClient();
       const newsCollector = createNewsCollectorFromCatalog({ http, sources });
+      const arxivSource = source("arxiv");
+      const semanticScholarSource = source("semantic-scholar");
+      const openAlexSource = source("openalex");
       const researchCollector = new ResearchCollector({
-        discoveryAdapters: [new ArxivAdapter(http, source("arxiv"))],
+        discoveryAdapters: arxivSource.enabled
+          ? [new ArxivAdapter(http, arxivSource)]
+          : [],
         enrichers: [
-          new SemanticScholarAdapter(http, source("semantic-scholar")),
-          new OpenAlexAdapter(http, source("openalex")),
+          ...(semanticScholarSource.enabled
+            ? [new SemanticScholarAdapter(http, semanticScholarSource)]
+            : []),
+          ...(openAlexSource.enabled
+            ? [new OpenAlexAdapter(http, openAlexSource)]
+            : []),
         ],
         preferredInstitutions: READER_PROFILE.preferredInstitutions,
         preferredLabs: READER_PROFILE.preferredLabs,
@@ -1122,11 +1134,40 @@ export function createD1ProductionPipelineContext(
         newsCollector.collect({ from, to }),
         researchCollector.collect({ from, to }),
       ]);
+      const succeededSourceIds = new Set([
+        ...news.succeededSourceIds,
+        ...research.succeededSourceIds,
+      ]);
+      const failuresBySourceId = new Map(
+        [...news.failures, ...research.failures].map((failure) => [
+          failure.sourceId,
+          failure,
+        ]),
+      );
+      for (const catalogSource of sources) {
+        const failure = failuresBySourceId.get(catalogSource.id);
+        if (failure !== undefined) {
+          await store.repository.recordSourceOutcome(
+            failure.sourceId,
+            failure.kind,
+            to,
+          );
+          sourceFailures.push(`${failure.sourceId}:${failure.kind}`);
+        } else if (succeededSourceIds.has(catalogSource.id)) {
+          await store.repository.recordSourceOutcome(
+            catalogSource.id,
+            "success",
+            to,
+          );
+        }
+      }
       return [
-        ...research.map((candidate) =>
+        ...research.candidates.map((candidate) =>
           RawResearchCandidateSchema.parse(candidate),
         ),
-        ...news.map((candidate) => RawNewsCandidateSchema.parse(candidate)),
+        ...news.candidates.map((candidate) =>
+          RawNewsCandidateSchema.parse(candidate),
+        ),
       ];
     },
   });
