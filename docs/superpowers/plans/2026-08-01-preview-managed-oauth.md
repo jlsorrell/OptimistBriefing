@@ -117,9 +117,9 @@ Exchange the accepted code as `application/x-www-form-urlencoded`. Require a non
 Implement ordinary-browser launch without a shell:
 
 ```ts
-darwin:  /usr/bin/open <authorization-url>
-win32:   rundll32.exe url.dll,FileProtocolHandler <authorization-url>
-other:   xdg-open <authorization-url>
+darwin:  spawn("/usr/bin/open", [authorizationURL], { stdio: "ignore" })
+win32:   spawn("rundll32.exe", ["url.dll,FileProtocolHandler", authorizationURL], { stdio: "ignore" })
+other:   spawn("xdg-open", [authorizationURL], { stdio: "ignore" })
 ```
 
 Resolve after the launcher reports `spawn`; reject a launcher error generically. Do not print the URL or child output.
