@@ -256,23 +256,13 @@ npx wrangler deploy --config "$OPTIMIST_PREVIEW_CONFIG" --keep-vars
 `OPTIMIST_PREVIEW_CONFIG` must be an already-reviewed absolute path, not a
 literal placeholder. Do not attach `optimistindustries.com` during preview.
 
-With an allowed Google session:
-
-1. open `/health` and verify the body is exactly `{"status":"ok"}`;
-2. verify a signed-out request is challenged by Access;
-3. verify a nonallowed Google account is denied;
-4. verify the allowed account can view the fixture edition and source links;
-5. inspect Today, Archive, Preferences, Run Status, desktop, and mobile;
-6. inspect `GET /api/sources`, `GET /api/runs`, and the relevant run detail.
-
-The committed Playwright configuration cannot target preview: it hard-codes the
-local integration server and its tests inject a locally signed assertion that
-Cloudflare Access will not accept. Do not claim that `npm run test:e2e` tested
-preview. Before production approval, add and independently review a
-preview-specific Playwright configuration and authentication harness in a
-separate change, then run it against the Access-protected preview without
-committing Google credentials, cookies, tokens, or storage state. Production
-approval remains blocked until that preview automation is present and passes.
+The local `npm run test:e2e` suite cannot target preview: it uses the local
+integration server and a locally signed assertion that Cloudflare Access will
+not accept. Follow the separate
+[Access-protected preview rehearsal](./preview-rehearsal.md) for the Managed
+OAuth command, ordinary-browser handoff, exact-origin bearer boundary,
+secret-free evidence, cleanup behavior, and unresolved nonallowed-account
+production blocker.
 
 There is no draft-only live-source endpoint. `POST /api/admin/runs` can incur
 model cost and may publish when coverage passes. A live-source preview run
