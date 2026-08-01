@@ -13,6 +13,8 @@ const FILE_MAX_SOURCE_LINES = {
   "tests/preview-e2e/content.spec.ts": 65,
   "tests/preview-e2e/responsive-accessibility.spec.ts": 89,
 } as const;
+const FIXTURE_FILE = "tests/preview-e2e/fixtures.ts";
+const FIXTURE_MAX_SOURCE_LINE = 90;
 const STATUSES = new Set<TestStatus>([
   "passed",
   "failed",
@@ -21,12 +23,15 @@ const STATUSES = new Set<TestStatus>([
   "interrupted",
 ]);
 const DIAGNOSTIC_PATTERN =
-  /^OPTIMIST_PREVIEW_TEST_RESULT project=(desktop|tablet|mobile) file=(tests\/preview-e2e\/(?:access\.spec\.ts|content\.spec\.ts|responsive-accessibility\.spec\.ts)) line=([1-9]\d*) errorLine=(0|[1-9]\d*) status=(passed|failed|timedOut|skipped|interrupted)$/;
+  /^OPTIMIST_PREVIEW_TEST_RESULT project=(desktop|tablet|mobile) file=(tests\/preview-e2e\/(?:access\.spec\.ts|content\.spec\.ts|responsive-accessibility\.spec\.ts)) line=([1-9]\d*) errorSource=(none|test|fixture|external) errorLine=(0|[1-9]\d*) status=(passed|failed|timedOut|skipped|interrupted)$/;
+
+type ErrorSource = "none" | "test" | "fixture" | "external";
 
 interface PreviewTestDiagnostic {
   project: string;
   file: string;
   line: number;
+  errorSource: string;
   errorLine: number;
   status: string;
 }
@@ -37,6 +42,15 @@ export function formatPreviewTestDiagnostic(
   const maximumLine = FILE_MAX_SOURCE_LINES[
     diagnostic.file as keyof typeof FILE_MAX_SOURCE_LINES
   ];
+  const validErrorLocation =
+    ((diagnostic.errorSource === "none" || diagnostic.errorSource === "external") &&
+      diagnostic.errorLine === 0) ||
+    (diagnostic.errorSource === "test" &&
+      diagnostic.errorLine > 0 &&
+      diagnostic.errorLine <= (maximumLine ?? 0)) ||
+    (diagnostic.errorSource === "fixture" &&
+      diagnostic.errorLine > 0 &&
+      diagnostic.errorLine <= FIXTURE_MAX_SOURCE_LINE);
   if (
     !PROJECTS.has(diagnostic.project) ||
     maximumLine === undefined ||
@@ -44,8 +58,7 @@ export function formatPreviewTestDiagnostic(
     diagnostic.line <= 0 ||
     diagnostic.line > maximumLine ||
     !Number.isSafeInteger(diagnostic.errorLine) ||
-    diagnostic.errorLine < 0 ||
-    diagnostic.errorLine > maximumLine ||
+    !validErrorLocation ||
     !STATUSES.has(diagnostic.status as TestStatus)
   ) {
     return undefined;
@@ -54,6 +67,7 @@ export function formatPreviewTestDiagnostic(
     ` project=${diagnostic.project}` +
     ` file=${diagnostic.file}` +
     ` line=${diagnostic.line}` +
+    ` errorSource=${diagnostic.errorSource}` +
     ` errorLine=${diagnostic.errorLine}` +
     ` status=${diagnostic.status}`;
 }
@@ -67,8 +81,9 @@ export function parsePreviewTestDiagnostics(output: string): string[] {
       project: match[1]!,
       file: match[2]!,
       line: Number(match[3]),
-      errorLine: Number(match[4]),
-      status: match[5]!,
+      errorSource: match[4]!,
+      errorLine: Number(match[5]),
+      status: match[6]!,
     });
     if (formatted === line) diagnostics.push(formatted);
   }
@@ -97,23 +112,25 @@ export default class SafePreviewReporter implements Reporter {
       resolve(this.#rootDirectory, test.location.file),
     ).split(sep).join("/");
     const errorLocation = result.errors[0]?.location;
+    let errorSource: ErrorSource = "none";
     let errorLine = 0;
     if (errorLocation !== undefined) {
+      errorSource = "external";
       const errorFile = relative(
         this.#rootDirectory,
         resolve(this.#rootDirectory, errorLocation.file),
       ).split(sep).join("/");
-      const maximumLine = FILE_MAX_SOURCE_LINES[
-        file as keyof typeof FILE_MAX_SOURCE_LINES
-      ];
       if (
         errorLocation.file === test.location.file &&
-        errorFile === file &&
-        maximumLine !== undefined &&
-        Number.isSafeInteger(errorLocation.line) &&
-        errorLocation.line > 0 &&
-        errorLocation.line <= maximumLine
+        errorFile === file
       ) {
+        errorSource = "test";
+        errorLine = errorLocation.line;
+      } else if (
+        errorLocation.file === resolve(this.#rootDirectory, FIXTURE_FILE) &&
+        errorFile === FIXTURE_FILE
+      ) {
+        errorSource = "fixture";
         errorLine = errorLocation.line;
       }
     }
@@ -121,6 +138,7 @@ export default class SafePreviewReporter implements Reporter {
       project: project ?? "",
       file,
       line: test.location.line,
+      errorSource,
       errorLine,
       status: result.status,
     });

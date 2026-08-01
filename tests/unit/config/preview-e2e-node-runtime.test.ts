@@ -676,16 +676,17 @@ describe("preview E2E Node runtime", () => {
       writeOutput,
     });
     const safeLine =
-      "OPTIMIST_PREVIEW_TEST_RESULT project=tablet file=tests/preview-e2e/content.spec.ts line=18 errorLine=44 status=timedOut";
+      "OPTIMIST_PREVIEW_TEST_RESULT project=tablet file=tests/preview-e2e/content.spec.ts line=18 errorSource=fixture errorLine=44 status=timedOut";
 
     child.stdout.write([
       "test title access-token-fixture",
       safeLine,
       `${safeLine} access-token-fixture`,
-      "OPTIMIST_PREVIEW_TEST_RESULT project=tablet file=tests/preview-e2e/content.spec.ts line=18 status=failed",
-      "OPTIMIST_PREVIEW_TEST_RESULT project=tablet file=tests/preview-e2e/content.spec.ts line=18 errorLine=66 status=failed",
-      "OPTIMIST_PREVIEW_TEST_RESULT project=tablet file=tests/preview-e2e/content.spec.ts line=18 errorLine=1234567890123456 status=failed",
-      "OPTIMIST_PREVIEW_TEST_RESULT project=tablet file=tests/preview-e2e/../secret.ts line=18 errorLine=0 status=failed",
+      "OPTIMIST_PREVIEW_TEST_RESULT project=tablet file=tests/preview-e2e/content.spec.ts line=18 errorLine=0 status=failed",
+      "OPTIMIST_PREVIEW_TEST_RESULT project=tablet file=tests/preview-e2e/content.spec.ts line=18 errorSource=external errorLine=66 status=failed",
+      "OPTIMIST_PREVIEW_TEST_RESULT project=tablet file=tests/preview-e2e/content.spec.ts line=18 errorSource=fixture errorLine=91 status=failed",
+      "OPTIMIST_PREVIEW_TEST_RESULT project=tablet file=tests/preview-e2e/content.spec.ts line=18 errorSource=fixture errorLine=1234567890123456 status=failed",
+      "OPTIMIST_PREVIEW_TEST_RESULT project=tablet file=tests/preview-e2e/../secret.ts line=18 errorSource=external errorLine=0 status=failed",
     ].join("\n"));
     child.stderr.write("Error: https://preview.example/?token=access-token-fixture\n");
     child.emit("close", 3, null);
