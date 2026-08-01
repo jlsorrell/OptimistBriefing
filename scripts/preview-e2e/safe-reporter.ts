@@ -14,7 +14,7 @@ const FILE_MAX_SOURCE_LINES = {
   "tests/preview-e2e/responsive-accessibility.spec.ts": 89,
 } as const;
 const FIXTURE_FILE = "tests/preview-e2e/fixtures.ts";
-const FIXTURE_MAX_SOURCE_LINE = 90;
+const FIXTURE_MAX_SOURCE_LINE = 98;
 const STATUSES = new Set<TestStatus>([
   "passed",
   "failed",

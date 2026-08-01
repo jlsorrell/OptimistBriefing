@@ -113,7 +113,7 @@ function assertAuthorizationServerMetadata(value: unknown): asserts value is Aut
 }
 
 async function readJSON(response: Response): Promise<unknown> {
-  if (!response.ok) throw failure();
+  if (response.redirected || !response.ok) throw failure();
   try {
     return await response.json();
   } catch {
@@ -122,7 +122,8 @@ async function readJSON(response: Response): Promise<unknown> {
 }
 
 function requestOptions(signal: AbortSignal | undefined, options: RequestInit = {}): RequestInit {
-  return signal === undefined ? options : { ...options, signal };
+  const request: RequestInit = { ...options, redirect: "manual" };
+  return signal === undefined ? request : { ...request, signal };
 }
 
 function randomBase64URL(bytes: number): string {
@@ -177,6 +178,8 @@ interface LoopbackCallback {
 async function createLoopbackCallback(state: string, signal?: AbortSignal): Promise<LoopbackCallback> {
   let settleCallback: ((result: { code?: string; error?: Error }) => void) | undefined;
   let completed = false;
+  let callbackReceived = false;
+  let callbackSettlement: NodeJS.Timeout | undefined;
   const callback = new Promise<string>((resolve, reject) => {
     settleCallback = ({ code, error }) => {
       if (error !== undefined) reject(error);
@@ -184,33 +187,40 @@ async function createLoopbackCallback(state: string, signal?: AbortSignal): Prom
       else reject(failure());
     };
   });
+  void callback.catch(() => undefined);
   const finish = (result: { code?: string; error?: Error }) => {
     if (completed) return;
     completed = true;
+    if (callbackSettlement !== undefined) clearTimeout(callbackSettlement);
     settleCallback?.(result);
   };
   const server = createServer((request, response) => {
     const requestURL = new URL(request.url ?? "", "http://127.0.0.1");
-    if (completed || request.method !== "GET" || requestURL.pathname !== "/callback") {
+    if (completed || callbackReceived || request.method !== "GET" || requestURL.pathname !== "/callback") {
       response.statusCode = 400;
       response.end();
       finish({ error: failure() });
       return;
     }
+    const states = requestURL.searchParams.getAll("state");
+    const codes = requestURL.searchParams.getAll("code");
+    const errors = requestURL.searchParams.getAll("error");
     if (
-      requestURL.searchParams.get("state") !== state ||
-      requestURL.searchParams.get("error") !== null ||
-      requestURL.searchParams.get("code") === null ||
-      requestURL.searchParams.get("code") === ""
+      states.length !== 1 ||
+      states[0] !== state ||
+      codes.length !== 1 ||
+      codes[0] === "" ||
+      errors.length !== 0
     ) {
       response.statusCode = 400;
       response.end();
       finish({ error: failure() });
       return;
     }
+    callbackReceived = true;
     response.statusCode = 204;
     response.end();
-    finish({ code: requestURL.searchParams.get("code")! });
+    callbackSettlement = setTimeout(() => finish({ code: codes[0]! }), 25);
   });
   const failServer = () => finish({ error: failure() });
   server.once("error", failServer);
@@ -232,6 +242,7 @@ async function createLoopbackCallback(state: string, signal?: AbortSignal): Prom
       callback,
       close: async () => {
         signal?.removeEventListener("abort", abort);
+        if (callbackSettlement !== undefined) clearTimeout(callbackSettlement);
         await new Promise<void>((resolve) => {
           server.close(() => resolve());
         });
@@ -290,7 +301,7 @@ export async function authorizePreviewWithManagedOAuth(
     const fetchImplementation = dependencies.fetch ?? fetch;
     dependencies.reportStage?.("preview discovery");
     const health = await fetchImplementation(`${PREVIEW_ORIGIN}/health`, requestOptions(signal));
-    if (health.status !== 401) throw failure();
+    if (health.redirected || health.status !== 401) throw failure();
     const resourceMetadataURL = parseResourceMetadataURL(health.headers.get("www-authenticate"));
     dependencies.reportStage?.("resource metadata");
     const protectedResource = await readJSON(await fetchImplementation(resourceMetadataURL, requestOptions(signal)));
@@ -369,7 +380,11 @@ export async function authorizePreviewWithManagedOAuth(
     const validatedHealth = await fetchImplementation(`${PREVIEW_ORIGIN}/health`, requestOptions(signal, {
       headers: { authorization: `Bearer ${token}` },
     }));
-    if (validatedHealth.status !== 200 || !isExactHealthyResponse(await readJSON(validatedHealth))) {
+    if (
+      validatedHealth.redirected ||
+      validatedHealth.status !== 200 ||
+      !isExactHealthyResponse(await readJSON(validatedHealth))
+    ) {
       throw failure();
     }
     dependencies.reportStage?.("authorization complete");

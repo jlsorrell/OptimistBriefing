@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it, vi } from "vitest";
 
 import SafePreviewReporter, {
@@ -20,6 +23,32 @@ describe("preview safe test reporter", () => {
       errorLine: 0,
       status: "failed",
     })).toBe(safeLine);
+  });
+
+  it("keeps the fixture error-line allowlist large enough for the complete fixture", () => {
+    const fixtureLineCount = readFileSync(
+      resolve(process.cwd(), "tests/preview-e2e/fixtures.ts"),
+      "utf8",
+    ).trimEnd().split("\n").length;
+
+    expect(formatPreviewTestDiagnostic({
+      project: "desktop",
+      file: "tests/preview-e2e/access.spec.ts",
+      line: 5,
+      errorSource: "fixture",
+      errorLine: fixtureLineCount,
+      status: "failed",
+    })).toBe(
+      `OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=fixture errorLine=${fixtureLineCount} status=failed`,
+    );
+    expect(formatPreviewTestDiagnostic({
+      project: "desktop",
+      file: "tests/preview-e2e/access.spec.ts",
+      line: 5,
+      errorSource: "fixture",
+      errorLine: fixtureLineCount + 1,
+      status: "failed",
+    })).toBeUndefined();
   });
 
   it.each([
@@ -100,7 +129,7 @@ describe("preview safe test reporter", () => {
 
   it.each([
     [1, "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=fixture errorLine=1 status=failed"],
-    [90, "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=fixture errorLine=90 status=failed"],
+    [98, "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=fixture errorLine=98 status=failed"],
   ])("accepts bounded fixture line %i", (errorLine, expected) => {
     expect(formatPreviewTestDiagnostic({
       project: "desktop",
@@ -128,7 +157,7 @@ describe("preview safe test reporter", () => {
     ["external", 1],
     ["test", 0],
     ["fixture", 0],
-    ["fixture", 91],
+    ["fixture", 99],
     ["fixture", 1234567890123456],
   ])("rejects invalid %s and error line %i pairing", (errorSource, errorLine) => {
     expect(formatPreviewTestDiagnostic({
@@ -179,7 +208,7 @@ describe("preview safe test reporter", () => {
       safeLine,
       externalLine,
       "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=test errorLine=24 status=failed",
-      "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=fixture errorLine=90 status=failed",
+      "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=fixture errorLine=98 status=failed",
     ].join("\n");
 
     expect(parsePreviewTestDiagnostics(output)).toEqual(output.split("\n"));
@@ -193,7 +222,7 @@ describe("preview safe test reporter", () => {
     "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=test errorLine=0 status=failed",
     "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=fixture errorLine=0 status=failed",
     "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=test errorLine=25 status=failed",
-    "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=fixture errorLine=91 status=failed",
+    "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=fixture errorLine=99 status=failed",
     "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=fixture errorLine=1234567890123456 status=failed",
     "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=none errorLine=0 status=failed secret=access-token-fixture",
     "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=none errorLine=00 status=failed",
@@ -264,7 +293,7 @@ describe("preview safe test reporter", () => {
 
   it.each([
     [1, "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=fixture errorLine=1 status=failed\n"],
-    [90, "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=fixture errorLine=90 status=failed\n"],
+    [98, "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=5 errorSource=fixture errorLine=98 status=failed\n"],
   ])("emits bounded exact fixture error line %i", (errorLine, expected) => {
     const write = vi.fn();
     const reporter = new SafePreviewReporter({
@@ -371,7 +400,7 @@ describe("preview safe test reporter", () => {
   it.each([
     ["test maximum plus one", "/repo/tests/preview-e2e/access.spec.ts", 25],
     ["test 16-digit line", "/repo/tests/preview-e2e/access.spec.ts", 1234567890123456],
-    ["fixture maximum plus one", "/repo/tests/preview-e2e/fixtures.ts", 91],
+    ["fixture maximum plus one", "/repo/tests/preview-e2e/fixtures.ts", 99],
     ["fixture 16-digit line", "/repo/tests/preview-e2e/fixtures.ts", 1234567890123456],
   ])("suppresses an exact known source with an invalid %s", (_name, errorFile, errorLine) => {
     const write = vi.fn();

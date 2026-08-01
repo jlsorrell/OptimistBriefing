@@ -25,8 +25,9 @@ The runner binds a one-use HTTP callback server to `127.0.0.1` on an
 operating-system-assigned port. It dynamically registers that exact callback
 URI as a public OAuth client, creates random `state` and PKCE verifier values,
 and derives an S256 challenge. It then opens the authorization URL in the
-user's ordinary default browser. The callback accepts only the expected path,
-method, state, and one authorization response before closing.
+user’s ordinary default browser. The callback accepts only the expected path,
+method, exactly one matching `state`, exactly one nonempty authorization code,
+no OAuth error parameter, and one authorization response before closing.
 
 The authorization code is exchanged for Cloudflare's opaque access token.
 Authorization codes, PKCE values, access tokens, and refresh tokens remain in
@@ -51,6 +52,9 @@ directory remain unchanged.
 - Metadata, registration, authorization, token exchange, callback, or preview
   validation failures return a generic nonzero result without printing
   response bodies or secrets.
+- Discovery, registration, token, and health requests disable automatic
+  redirect following; every redirect response fails closed before another
+  request can carry OAuth or bearer credentials to a redirect target.
 - The callback listener closes on success, error, timeout, or signal.
 - State mismatch, duplicate callbacks, unexpected methods or paths, unsafe
   endpoint origins, and unsupported OAuth capabilities fail closed.
@@ -74,4 +78,3 @@ The `Optimist Briefing Preview` Access application has Managed OAuth enabled
 with loopback clients allowed for `127.0.0.1`. Localhost clients and additional
 redirect URI patterns remain disabled. No Google OAuth configuration, service
 token, copied cookies, automated MFA, or browser-profile access is used.
-

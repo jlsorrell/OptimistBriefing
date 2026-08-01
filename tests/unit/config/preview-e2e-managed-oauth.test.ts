@@ -199,16 +199,19 @@ function createAuthorizationDependencies(options: {
   token?: unknown;
   validatedHealth?: Response;
 } = {}): ManagedOAuthDependencies & {
+  seenRequests: SeenRequest[];
   registrationBodies: unknown[];
   tokenBodies: URLSearchParams[];
   authorizationURLs: URL[];
   stages: string[];
 } {
+  const seenRequests: SeenRequest[] = [];
   const registrationBodies: unknown[] = [];
   const tokenBodies: URLSearchParams[] = [];
   const authorizationURLs: URL[] = [];
   const stages: string[] = [];
   return {
+    seenRequests,
     registrationBodies,
     tokenBodies,
     authorizationURLs,
@@ -216,6 +219,8 @@ function createAuthorizationDependencies(options: {
     reportStage: (stage) => { stages.push(stage); },
     fetch: async (url, init) => {
       const requestURL = String(url);
+      if (init === undefined) seenRequests.push({ url: requestURL });
+      else seenRequests.push({ url: requestURL, init });
       if (requestURL === `${PREVIEW_ORIGIN}/health`) {
         if (new Headers(init?.headers).get("authorization") !== null) {
           return options.validatedHealth ?? jsonResponse({ status: "ok" });
@@ -321,7 +326,48 @@ describe("preview managed OAuth authorization", () => {
       "authenticated health validation",
       "authorization complete",
     ]);
+    expect(dependencies.seenRequests).toHaveLength(6);
+    expect(dependencies.seenRequests.every(({ init }) => init?.redirect === "manual")).toBe(true);
   });
+
+  it.each([301, 302, 303, 307, 308])(
+    "rejects a %i token redirect without following it",
+    async (status) => {
+      const dependencies = createAuthorizationDependencies({
+        callback: async (url) => {
+          await fetch(authorizationCallbackURL(url, {
+            state: url.searchParams.get("state")!,
+            code: "code-fixture",
+          }));
+        },
+      });
+      const baseFetch = dependencies.fetch!;
+      let followedRedirectRequests = 0;
+      dependencies.fetch = async (url, init) => {
+        if (String(url) !== `${ACCESS_TEAM_ORIGIN}/cdn-cgi/access/oauth/token`) {
+          return baseFetch(url, init);
+        }
+        if (init?.redirect !== "manual") {
+          followedRedirectRequests += 1;
+          return jsonResponse({ access_token: "redirected-token-fixture", token_type: "Bearer" });
+        }
+        return new Response(null, {
+          status,
+          headers: { location: "https://example.test/redirect-target" },
+        });
+      };
+
+      await expect(authorizePreviewWithManagedOAuth(
+        { baseURL: PREVIEW_ORIGIN },
+        dependencies,
+      )).rejects.toSatisfy((error: unknown) => expectGenericFailure(error, [
+        "example.test",
+        "redirected-token-fixture",
+      ]));
+      expect(followedRedirectRequests).toBe(0);
+      expect(dependencies.stages.at(-1)).toBe("token exchange");
+    },
+  );
 
   it.each([
     {
@@ -421,7 +467,29 @@ describe("preview managed OAuth authorization", () => {
     });
   }
 
-  it("exchanges only the first code when duplicate callbacks arrive", async () => {
+  it.each(["state", "code", "error"])(
+    "rejects a duplicated callback %s parameter",
+    async (parameter) => {
+      const dependencies = createAuthorizationDependencies({
+        callback: async (url) => {
+          const callback = new URL(authorizationCallbackURL(url, {
+            state: url.searchParams.get("state")!,
+            code: "code-fixture",
+          }));
+          callback.searchParams.append(parameter, "duplicate-fixture");
+          await fetch(callback);
+        },
+      });
+
+      await expect(authorizePreviewWithManagedOAuth(
+        { baseURL: PREVIEW_ORIGIN },
+        dependencies,
+      )).rejects.toSatisfy((error: unknown) => expectGenericFailure(error, ["duplicate-fixture"]));
+      expect(dependencies.tokenBodies).toHaveLength(0);
+    },
+  );
+
+  it("rejects duplicate callbacks before exchanging a code", async () => {
     const dependencies = createAuthorizationDependencies({
       callback: async (url) => {
         const callbackURL = authorizationCallbackURL(url, {
@@ -435,9 +503,8 @@ describe("preview managed OAuth authorization", () => {
     await expect(authorizePreviewWithManagedOAuth(
       { baseURL: PREVIEW_ORIGIN },
       dependencies,
-    )).resolves.toBe("access-token-fixture");
-    expect(dependencies.tokenBodies).toHaveLength(1);
-    expect(dependencies.tokenBodies[0]!.get("code")).toBe("code-fixture");
+    )).rejects.toSatisfy((error: unknown) => expectGenericFailure(error, ["code-fixture"]));
+    expect(dependencies.tokenBodies).toHaveLength(0);
   });
 
   it("rejects malformed registration, token, bearer type, and health validation responses generically", async () => {
