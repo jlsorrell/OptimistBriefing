@@ -507,6 +507,39 @@ describe("preview managed OAuth authorization", () => {
     expect(dependencies.tokenBodies).toHaveLength(0);
   });
 
+  it("closes the callback listener before releasing a code for token exchange", async () => {
+    const lifecycle: string[] = [];
+    const dependencies = createAuthorizationDependencies({
+      callback: async (url) => {
+        const callbackURL = authorizationCallbackURL(url, {
+          state: url.searchParams.get("state")!,
+          code: "code-fixture",
+        });
+        await fetch(callbackURL);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        try {
+          await fetch(callbackURL);
+          lifecycle.push("listener-reachable");
+        } catch {
+          lifecycle.push("listener-closed");
+        }
+      },
+    });
+    const baseFetch = dependencies.fetch!;
+    dependencies.fetch = async (url, init) => {
+      if (String(url) === `${ACCESS_TEAM_ORIGIN}/cdn-cgi/access/oauth/token`) {
+        lifecycle.push("token-exchange");
+      }
+      return baseFetch(url, init);
+    };
+
+    await expect(authorizePreviewWithManagedOAuth(
+      { baseURL: PREVIEW_ORIGIN },
+      dependencies,
+    )).resolves.toBe("access-token-fixture");
+    expect(lifecycle).toEqual(["listener-closed", "token-exchange"]);
+  });
+
   it("rejects malformed registration, token, bearer type, and health validation responses generically", async () => {
     const callback = async (url: URL) => {
       await fetch(authorizationCallbackURL(url, {

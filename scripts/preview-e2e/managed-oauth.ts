@@ -179,7 +179,6 @@ async function createLoopbackCallback(state: string, signal?: AbortSignal): Prom
   let settleCallback: ((result: { code?: string; error?: Error }) => void) | undefined;
   let completed = false;
   let callbackReceived = false;
-  let callbackSettlement: NodeJS.Timeout | undefined;
   const callback = new Promise<string>((resolve, reject) => {
     settleCallback = ({ code, error }) => {
       if (error !== undefined) reject(error);
@@ -191,10 +190,21 @@ async function createLoopbackCallback(state: string, signal?: AbortSignal): Prom
   const finish = (result: { code?: string; error?: Error }) => {
     if (completed) return;
     completed = true;
-    if (callbackSettlement !== undefined) clearTimeout(callbackSettlement);
     settleCallback?.(result);
   };
-  const server = createServer((request, response) => {
+  const server = createServer();
+  let closePromise: Promise<void> | undefined;
+  const closeServer = (): Promise<void> => {
+    closePromise ??= new Promise<void>((resolve) => {
+      if (!server.listening) {
+        resolve();
+        return;
+      }
+      server.close(() => resolve());
+    });
+    return closePromise;
+  };
+  server.on("request", (request, response) => {
     const requestURL = new URL(request.url ?? "", "http://127.0.0.1");
     if (completed || callbackReceived || request.method !== "GET" || requestURL.pathname !== "/callback") {
       response.statusCode = 400;
@@ -219,8 +229,9 @@ async function createLoopbackCallback(state: string, signal?: AbortSignal): Prom
     }
     callbackReceived = true;
     response.statusCode = 204;
+    response.once("finish", () => server.closeIdleConnections());
     response.end();
-    callbackSettlement = setTimeout(() => finish({ code: codes[0]! }), 25);
+    void closeServer().then(() => finish({ code: codes[0]! }));
   });
   const failServer = () => finish({ error: failure() });
   server.once("error", failServer);
@@ -242,15 +253,12 @@ async function createLoopbackCallback(state: string, signal?: AbortSignal): Prom
       callback,
       close: async () => {
         signal?.removeEventListener("abort", abort);
-        if (callbackSettlement !== undefined) clearTimeout(callbackSettlement);
-        await new Promise<void>((resolve) => {
-          server.close(() => resolve());
-        });
+        await closeServer();
       },
     };
   } catch {
     signal?.removeEventListener("abort", abort);
-    server.close();
+    await closeServer();
     throw failure();
   }
 }

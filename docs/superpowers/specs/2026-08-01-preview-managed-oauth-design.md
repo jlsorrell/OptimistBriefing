@@ -28,6 +28,10 @@ and derives an S256 challenge. It then opens the authorization URL in the
 user’s ordinary default browser. The callback accepts only the expected path,
 method, exactly one matching `state`, exactly one nonempty authorization code,
 no OAuth error parameter, and one authorization response before closing.
+After the first valid response, the listener stops accepting connections and
+drains already-accepted requests. The authorization code is released only
+after that listener shutdown completes; an already-accepted competing request
+rejects the authorization instead.
 
 The authorization code is exchanged for Cloudflare's opaque access token.
 Authorization codes, PKCE values, access tokens, and refresh tokens remain in
