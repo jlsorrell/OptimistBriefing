@@ -14,7 +14,6 @@ export default defineConfig({
   outputDir: join(runtime.tempDirectory, "test-results"),
   use: {
     baseURL: runtime.baseURL,
-    storageState: runtime.storageStatePath,
     trace: "off",
     screenshot: "off",
     video: "off",

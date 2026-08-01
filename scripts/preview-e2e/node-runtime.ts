@@ -1,21 +1,20 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { constants } from "node:fs";
-import { chmod, lstat, mkdtemp, open } from "node:fs/promises";
+import { chmod, mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 
-import { chromium } from "@playwright/test";
 
 import {
   PREVIEW_TEMP_PREFIX,
-  assertAuthenticationNavigation,
-  assertProtectedTemporaryDirectory,
   normalizeChildExitCode,
   resolvePreviewBaseURL,
   resolvePreviewRuntimeEnvironment,
-  resolvePreviewStorageStatePath,
 } from "./environment";
 import type { PreviewHarnessDependencies } from "./harness";
+import {
+  authorizePreviewWithManagedOAuth,
+  openPreviewAuthorizationURL,
+} from "./managed-oauth";
 import {
   capturePreviewTempDirectoryOwnership,
   registerPreviewExitCleanup,
@@ -28,41 +27,6 @@ export {
   removePreviewTempDirectory,
   removePreviewTempDirectorySync,
 };
-
-interface PreviewFrame {
-  url(): string;
-}
-
-interface PreviewPage {
-  on(event: "framenavigated", listener: (frame: PreviewFrame) => void): unknown;
-  off(event: "framenavigated", listener: (frame: PreviewFrame) => void): unknown;
-  mainFrame(): PreviewFrame;
-  goto(url: string, options: { waitUntil: "domcontentloaded" }): Promise<unknown>;
-  waitForURL(url: string, options: { timeout: number }): Promise<unknown>;
-  waitForFunction(
-    pageFunction: () => boolean,
-    arg: undefined,
-    options: { timeout: number },
-  ): Promise<unknown>;
-}
-
-interface PreviewContext {
-  newPage(): Promise<PreviewPage>;
-  storageState(): Promise<unknown>;
-}
-
-interface PreviewBrowser {
-  newContext(): Promise<PreviewContext>;
-  close(): Promise<void>;
-}
-
-interface PreviewChromium {
-  launch(options: {
-    channel: "chrome";
-    headless: boolean;
-    timeout: number;
-  }): Promise<PreviewBrowser>;
-}
 
 interface PreviewSuiteOptions {
   platform?: NodeJS.Platform;
@@ -78,267 +42,13 @@ interface PreviewSuiteOptions {
   terminationGraceMilliseconds?: number;
   terminationFallbackMilliseconds?: number;
 }
-
 const DEFAULT_TERMINATION_GRACE_MILLISECONDS = 2_000;
 const DEFAULT_TERMINATION_FALLBACK_MILLISECONDS = 2_000;
-const PREVIEW_BROWSER_LAUNCH_TIMEOUT_MILLISECONDS = 15_000;
 
 export async function createPreviewTempDirectory(): Promise<string> {
   const tempDirectory = await mkdtemp(join(tmpdir(), PREVIEW_TEMP_PREFIX));
   await chmod(tempDirectory, 0o700);
   return tempDirectory;
-}
-
-function isPlaywrightNavigationError(error: unknown): boolean {
-  return error instanceof Error && (
-    error.name === "TimeoutError" ||
-    /(?:navigation|timeout|timed out|net::err)/i.test(error.message)
-  );
-}
-
-async function resolveCaptureAccessStateInput(input: {
-  baseURL: string;
-  storageStatePath: string;
-}): Promise<{
-  baseURL: string;
-  tempDirectory: string;
-  tempDirectoryDevice: number;
-  tempDirectoryInode: number;
-  storageStatePath: string;
-}> {
-  const baseURL = resolvePreviewBaseURL(input.baseURL);
-  let tempDirectory: string;
-  let storageStatePath: string;
-  let tempDirectoryDevice: number;
-  let tempDirectoryInode: number;
-  try {
-    tempDirectory = assertProtectedTemporaryDirectory(
-      dirname(input.storageStatePath),
-    );
-    const metadata = await lstat(tempDirectory);
-    tempDirectoryDevice = metadata.dev;
-    tempDirectoryInode = metadata.ino;
-    storageStatePath = resolvePreviewStorageStatePath(
-      tempDirectory,
-      input.storageStatePath,
-    );
-  } catch {
-    throw new Error("Preview storage state must be the protected temporary file");
-  }
-  try {
-    await lstat(storageStatePath);
-  } catch (error) {
-    if (isFileSystemError(error, "ENOENT")) {
-      return {
-        baseURL,
-        tempDirectory,
-        tempDirectoryDevice,
-        tempDirectoryInode,
-        storageStatePath,
-      };
-    }
-    throw new Error("Preview storage state must be absent before authentication");
-  }
-  throw new Error("Preview storage state must be absent before authentication");
-}
-
-function isFileSystemError(error: unknown, code: string): boolean {
-  return error instanceof Error && "code" in error && error.code === code;
-}
-
-async function assertCaptureDirectoryIdentity(input: {
-  tempDirectory: string;
-  tempDirectoryDevice: number;
-  tempDirectoryInode: number;
-}): Promise<void> {
-  const candidate = assertProtectedTemporaryDirectory(input.tempDirectory);
-  const metadata = await lstat(candidate);
-  if (
-    metadata.dev !== input.tempDirectoryDevice ||
-    metadata.ino !== input.tempDirectoryInode
-  ) {
-    throw new Error("preview directory changed");
-  }
-}
-
-async function assertOpenStorageStateIdentity(
-  handle: Awaited<ReturnType<typeof open>>,
-  input: {
-    tempDirectory: string;
-    tempDirectoryDevice: number;
-    tempDirectoryInode: number;
-    storageStatePath: string;
-  },
-): Promise<void> {
-  await assertCaptureDirectoryIdentity(input);
-  const [descriptor, leaf] = await Promise.all([
-    handle.stat(),
-    lstat(input.storageStatePath),
-  ]);
-  if (
-    !descriptor.isFile() ||
-    descriptor.nlink !== 1 ||
-    (descriptor.mode & 0o777) !== 0o600 ||
-    leaf.isSymbolicLink() ||
-    !leaf.isFile() ||
-    leaf.nlink !== 1 ||
-    (leaf.mode & 0o777) !== 0o600 ||
-    leaf.dev !== descriptor.dev ||
-    leaf.ino !== descriptor.ino
-  ) {
-    throw new Error("unsafe storage state");
-  }
-}
-
-async function persistCapturedStorageState(
-  state: unknown,
-  input: {
-    tempDirectory: string;
-    tempDirectoryDevice: number;
-    tempDirectoryInode: number;
-    storageStatePath: string;
-  },
-): Promise<void> {
-  let serializedState: string;
-  try {
-    const serialized = JSON.stringify(state);
-    if (serialized === undefined) throw new Error("missing storage state");
-    serializedState = serialized;
-  } catch {
-    throw new Error("Preview storage state was not captured securely");
-  }
-  let handle: Awaited<ReturnType<typeof open>> | undefined;
-  let wroteState = false;
-  try {
-    await assertCaptureDirectoryIdentity(input);
-    handle = await open(
-      input.storageStatePath,
-      constants.O_WRONLY |
-        constants.O_CREAT |
-        constants.O_EXCL |
-        constants.O_NOFOLLOW,
-      0o600,
-    );
-    await handle.chmod(0o600);
-    await assertOpenStorageStateIdentity(handle, input);
-    await handle.writeFile(serializedState, { encoding: "utf8" });
-    wroteState = true;
-    await handle.sync();
-    await assertOpenStorageStateIdentity(handle, input);
-  } catch {
-    if (wroteState && handle !== undefined) {
-      try {
-        await handle.truncate(0);
-        await handle.sync();
-      } catch {
-        // Best-effort scrubbing still returns only the generic safe error.
-      }
-    }
-    throw new Error("Preview storage state was not captured securely");
-  } finally {
-    await handle?.close();
-  }
-}
-
-async function launchPreviewBrowser(
-  browserDriver: PreviewChromium,
-  signal: AbortSignal,
-): Promise<PreviewBrowser> {
-  if (signal.aborted) throw new Error("Preview harness terminated.");
-  let browser: PreviewBrowser;
-  try {
-    // Playwright owns launch-process cleanup at this deadline, so shutdown can
-    // join the real launch instead of abandoning it behind a separate timer.
-    browser = await browserDriver.launch({
-      channel: "chrome",
-      headless: false,
-      timeout: PREVIEW_BROWSER_LAUNCH_TIMEOUT_MILLISECONDS,
-    });
-  } catch {
-    if (signal.aborted) throw new Error("Preview harness terminated.");
-    throw new Error(
-      "Preview authentication browser could not start; install stable Google Chrome and retry.",
-    );
-  }
-  if (!signal.aborted) return browser;
-  await browser.close().catch(() => undefined);
-  throw new Error("Preview harness terminated.");
-}
-
-export async function capturePreviewAccessState(
-  input: { baseURL: string; storageStatePath: string },
-  browserDriver: PreviewChromium = chromium,
-  signal: AbortSignal = new AbortController().signal,
-): Promise<void> {
-  const captureInput = await resolveCaptureAccessStateInput(input);
-  const { baseURL } = captureInput;
-  const browser = await launchPreviewBrowser(browserDriver, signal);
-  let closePromise: Promise<void> | undefined;
-  const closeBrowser = () => {
-    closePromise ??= browser.close();
-    return closePromise;
-  };
-  let rejectAbort: (error: Error) => void = () => undefined;
-  const aborted = new Promise<never>((_resolve, reject) => {
-    rejectAbort = reject;
-  });
-  const abortListener = () => {
-    void closeBrowser().catch(() => undefined);
-    rejectAbort(new Error("Preview harness terminated."));
-  };
-  signal.addEventListener("abort", abortListener, { once: true });
-  let authentication: Promise<void> | undefined;
-  try {
-    authentication = (async () => {
-      const context = await browser.newContext();
-      const page = await context.newPage();
-      let rejectUnexpectedNavigation: (reason: unknown) => void = () => undefined;
-      const unexpectedNavigation = new Promise<never>((_resolve, reject) => {
-        rejectUnexpectedNavigation = reject;
-      });
-      const navigationListener = (frame: PreviewFrame) => {
-        if (frame !== page.mainFrame()) return;
-        try {
-          assertAuthenticationNavigation(frame.url());
-        } catch (error) {
-          rejectUnexpectedNavigation(error);
-        }
-      };
-      page.on("framenavigated", navigationListener);
-      try {
-        await Promise.race([
-          unexpectedNavigation,
-          (async () => {
-            await page.goto(`${baseURL}/health`, { waitUntil: "domcontentloaded" });
-            await page.waitForURL(`${baseURL}/health`, { timeout: 300_000 });
-            await page.waitForFunction(
-              () => document.body.textContent?.trim() === '{"status":"ok"}',
-              undefined,
-              { timeout: 300_000 },
-            );
-            const storageState = await context.storageState();
-            await persistCapturedStorageState(storageState, captureInput);
-          })(),
-        ]);
-      } finally {
-        page.off("framenavigated", navigationListener);
-      }
-    })();
-    if (signal.aborted) abortListener();
-    try {
-      await Promise.race([authentication, aborted]);
-    } catch (error) {
-      if (signal.aborted) throw new Error("Preview harness terminated.");
-      if (isPlaywrightNavigationError(error)) {
-        throw new Error("Preview authentication did not complete; retry the command.");
-      }
-      throw error;
-    }
-  } finally {
-    signal.removeEventListener("abort", abortListener);
-    await closeBrowser();
-    if (signal.aborted) await authentication?.catch(() => undefined);
-  }
 }
 
 export function createPreviewSignalHandler(
@@ -486,8 +196,12 @@ export function createNodePreviewHarnessDependencies(): PreviewHarnessDependenci
     removeTempDirectorySync: removePreviewTempDirectorySync,
     registerExitCleanup: registerPreviewExitCleanup,
     registerSignalCleanup: registerPreviewSignalCleanup,
-    captureAccessState: (input, signal) =>
-      capturePreviewAccessState(input, chromium, signal),
+    authorizePreview: (input, signal) =>
+      authorizePreviewWithManagedOAuth(
+        input,
+        { openAuthorizationURL: openPreviewAuthorizationURL },
+        signal,
+      ),
     runPreviewSuite,
   };
 }

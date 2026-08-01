@@ -1,4 +1,6 @@
-import { expect, test, type Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
+
+import { expect, getPreviewJSON, test } from "./fixtures";
 
 const sectionHeadings = ["Research", "World", "AI policy", "DMV", "Baltimore"] as const;
 const sourceHosts = [
@@ -18,7 +20,7 @@ test("shows the fixed edition and leaves run state unchanged", async ({ page }) 
   const sources = await readArray(page, "/api/sources");
   expect(sources.length).toBeGreaterThan(0);
 
-  const editionResponse = await page.context().request.get("/api/edition/latest");
+  const editionResponse = await getPreviewJSON(page, "/api/edition/latest");
   expect(editionResponse.status()).toBe(200);
   await expect(editionResponse.json()).resolves.toMatchObject({
     editionDate: "2026-07-29",
@@ -54,7 +56,7 @@ test("shows the fixed edition and leaves run state unchanged", async ({ page }) 
 });
 
 async function readArray(page: Page, path: string) {
-  const response = await page.context().request.get(path);
+  const response = await getPreviewJSON(page, path);
   expect(response.status()).toBe(200);
   const body: unknown = await response.json();
   expect(Array.isArray(body)).toBe(true);

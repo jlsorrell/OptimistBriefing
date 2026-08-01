@@ -1,4 +1,6 @@
-import { expect, request, test } from "@playwright/test";
+import { request } from "@playwright/test";
+
+import { expect, test } from "./fixtures";
 
 test("signed-out health requests are challenged by Access", async ({ baseURL }, testInfo) => {
   test.skip(testInfo.project.name !== "desktop", "Access boundary is viewport-independent");
@@ -6,11 +8,9 @@ test("signed-out health requests are challenged by Access", async ({ baseURL }, 
   const anonymous = await request.newContext({ baseURL });
   try {
     const response = await anonymous.get("/health", { maxRedirects: 0 });
-    expect(response.status()).toBe(302);
-    const location = response.headers().location;
-    expect(location).toBeDefined();
-    expect(new URL(location ?? "", baseURL).hostname).toBe(
-      "optimistindustries.cloudflareaccess.com",
+    expect(response.status()).toBe(401);
+    expect(response.headers()["www-authenticate"]).toContain(
+      `${baseURL}/.well-known/cloudflare-access-protected-resource/health`,
     );
   } finally {
     await anonymous.dispose();

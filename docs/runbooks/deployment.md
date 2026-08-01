@@ -256,63 +256,13 @@ npx wrangler deploy --config "$OPTIMIST_PREVIEW_CONFIG" --keep-vars
 `OPTIMIST_PREVIEW_CONFIG` must be an already-reviewed absolute path, not a
 literal placeholder. Do not attach `optimistindustries.com` during preview.
 
-With an allowed Google session:
-
-1. open `/health` and verify the body is exactly `{"status":"ok"}`;
-2. verify a signed-out request is challenged by Access;
-3. record that the separate real nonallowed Google-account check is unavailable
-   and remains a production blocker; do not mark it verified;
-4. verify the allowed account can view the fixture edition and source links;
-5. inspect Today, Archive, Preferences, Run Status, desktop, and mobile;
-6. inspect `GET /api/sources`, `GET /api/runs`, and the relevant run detail.
-
-The local `npm run test:e2e` suite cannot target preview: it hard-codes the
-local integration server and uses a locally signed assertion that Cloudflare
-Access will not accept. Do not claim that it tested preview. To rehearse the
-Access-protected preview, run:
-
-```sh
-npm run test:e2e:preview
-```
-
-The command opens headed Chromium for the allowed user to complete Google
-authentication. It does not start the preview suite until `/health` returns
-exactly `{"status":"ok"}`, then closes the authentication browser and runs the
-desktop, tablet, and mobile projects. The harness accepts only the preview,
-Cloudflare Access, and Google authentication origins.
-
-Authentication state and Playwright output live only in a uniquely named
-directory directly under Node's `os.tmpdir()`: the directory is mode `0700` and
-its `storage-state.json` is mode `0600`. The harness removes that exact
-directory after success or failure. On `SIGINT`/`SIGTERM`, it first terminates
-and awaits the active authentication browser or Playwright child, then removes
-state and relays the first signal. It rejects broad, unrelated, or symlinked
-cleanup targets. Failed suite details are suppressed in favor of a generic
-retry message so expired Access or Google pages cannot reach terminal output.
-Playwright trace, screenshot, and video artifacts are disabled, and all preview
-tests are read-only: they make only GET/navigation requests and verify that run
-state is unchanged. To list any unexpected leftovers portably, use Node's
-actual temporary directory:
-
-```sh
-node --input-type=module -e 'import { readdirSync } from "node:fs"; import { tmpdir } from "node:os"; console.log(readdirSync(tmpdir()).filter((name) => name.startsWith("optimist-preview-e2e-")).join("\\n"));'
-```
-
-Retain this required secret-free evidence with the rehearsal record:
-
-- the total test count and the `desktop`, `tablet`, and `mobile` project names;
-- the preview command's numeric exit status;
-- the deployed preview Worker version;
-- the allowed-session and signed-out Access-policy results, while marking the
-  real nonallowed-account result unresolved;
-- the Workflow instance count before and after the rehearsal; and
-- the D1 migration status after the rehearsal.
-
-Do not commit Google credentials, cookies, tokens, storage state, or test
-artifacts. The signed-out Access challenge and allowed Google session are
-covered by the harness, but a real nonallowed Google account has not been
-tested. That unresolved nonallowed-account test continues to block production
-approval even if the preview rehearsal passes.
+The local `npm run test:e2e` suite cannot target preview: it uses the local
+integration server and a locally signed assertion that Cloudflare Access will
+not accept. Follow the separate
+[Access-protected preview rehearsal](./preview-rehearsal.md) for the Managed
+OAuth command, ordinary-browser handoff, exact-origin bearer boundary,
+secret-free evidence, cleanup behavior, and unresolved nonallowed-account
+production blocker.
 
 There is no draft-only live-source endpoint. `POST /api/admin/runs` can incur
 model cost and may publish when coverage passes. A live-source preview run

@@ -1,5 +1,3 @@
-import { join } from "node:path";
-
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -15,6 +13,7 @@ const ownedTempDirectory = {
   mode: 0o40700,
 };
 const baseURL = "https://optimist-briefing-preview.optimistindustries.workers.dev";
+const accessToken = "synthetic-preview-token-1234";
 
 function createDependencies(
 ): PreviewHarnessDependencies & {
@@ -23,7 +22,7 @@ function createDependencies(
   removeTempDirectorySync: ReturnType<typeof vi.fn>;
   registerExitCleanup: ReturnType<typeof vi.fn>;
   registerSignalCleanup: ReturnType<typeof vi.fn>;
-  captureAccessState: ReturnType<typeof vi.fn>;
+  authorizePreview: ReturnType<typeof vi.fn>;
   runPreviewSuite: ReturnType<typeof vi.fn>;
 } {
   return {
@@ -32,28 +31,36 @@ function createDependencies(
     removeTempDirectorySync: vi.fn((_tempDirectory: typeof ownedTempDirectory) => undefined),
     registerExitCleanup: vi.fn().mockReturnValue(vi.fn()),
     registerSignalCleanup: vi.fn().mockReturnValue(vi.fn()),
-    captureAccessState: vi.fn().mockResolvedValue(undefined),
+    authorizePreview: vi.fn().mockResolvedValue(accessToken),
     runPreviewSuite: vi.fn().mockResolvedValue(0),
   };
 }
 
 describe("preview E2E harness", () => {
-  it("authenticates before running Playwright and cleans the temporary directory once", async () => {
+  it("passes the in-memory token only to the child after authorization and cleans once", async () => {
     const deps = createDependencies();
+    const parentEnvironment = {
+      INHERITED: "value",
+      OPTIMIST_PREVIEW_STORAGE_STATE: "/tmp/stale-storage-state.json",
+    };
 
-    await expect(runPreviewHarness({}, deps)).resolves.toBe(0);
+    await expect(runPreviewHarness(parentEnvironment, deps)).resolves.toBe(0);
 
-    expect(deps.captureAccessState).toHaveBeenCalledWith({
+    expect(deps.authorizePreview).toHaveBeenCalledWith({
       baseURL: "https://optimist-briefing-preview.optimistindustries.workers.dev",
-      storageStatePath: join(tempDirectory, "storage-state.json"),
     }, expect.any(AbortSignal));
     expect(deps.runPreviewSuite).toHaveBeenCalledWith({
+      INHERITED: "value",
       OPTIMIST_PREVIEW_BASE_URL: baseURL,
       OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
-      OPTIMIST_PREVIEW_STORAGE_STATE: join(tempDirectory, "storage-state.json"),
+      OPTIMIST_PREVIEW_ACCESS_TOKEN: accessToken,
     }, expect.any(AbortSignal));
+    expect(parentEnvironment).toEqual({
+      INHERITED: "value",
+      OPTIMIST_PREVIEW_STORAGE_STATE: "/tmp/stale-storage-state.json",
+    });
     expect(deps.removeTempDirectory).toHaveBeenCalledOnce();
-    expect(deps.captureAccessState.mock.invocationCallOrder[0]!).toBeLessThan(
+    expect(deps.authorizePreview.mock.invocationCallOrder[0]!).toBeLessThan(
       deps.runPreviewSuite.mock.invocationCallOrder[0]!,
     );
     expect(deps.runPreviewSuite.mock.invocationCallOrder[0]!).toBeLessThan(
@@ -68,7 +75,7 @@ describe("preview E2E harness", () => {
       deps.registerExitCleanup.mock.invocationCallOrder[0]!,
     );
     expect(deps.registerExitCleanup.mock.invocationCallOrder[0]!).toBeLessThan(
-      deps.captureAccessState.mock.invocationCallOrder[0]!,
+      deps.authorizePreview.mock.invocationCallOrder[0]!,
     );
     const unregisterExitCleanup = deps.registerExitCleanup.mock.results[0]
       ?.value as ReturnType<typeof vi.fn>;
@@ -79,10 +86,38 @@ describe("preview E2E harness", () => {
 
   it("skips Playwright after authentication fails and still cleans once", async () => {
     const deps = createDependencies();
-    deps.captureAccessState.mockRejectedValue(new Error("authentication failed"));
+    deps.authorizePreview.mockRejectedValue(new Error("authentication failed"));
 
     await expect(runPreviewHarness({}, deps)).rejects.toThrow("authentication failed");
 
+    expect(deps.runPreviewSuite).not.toHaveBeenCalled();
+    expect(deps.removeTempDirectory).toHaveBeenCalledOnce();
+  });
+
+  it("aborts and awaits authorization before cleaning", async () => {
+    const deps = createDependencies();
+    let signalCleanup: ((signal: NodeJS.Signals) => Promise<void>) | undefined;
+    let rejectAuthorization: ((error: Error) => void) | undefined;
+    let activeSignal: AbortSignal | undefined;
+    deps.registerSignalCleanup.mockImplementation((cleanup) => {
+      signalCleanup = cleanup as unknown as (signal: NodeJS.Signals) => Promise<void>;
+      return vi.fn();
+    });
+    deps.authorizePreview.mockImplementation((_input, signal) => new Promise<string>((_resolve, reject) => {
+      activeSignal = signal;
+      rejectAuthorization = reject;
+    }));
+
+    const running = runPreviewHarness({}, deps);
+    await vi.waitFor(() => expect(deps.authorizePreview).toHaveBeenCalledOnce());
+    const signalHandling = signalCleanup!("SIGINT");
+    await Promise.resolve();
+    expect(deps.removeTempDirectory).not.toHaveBeenCalled();
+    expect(activeSignal?.aborted).toBe(true);
+    rejectAuthorization!(new Error("authorization aborted"));
+
+    await expect(signalHandling).resolves.toBeUndefined();
+    await expect(running).resolves.toBe(1);
     expect(deps.runPreviewSuite).not.toHaveBeenCalled();
     expect(deps.removeTempDirectory).toHaveBeenCalledOnce();
   });
@@ -171,7 +206,7 @@ describe("preview E2E harness", () => {
 
     await expect(signalHandling).resolves.toBeUndefined();
     await expect(running).resolves.toBe(1);
-    expect(deps.captureAccessState).not.toHaveBeenCalled();
+    expect(deps.authorizePreview).not.toHaveBeenCalled();
     expect(deps.removeTempDirectory).toHaveBeenCalledOnce();
     expect(deps.registerExitCleanup).toHaveBeenCalledWith(ownedTempDirectory);
   });
@@ -197,7 +232,7 @@ describe("preview E2E harness", () => {
     await expect(runPreviewHarness({}, deps)).rejects.toThrow();
 
     expect(deps.removeTempDirectorySync).toHaveBeenCalledWith(ownedTempDirectory);
-    expect(deps.captureAccessState).not.toHaveBeenCalled();
+    expect(deps.authorizePreview).not.toHaveBeenCalled();
     expect(deps.runPreviewSuite).not.toHaveBeenCalled();
   });
 });

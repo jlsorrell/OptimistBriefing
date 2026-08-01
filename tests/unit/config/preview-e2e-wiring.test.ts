@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -45,15 +45,14 @@ describe("preview E2E wiring", () => {
     const tempDirectory = await mkdtemp(join(tmpdir(), PREVIEW_TEMP_PREFIX));
     temporaryPaths.push(tempDirectory);
     await chmod(tempDirectory, 0o700);
-    const storageStatePath = join(tempDirectory, "storage-state.json");
-    await writeFile(storageStatePath, "{}", { mode: 0o600 });
-    await chmod(storageStatePath, 0o600);
     vi.stubEnv("OPTIMIST_PREVIEW_BASE_URL", PREVIEW_ORIGIN);
     vi.stubEnv("OPTIMIST_PREVIEW_TEMP_DIR", tempDirectory);
-    vi.stubEnv("OPTIMIST_PREVIEW_STORAGE_STATE", storageStatePath);
+    vi.stubEnv("OPTIMIST_PREVIEW_ACCESS_TOKEN", "synthetic-preview-token-1234");
 
     const previewConfig = (await import("../../../playwright.preview.config")).default;
 
     expect(previewConfig.workers).toBe(1);
+    expect(previewConfig.use).not.toHaveProperty("storageState");
+    expect(previewConfig.use).not.toHaveProperty("extraHTTPHeaders");
   });
 });

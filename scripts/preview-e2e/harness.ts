@@ -1,5 +1,3 @@
-import { join } from "node:path";
-
 import { resolvePreviewBaseURL } from "./environment";
 import type { PreviewTempDirectoryOwnership } from "./temp-cleanup";
 
@@ -12,10 +10,7 @@ export interface PreviewHarnessDependencies {
     cleanup: (signal: NodeJS.Signals) => Promise<void>,
     fallbackCleanup: () => void,
   ): () => void;
-  captureAccessState(input: {
-    baseURL: string;
-    storageStatePath: string;
-  }, signal: AbortSignal): Promise<void>;
+  authorizePreview(input: { baseURL: string }, signal: AbortSignal): Promise<string>;
   runPreviewSuite(env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<number>;
 }
 
@@ -25,6 +20,7 @@ export async function runPreviewHarness(
 ): Promise<number> {
   const baseURL = resolvePreviewBaseURL(env.OPTIMIST_PREVIEW_BASE_URL);
   let tempDirectory: PreviewTempDirectoryOwnership | undefined;
+  let accessToken: string | undefined;
   let cleanupPromise: Promise<void> | undefined;
   let unregisterExitCleanup: (() => void) | undefined;
   const cleanup = () => {
@@ -82,25 +78,31 @@ export async function runPreviewHarness(
     await activeOperation;
     if (receivedSignal !== undefined) return 1;
     if (tempDirectory === undefined) throw new Error("Preview temporary directory was not created");
-    const storageStatePath = join(tempDirectory.path, "storage-state.json");
-    activeOperation = dependencies.captureAccessState(
-      { baseURL, storageStatePath },
+    const authorizationOperation = dependencies.authorizePreview(
+      { baseURL },
       abortController.signal,
     );
-    await activeOperation;
+    activeOperation = authorizationOperation;
+    accessToken = await authorizationOperation;
     if (receivedSignal !== undefined) return 1;
-    const suiteOperation = dependencies.runPreviewSuite({
+    const suiteEnvironment: NodeJS.ProcessEnv = {
       ...env,
       OPTIMIST_PREVIEW_BASE_URL: baseURL,
       OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory.path,
-      OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
-    }, abortController.signal);
+      OPTIMIST_PREVIEW_ACCESS_TOKEN: accessToken,
+    };
+    delete suiteEnvironment.OPTIMIST_PREVIEW_STORAGE_STATE;
+    const suiteOperation = dependencies.runPreviewSuite(
+      suiteEnvironment,
+      abortController.signal,
+    );
     activeOperation = suiteOperation;
     return await suiteOperation;
   } catch (error) {
     if (receivedSignal !== undefined) return 1;
     throw error;
   } finally {
+    accessToken = undefined;
     try {
       await cleanup();
     } finally {

@@ -1,4 +1,4 @@
-import { chmod, link, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -6,25 +6,19 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   PREVIEW_ORIGIN,
   PREVIEW_TEMP_PREFIX,
-  assertAuthenticationNavigation,
   normalizeChildExitCode,
+  resolvePreviewAccessToken,
   resolvePreviewBaseURL,
   resolvePreviewRuntimeEnvironment,
 } from "../../../scripts/preview-e2e/environment";
 
 const temporaryPaths: string[] = [];
 
-async function createProtectedRuntimeState(): Promise<{
-  tempDirectory: string;
-  storageStatePath: string;
-}> {
+async function createProtectedRuntimeDirectory(): Promise<string> {
   const tempDirectory = await mkdtemp(join(tmpdir(), PREVIEW_TEMP_PREFIX));
   temporaryPaths.push(tempDirectory);
   await chmod(tempDirectory, 0o700);
-  const storageStatePath = join(tempDirectory, "storage-state.json");
-  await writeFile(storageStatePath, "{}", { mode: 0o600 });
-  await chmod(storageStatePath, 0o600);
-  return { tempDirectory, storageStatePath };
+  return tempDirectory;
 }
 
 afterEach(async () => {
@@ -58,87 +52,44 @@ describe("preview E2E environment", () => {
     );
   });
 
-  it("allows only the preview, Access team, and Google account origins during login", () => {
-    expect(() => assertAuthenticationNavigation("about:blank")).not.toThrow();
-    expect(() => assertAuthenticationNavigation(`${PREVIEW_ORIGIN}/health`)).not.toThrow();
-    expect(() => assertAuthenticationNavigation("https://optimistindustries.cloudflareaccess.com/cdn-cgi/access/login/example")).not.toThrow();
-    expect(() => assertAuthenticationNavigation("https://accounts.google.com/v3/signin/accountchooser")).not.toThrow();
-    expect(() => assertAuthenticationNavigation("https://example.com/login")).toThrow(
-      "Authentication left the approved origins",
-    );
-  });
-
-  it("requires a real protected directory and exact protected storage-state file", async () => {
-    const { tempDirectory, storageStatePath } = await createProtectedRuntimeState();
+  it("requires the canonical origin, protected directory, and printable access token", async () => {
+    const tempDirectory = await createProtectedRuntimeDirectory();
+    const accessToken = "synthetic-preview-token-1234";
     expect(resolvePreviewRuntimeEnvironment({
       OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
       OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
-      OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
-    })).toEqual({ baseURL: PREVIEW_ORIGIN, tempDirectory, storageStatePath });
-    expect(() => resolvePreviewRuntimeEnvironment({
-      OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
-      OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
-      OPTIMIST_PREVIEW_STORAGE_STATE: join(tempDirectory, "..", "state.json"),
-    })).toThrow("Preview storage state must be the protected temporary file");
+      OPTIMIST_PREVIEW_ACCESS_TOKEN: accessToken,
+    })).toEqual({ baseURL: PREVIEW_ORIGIN, tempDirectory, accessToken });
   });
 
-  it("rejects a missing, non-regular, or non-0600 storage-state leaf", async () => {
-    const { tempDirectory, storageStatePath } = await createProtectedRuntimeState();
-    await chmod(storageStatePath, 0o644);
-    expect(() => resolvePreviewRuntimeEnvironment({
-      OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
-      OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
-      OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
-    })).toThrow("Preview storage state must be the protected temporary file");
-
-    await rm(storageStatePath);
-    expect(() => resolvePreviewRuntimeEnvironment({
-      OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
-      OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
-      OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
-    })).toThrow("Preview storage state must be the protected temporary file");
-
-    await symlink(tempDirectory, storageStatePath);
-    expect(() => resolvePreviewRuntimeEnvironment({
-      OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
-      OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
-      OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
-    })).toThrow("Preview storage state must be the protected temporary file");
+  it("accepts both access-token length boundaries", () => {
+    expect(resolvePreviewAccessToken("!".repeat(16))).toBe("!".repeat(16));
+    expect(resolvePreviewAccessToken("~".repeat(4096))).toBe("~".repeat(4096));
   });
 
-  it("rejects a storage-state file with another hard link", async () => {
-    const { tempDirectory, storageStatePath } = await createProtectedRuntimeState();
-    const outsideDirectory = await mkdtemp(join(tmpdir(), "preview-runtime-hardlink-"));
-    temporaryPaths.push(outsideDirectory);
-    await link(storageStatePath, join(outsideDirectory, "linked-state.json"));
-
-    expect(() => resolvePreviewRuntimeEnvironment({
-      OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
-      OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
-      OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
-    })).toThrow("Preview storage state must be the protected temporary file");
-  });
-
-  it("rejects a symlinked or non-0700 runtime directory", async () => {
-    const { tempDirectory, storageStatePath } = await createProtectedRuntimeState();
-    await chmod(tempDirectory, 0o755);
-    expect(() => resolvePreviewRuntimeEnvironment({
-      OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
-      OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
-      OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
-    })).toThrow("Preview storage state must be the protected temporary file");
-
-    const targetDirectory = await mkdtemp(join(tmpdir(), "preview-runtime-target-"));
-    const linkedDirectory = join(tmpdir(), `${PREVIEW_TEMP_PREFIX}runtime-link-${Date.now()}`);
-    temporaryPaths.push(linkedDirectory, targetDirectory);
-    await chmod(targetDirectory, 0o700);
-    await writeFile(join(targetDirectory, "storage-state.json"), "{}", { mode: 0o600 });
-    await symlink(targetDirectory, linkedDirectory);
-    expect(() => resolvePreviewRuntimeEnvironment({
-      OPTIMIST_PREVIEW_BASE_URL: PREVIEW_ORIGIN,
-      OPTIMIST_PREVIEW_TEMP_DIR: linkedDirectory,
-      OPTIMIST_PREVIEW_STORAGE_STATE: join(linkedDirectory, "storage-state.json"),
-    })).toThrow("Preview storage state must be the protected temporary file");
+  it.each([
+    ["missing", undefined],
+    ["empty", ""],
+    ["too short", "short-token"],
+    ["space-bearing", "synthetic preview token"],
+    ["tab-bearing", "synthetic\tpreview-token"],
+    ["newline-bearing", "synthetic-preview\ntoken"],
+    ["carriage-return-bearing", "synthetic-preview\rtoken"],
+    ["non-ASCII", "synthetic-preview-tokén"],
+    ["implausibly long", "x".repeat(4097)],
+  ])("rejects a %s token with one generic error and no value echo", (_name, value) => {
+    let error: unknown;
+    try {
+      resolvePreviewAccessToken(value);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toEqual(new Error("Preview access token is invalid"));
+    if (value === undefined) {
+      expect(String(error)).not.toContain("undefined");
+    } else if (value.length > 0) {
+      expect(String(error)).not.toContain(value);
+    }
   });
 
   it("preserves child exit codes and maps signals to failure", () => {

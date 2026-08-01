@@ -1,7 +1,7 @@
 import { spawn as spawnChild } from "node:child_process";
 import { EventEmitter, once } from "node:events";
 import { lstatSync } from "node:fs";
-import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
@@ -11,7 +11,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { PREVIEW_TEMP_PREFIX } from "../../../scripts/preview-e2e/environment";
 import {
-  capturePreviewAccessState,
+  authorizePreviewWithManagedOAuth,
+  openPreviewAuthorizationURL,
+} from "../../../scripts/preview-e2e/managed-oauth";
+import {
+  createNodePreviewHarnessDependencies,
   createPreviewSignalHandler,
   createPreviewTempDirectory,
   previewNpxExecutable,
@@ -20,6 +24,11 @@ import {
   removePreviewTempDirectorySync,
   runPreviewSuite,
 } from "../../../scripts/preview-e2e/node-runtime";
+
+vi.mock("../../../scripts/preview-e2e/managed-oauth", () => ({
+  authorizePreviewWithManagedOAuth: vi.fn(),
+  openPreviewAuthorizationURL: vi.fn(),
+}));
 
 const baseURL = "https://optimist-briefing-preview.optimistindustries.workers.dev";
 const temporaryParents: string[] = [];
@@ -33,13 +42,10 @@ async function createTemporaryParent(): Promise<string> {
 async function createProtectedSuiteEnvironment(): Promise<NodeJS.ProcessEnv> {
   const tempDirectory = await createPreviewTempDirectory();
   temporaryParents.push(tempDirectory);
-  const storageStatePath = join(tempDirectory, "storage-state.json");
-  await writeFile(storageStatePath, "{}", { mode: 0o600 });
-  await chmod(storageStatePath, 0o600);
   return {
     OPTIMIST_PREVIEW_BASE_URL: baseURL,
     OPTIMIST_PREVIEW_TEMP_DIR: tempDirectory,
-    OPTIMIST_PREVIEW_STORAGE_STATE: storageStatePath,
+    OPTIMIST_PREVIEW_ACCESS_TOKEN: "synthetic-preview-token-1234",
   };
 }
 
@@ -74,492 +80,19 @@ describe("preview E2E Node runtime", () => {
     expect((await stat(directory)).mode & 0o777).toBe(0o700);
   });
 
-  it("writes protected storage state with mode 0600", async () => {
-    const tempDirectory = await createPreviewTempDirectory();
-    temporaryParents.push(tempDirectory);
-    const storageStatePath = join(tempDirectory, "storage-state.json");
-    const frame = {};
-    const page = {
-      on: vi.fn(),
-      off: vi.fn(),
-      mainFrame: vi.fn(() => frame),
-      goto: vi.fn().mockResolvedValue(null),
-      waitForURL: vi.fn().mockResolvedValue(null),
-      waitForFunction: vi.fn().mockResolvedValue(null),
-    };
-    const context = {
-      newPage: vi.fn().mockResolvedValue(page),
-      storageState: vi.fn().mockResolvedValue({}),
-    };
-    const browser = {
-      newContext: vi.fn().mockResolvedValue(context),
-      close: vi.fn().mockResolvedValue(undefined),
-    };
+  it("authorizes through Managed OAuth with the ordinary-browser launcher", async () => {
+    const signal = new AbortController().signal;
+    vi.mocked(authorizePreviewWithManagedOAuth).mockResolvedValue("synthetic-preview-token-1234");
+    const dependencies = createNodePreviewHarnessDependencies();
 
-    const launch = vi.fn().mockResolvedValue(browser);
-
-    await capturePreviewAccessState(
-      { baseURL, storageStatePath },
-      { launch },
+    await expect(dependencies.authorizePreview({ baseURL }, signal)).resolves.toBe(
+      "synthetic-preview-token-1234",
     );
-
-    expect(launch).toHaveBeenCalledWith({
-      channel: "chrome",
-      headless: false,
-      timeout: 15_000,
-    });
-    const metadata = await lstat(storageStatePath);
-    expect(metadata.isSymbolicLink()).toBe(false);
-    expect(metadata.isFile()).toBe(true);
-    expect(metadata.mode & 0o777).toBe(0o600);
-    await expect(readFile(storageStatePath, "utf8")).resolves.toBe("{}");
-  });
-
-  it("captures state in memory before creating a single-link protected leaf", async () => {
-    const tempDirectory = await createPreviewTempDirectory();
-    temporaryParents.push(tempDirectory);
-    const storageStatePath = join(tempDirectory, "storage-state.json");
-    const outsideDirectory = await createTemporaryParent();
-    const outsideLink = join(outsideDirectory, "leaked-state.json");
-    const capturedState = { cookies: [], origins: [] };
-    const frame = {};
-    const page = {
-      on: vi.fn(),
-      off: vi.fn(),
-      mainFrame: vi.fn(() => frame),
-      goto: vi.fn().mockResolvedValue(null),
-      waitForURL: vi.fn().mockResolvedValue(null),
-      waitForFunction: vi.fn().mockResolvedValue(null),
-    };
-    const context = {
-      newPage: vi.fn().mockResolvedValue(page),
-      storageState: vi.fn(async (options?: { path: string }) => {
-        if (options !== undefined) {
-          await writeFile(options.path, JSON.stringify(capturedState), { mode: 0o600 });
-          await link(options.path, outsideLink);
-        }
-        return capturedState;
-      }),
-    };
-    const browser = {
-      newContext: vi.fn().mockResolvedValue(context),
-      close: vi.fn().mockResolvedValue(undefined),
-    };
-
-    await capturePreviewAccessState(
-      { baseURL, storageStatePath },
-      { launch: vi.fn().mockResolvedValue(browser) },
+    expect(authorizePreviewWithManagedOAuth).toHaveBeenCalledWith(
+      { baseURL },
+      { openAuthorizationURL: openPreviewAuthorizationURL },
+      signal,
     );
-
-    const metadata = await lstat(storageStatePath);
-    expect(metadata.nlink).toBe(1);
-    await expect(stat(outsideLink)).rejects.toMatchObject({ code: "ENOENT" });
-    await expect(readFile(storageStatePath, "utf8")).resolves.toBe(
-      JSON.stringify(capturedState),
-    );
-  });
-
-  it("does not write state after the protected parent is replaced", async () => {
-    const tempDirectory = await createPreviewTempDirectory();
-    temporaryParents.push(tempDirectory);
-    const storageStatePath = join(tempDirectory, "storage-state.json");
-    const movedDirectory = `${tempDirectory}-moved`;
-    const replacementDirectory = await createTemporaryParent();
-    temporaryParents.push(movedDirectory);
-    const capturedState = { cookies: [], origins: [] };
-    const frame = {};
-    const page = {
-      on: vi.fn(),
-      off: vi.fn(),
-      mainFrame: vi.fn(() => frame),
-      goto: vi.fn().mockResolvedValue(null),
-      waitForURL: vi.fn().mockResolvedValue(null),
-      waitForFunction: vi.fn().mockResolvedValue(null),
-    };
-    const context = {
-      newPage: vi.fn().mockResolvedValue(page),
-      storageState: vi.fn(async (options?: { path: string }) => {
-        await rename(tempDirectory, movedDirectory);
-        await symlink(replacementDirectory, tempDirectory);
-        if (options !== undefined) {
-          await writeFile(options.path, JSON.stringify(capturedState), { mode: 0o600 });
-        }
-        return capturedState;
-      }),
-    };
-    const browser = {
-      newContext: vi.fn().mockResolvedValue(context),
-      close: vi.fn().mockResolvedValue(undefined),
-    };
-
-    await expect(capturePreviewAccessState(
-      { baseURL, storageStatePath },
-      { launch: vi.fn().mockResolvedValue(browser) },
-    )).rejects.toThrow("Preview storage state was not captured securely");
-    await expect(stat(join(replacementDirectory, "storage-state.json"))).rejects.toMatchObject({
-      code: "ENOENT",
-    });
-  });
-
-  it("rejects every preexisting storage-state leaf before launching Chromium", async () => {
-    const tempDirectory = await createPreviewTempDirectory();
-    temporaryParents.push(tempDirectory);
-    const storageStatePath = join(tempDirectory, "storage-state.json");
-    const frame = {};
-    const page = {
-      on: vi.fn(),
-      off: vi.fn(),
-      mainFrame: vi.fn(() => frame),
-      goto: vi.fn().mockResolvedValue(null),
-      waitForURL: vi.fn().mockResolvedValue(null),
-      waitForFunction: vi.fn().mockResolvedValue(null),
-    };
-    const context = {
-      newPage: vi.fn().mockResolvedValue(page),
-      storageState: vi.fn().mockResolvedValue({}),
-    };
-    const browser = {
-      newContext: vi.fn().mockResolvedValue(context),
-      close: vi.fn().mockResolvedValue(undefined),
-    };
-    const launch = vi.fn().mockResolvedValue(browser);
-
-    await writeFile(storageStatePath, "preexisting", { mode: 0o600 });
-    await expect(capturePreviewAccessState(
-      { baseURL, storageStatePath },
-      { launch },
-    )).rejects.toThrow("Preview storage state must be absent before authentication");
-
-    await rm(storageStatePath);
-    const symlinkTarget = join(tempDirectory, "symlink-target.json");
-    await writeFile(symlinkTarget, "target", { mode: 0o600 });
-    await symlink(symlinkTarget, storageStatePath);
-    await expect(capturePreviewAccessState(
-      { baseURL, storageStatePath },
-      { launch },
-    )).rejects.toThrow("Preview storage state must be absent before authentication");
-
-    expect(launch).not.toHaveBeenCalled();
-  });
-
-  it("rejects a symlink created before the atomic storage-state leaf", async () => {
-    const tempDirectory = await createPreviewTempDirectory();
-    temporaryParents.push(tempDirectory);
-    const storageStatePath = join(tempDirectory, "storage-state.json");
-    const symlinkTarget = join(tempDirectory, "captured-target.json");
-    await writeFile(symlinkTarget, "{}", { mode: 0o600 });
-    const frame = {};
-    const page = {
-      on: vi.fn(),
-      off: vi.fn(),
-      mainFrame: vi.fn(() => frame),
-      goto: vi.fn().mockResolvedValue(null),
-      waitForURL: vi.fn().mockResolvedValue(null),
-      waitForFunction: vi.fn().mockResolvedValue(null),
-    };
-    const context = {
-      newPage: vi.fn().mockResolvedValue(page),
-      storageState: vi.fn(async () => {
-        await symlink(symlinkTarget, storageStatePath);
-        return {};
-      }),
-    };
-    const browser = {
-      newContext: vi.fn().mockResolvedValue(context),
-      close: vi.fn().mockResolvedValue(undefined),
-    };
-
-    await expect(capturePreviewAccessState(
-      { baseURL, storageStatePath },
-      { launch: vi.fn().mockResolvedValue(browser) },
-    )).rejects.toThrow("Preview storage state was not captured securely");
-  });
-
-  it("rejects direct callers' unsafe origin and storage path before launching Chromium", async () => {
-    const tempDirectory = await createPreviewTempDirectory();
-    temporaryParents.push(tempDirectory);
-    const launch = vi.fn();
-
-    await expect(capturePreviewAccessState(
-      {
-        baseURL: "https://example.com/current-login",
-        storageStatePath: join(tempDirectory, "storage-state.json"),
-      },
-      { launch },
-    )).rejects.toMatchObject({
-      message: "Preview E2E may only target the isolated preview origin",
-    });
-    await expect(capturePreviewAccessState(
-      {
-        baseURL,
-        storageStatePath: join(tempDirectory, "other-state.json"),
-      },
-      { launch },
-    )).rejects.toMatchObject({
-      message: "Preview storage state must be the protected temporary file",
-    });
-
-    expect(launch).not.toHaveBeenCalled();
-  });
-
-  it("rejects a prefix-named temporary-directory symlink before launching Chromium", async () => {
-    const targetDirectory = await mkdtemp(join(process.cwd(), "preview-e2e-node-runtime-target-"));
-    const linkedDirectory = join(tmpdir(), `${PREVIEW_TEMP_PREFIX}symlink-${Date.now()}`);
-    temporaryParents.push(linkedDirectory, targetDirectory);
-    await symlink(targetDirectory, linkedDirectory);
-    const launch = vi.fn();
-
-    await expect(capturePreviewAccessState(
-      {
-        baseURL,
-        storageStatePath: join(linkedDirectory, "storage-state.json"),
-      },
-      { launch },
-    )).rejects.toMatchObject({
-      message: "Preview storage state must be the protected temporary file",
-    });
-
-    expect(launch).not.toHaveBeenCalled();
-  });
-
-  it("rejects a direct temporary-directory child whose mode is not 0700 before launching Chromium", async () => {
-    const tempDirectory = await mkdtemp(join(tmpdir(), PREVIEW_TEMP_PREFIX));
-    temporaryParents.push(tempDirectory);
-    await chmod(tempDirectory, 0o755);
-    const launch = vi.fn();
-
-    await expect(capturePreviewAccessState(
-      {
-        baseURL,
-        storageStatePath: join(tempDirectory, "storage-state.json"),
-      },
-      { launch },
-    )).rejects.toMatchObject({
-      message: "Preview storage state must be the protected temporary file",
-    });
-
-    expect(launch).not.toHaveBeenCalled();
-  });
-
-  it("rejects unexpected main-frame navigation without exposing its URL and detaches the listener", async () => {
-    const tempDirectory = await createPreviewTempDirectory();
-    temporaryParents.push(tempDirectory);
-    const unexpectedFrame = { url: () => "https://example.com/current-login" };
-    let navigationListener: ((frame: { url(): string }) => void) | undefined;
-    const page = {
-      on: vi.fn((_event, listener) => { navigationListener = listener; }),
-      off: vi.fn(),
-      mainFrame: vi.fn(() => unexpectedFrame),
-      goto: vi.fn(async () => { navigationListener!(unexpectedFrame); }),
-      waitForURL: vi.fn(),
-      waitForFunction: vi.fn(),
-    };
-    const context = {
-      newPage: vi.fn().mockResolvedValue(page),
-      storageState: vi.fn(),
-    };
-    const browser = {
-      newContext: vi.fn().mockResolvedValue(context),
-      close: vi.fn().mockResolvedValue(undefined),
-    };
-
-    await expect(capturePreviewAccessState(
-      { baseURL, storageStatePath: join(tempDirectory, "storage-state.json") },
-      { launch: vi.fn().mockResolvedValue(browser) },
-    )).rejects.toMatchObject({ message: "Authentication left the approved origins" });
-
-    expect(page.off).toHaveBeenCalledWith("framenavigated", navigationListener);
-  });
-
-  it("redacts Playwright navigation failures to a generic retry error", async () => {
-    const tempDirectory = await createPreviewTempDirectory();
-    temporaryParents.push(tempDirectory);
-    const frame = {};
-    const page = {
-      on: vi.fn(),
-      off: vi.fn(),
-      mainFrame: vi.fn(() => frame),
-      goto: vi.fn().mockRejectedValue(new Error(`${baseURL}/current-login timed out`)),
-      waitForURL: vi.fn(),
-      waitForFunction: vi.fn(),
-    };
-    const context = {
-      newPage: vi.fn().mockResolvedValue(page),
-      storageState: vi.fn(),
-    };
-    const browser = {
-      newContext: vi.fn().mockResolvedValue(context),
-      close: vi.fn().mockResolvedValue(undefined),
-    };
-
-    await expect(capturePreviewAccessState(
-      { baseURL, storageStatePath: join(tempDirectory, "storage-state.json") },
-      { launch: vi.fn().mockResolvedValue(browser) },
-    )).rejects.toMatchObject({
-      message: "Preview authentication did not complete; retry the command.",
-    });
-  });
-
-  it("redacts a missing stable Chrome channel failure", async () => {
-    const tempDirectory = await createPreviewTempDirectory();
-    temporaryParents.push(tempDirectory);
-    const launch = vi.fn().mockRejectedValue(new Error(
-      "Chromium distribution 'chrome' is not found at /Applications/Google Chrome.app",
-    ));
-
-    await expect(capturePreviewAccessState(
-      { baseURL, storageStatePath: join(tempDirectory, "storage-state.json") },
-      { launch },
-    )).rejects.toMatchObject({
-      message: "Preview authentication browser could not start; install stable Google Chrome and retry.",
-    });
-    expect(launch).toHaveBeenCalledWith({
-      channel: "chrome",
-      headless: false,
-      timeout: 15_000,
-    });
-  });
-
-  it("closes and awaits the authentication browser when aborted", async () => {
-    const tempDirectory = await createPreviewTempDirectory();
-    temporaryParents.push(tempDirectory);
-    const storageStatePath = join(tempDirectory, "storage-state.json");
-    const abortController = new AbortController();
-    let rejectNavigation: ((error: Error) => void) | undefined;
-    let releaseClose: (() => void) | undefined;
-    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
-    const frame = {};
-    const page = {
-      on: vi.fn(),
-      off: vi.fn(),
-      mainFrame: vi.fn(() => frame),
-      goto: vi.fn(() => new Promise((_resolve, reject) => { rejectNavigation = reject; })),
-      waitForURL: vi.fn(),
-      waitForFunction: vi.fn(),
-    };
-    const context = {
-      newPage: vi.fn().mockResolvedValue(page),
-      storageState: vi.fn(),
-    };
-    const browser = {
-      newContext: vi.fn().mockResolvedValue(context),
-      close: vi.fn(async () => {
-        await closeGate;
-        rejectNavigation!(new Error("browser closed"));
-      }),
-    };
-
-    const capture = capturePreviewAccessState(
-      { baseURL, storageStatePath },
-      { launch: vi.fn().mockResolvedValue(browser) },
-      abortController.signal,
-    );
-    await vi.waitFor(() => expect(page.goto).toHaveBeenCalledOnce());
-    abortController.abort("SIGTERM");
-    await vi.waitFor(() => expect(browser.close).toHaveBeenCalledOnce());
-    let settled = false;
-    void capture.finally(() => { settled = true; }).catch(() => undefined);
-    await Promise.resolve();
-    expect(settled).toBe(false);
-    releaseClose!();
-
-    await expect(capture).rejects.toThrow("Preview harness terminated");
-  });
-
-  it("keeps cleanup and signal relay behind bounded pending-launch termination", async () => {
-    vi.useFakeTimers();
-    const tempDirectory = await createPreviewTempDirectory();
-    temporaryParents.push(tempDirectory);
-    const storageStatePath = join(tempDirectory, "storage-state.json");
-    const abortController = new AbortController();
-    let markLaunchStarted: (() => void) | undefined;
-    const launchStarted = new Promise<void>((resolve) => { markLaunchStarted = resolve; });
-    let launchTerminated = false;
-    const launch = vi.fn((options: { headless: boolean; timeout?: number }) => {
-      markLaunchStarted!();
-      return new Promise<never>((_resolve, reject) => {
-        setTimeout(() => {
-          launchTerminated = true;
-          reject(new Error("browser launch terminated"));
-        }, options.timeout ?? 0);
-      });
-    });
-    const capture = capturePreviewAccessState(
-      { baseURL, storageStatePath },
-      { launch },
-      abortController.signal,
-    );
-    const order: string[] = [];
-    const handler = createPreviewSignalHandler(
-      async (signal) => {
-        abortController.abort(signal);
-        await capture.catch(() => undefined);
-        order.push("cleanup");
-      },
-      () => { order.push("unregister"); },
-      (signal) => { order.push(`relay:${signal}`); },
-    );
-    await launchStarted;
-
-    const signalHandling = handler("SIGTERM");
-    await vi.advanceTimersByTimeAsync(14_999);
-    expect(launchTerminated).toBe(false);
-    expect(order).toEqual([]);
-    await vi.advanceTimersByTimeAsync(1);
-
-    await expect(signalHandling).resolves.toBeUndefined();
-    expect(launch).toHaveBeenCalledWith({
-      channel: "chrome",
-      headless: false,
-      timeout: 15_000,
-    });
-    expect(launchTerminated).toBe(true);
-    expect(order).toEqual(["cleanup", "unregister", "relay:SIGTERM"]);
-  });
-
-  it("awaits closure of a browser returned after launch abort", async () => {
-    const tempDirectory = await createPreviewTempDirectory();
-    temporaryParents.push(tempDirectory);
-    const storageStatePath = join(tempDirectory, "storage-state.json");
-    const abortController = new AbortController();
-    const newContext = vi.fn().mockRejectedValue(new Error("browser closed"));
-    let releaseClose: (() => void) | undefined;
-    const closeGate = new Promise<void>((resolve) => { releaseClose = resolve; });
-    const close = vi.fn(async () => { await closeGate; });
-    const lateBrowser = { newContext, close };
-    let resolveLaunch: ((browser: typeof lateBrowser) => void) | undefined;
-    let markLaunchStarted: (() => void) | undefined;
-    const launchStarted = new Promise<void>((resolve) => { markLaunchStarted = resolve; });
-    const launch = vi.fn(() => {
-      markLaunchStarted!();
-      return new Promise<typeof lateBrowser>((resolve) => { resolveLaunch = resolve; });
-    });
-    const outcome = capturePreviewAccessState(
-      { baseURL, storageStatePath },
-      { launch },
-      abortController.signal,
-    ).then(
-      () => "resolved" as const,
-      () => "rejected" as const,
-    );
-    await launchStarted;
-    abortController.abort("SIGTERM");
-    const settledBeforeLateResolution = await Promise.race([
-      outcome.then(() => true),
-      new Promise<false>((resolve) => setImmediate(() => resolve(false))),
-    ]);
-    resolveLaunch!(lateBrowser);
-    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
-    const settledBeforeClose = await Promise.race([
-      outcome.then(() => true),
-      new Promise<false>((resolve) => setImmediate(() => resolve(false))),
-    ]);
-    releaseClose!();
-
-    await expect(outcome).resolves.toBe("rejected");
-    expect(settledBeforeLateResolution).toBe(false);
-    expect(settledBeforeClose).toBe(false);
-    expect(newContext).not.toHaveBeenCalled();
   });
 
   it("removes only exact-prefix directories under the supplied temporary parent", async () => {
@@ -1132,12 +665,12 @@ describe("preview E2E Node runtime", () => {
 
   it("rejects an unprotected suite state before spawning Playwright", async () => {
     const env = await createProtectedSuiteEnvironment();
-    await chmod(env.OPTIMIST_PREVIEW_STORAGE_STATE!, 0o644);
+    env.OPTIMIST_PREVIEW_ACCESS_TOKEN = "invalid token";
     const spawnProcess = vi.fn();
 
     await expect(runPreviewSuite(env, new AbortController().signal, {
       spawnProcess: spawnProcess as never,
-    })).rejects.toThrow("Preview storage state must be the protected temporary file");
+    })).rejects.toThrow("Preview access token is invalid");
     expect(spawnProcess).not.toHaveBeenCalled();
   });
 });
