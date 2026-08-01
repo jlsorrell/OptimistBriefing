@@ -10,7 +10,10 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
-  reporter: "line",
+  reporter: [
+    ["line"],
+    ["./scripts/preview-e2e/safe-reporter.ts"],
+  ],
   outputDir: join(runtime.tempDirectory, "test-results"),
   use: {
     baseURL: runtime.baseURL,

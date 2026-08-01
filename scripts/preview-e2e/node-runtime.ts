@@ -22,6 +22,7 @@ import {
   removePreviewTempDirectory,
   removePreviewTempDirectorySync,
 } from "./temp-cleanup";
+import { parsePreviewTestDiagnostics } from "./safe-reporter";
 
 export {
   registerPreviewExitCleanup,
@@ -178,6 +179,13 @@ export async function runPreviewSuite(
         if (stdout.length > 0) writeOutput(stdout.join(""), "stdout");
         if (stderr.length > 0) writeOutput(stderr.join(""), "stderr");
       } else {
+        const diagnostics = [
+          ...parsePreviewTestDiagnostics(stdout.join("")),
+          ...parsePreviewTestDiagnostics(stderr.join("")),
+        ];
+        if (diagnostics.length > 0) {
+          writeOutput(`${diagnostics.join("\n")}\n`, "stderr");
+        }
         writeOutput("Preview checks failed; re-authenticate and retry.\n", "stderr");
       }
       resolve(resultCode);

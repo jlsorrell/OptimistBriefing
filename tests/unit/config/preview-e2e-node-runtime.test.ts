@@ -666,6 +666,36 @@ describe("preview E2E Node runtime", () => {
     expect(writeOutput.mock.calls.flat().join(" ")).not.toContain("Sign in with Google");
   });
 
+  it("prints only validated safe reporter lines before the generic failure", async () => {
+    const env = await createProtectedSuiteEnvironment();
+    const child = new FakePreviewChild();
+    const writeOutput = vi.fn();
+    const running = runPreviewSuite(env, new AbortController().signal, {
+      platform: "linux",
+      spawnProcess: vi.fn(() => child) as never,
+      writeOutput,
+    });
+    const safeLine =
+      "OPTIMIST_PREVIEW_TEST_RESULT project=tablet file=tests/preview-e2e/content.spec.ts line=18 status=timedOut";
+
+    child.stdout.write([
+      "test title access-token-fixture",
+      safeLine,
+      `${safeLine} access-token-fixture`,
+      "OPTIMIST_PREVIEW_TEST_RESULT project=tablet file=tests/preview-e2e/../secret.ts line=18 status=failed",
+    ].join("\n"));
+    child.stderr.write("Error: https://preview.example/?token=access-token-fixture\n");
+    child.emit("close", 3, null);
+
+    await expect(running).resolves.toBe(3);
+    expect(writeOutput.mock.calls).toEqual([
+      [`${safeLine}\n`, "stderr"],
+      ["Preview checks failed; re-authenticate and retry.\n", "stderr"],
+    ]);
+    expect(writeOutput.mock.calls.flat().join(" ")).not.toContain("access-token-fixture");
+    expect(writeOutput.mock.calls.flat().join(" ")).not.toContain("https://");
+  });
+
   it("flushes successful output only after close drains late pipe chunks", async () => {
     const env = await createProtectedSuiteEnvironment();
     const child = new FakePreviewChild();

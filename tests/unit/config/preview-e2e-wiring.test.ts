@@ -52,6 +52,10 @@ describe("preview E2E wiring", () => {
     const previewConfig = (await import("../../../playwright.preview.config")).default;
 
     expect(previewConfig.workers).toBe(1);
+    expect(previewConfig.reporter).toEqual([
+      ["line"],
+      ["./scripts/preview-e2e/safe-reporter.ts"],
+    ]);
     expect(previewConfig.use).not.toHaveProperty("storageState");
     expect(previewConfig.use).not.toHaveProperty("extraHTTPHeaders");
   });
