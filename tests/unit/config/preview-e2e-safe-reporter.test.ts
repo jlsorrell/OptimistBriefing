@@ -19,6 +19,47 @@ describe("preview safe test reporter", () => {
   });
 
   it.each([
+    ["tests/preview-e2e/access.spec.ts", 1],
+    ["tests/preview-e2e/access.spec.ts", 24],
+    ["tests/preview-e2e/content.spec.ts", 1],
+    ["tests/preview-e2e/content.spec.ts", 65],
+    ["tests/preview-e2e/responsive-accessibility.spec.ts", 1],
+    ["tests/preview-e2e/responsive-accessibility.spec.ts", 89],
+  ])("accepts %s source line %i", (file, line) => {
+    expect(formatPreviewTestDiagnostic({
+      project: "desktop",
+      file,
+      line,
+      status: "failed",
+    })).toBe(
+      `OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=${file} line=${line} status=failed`,
+    );
+  });
+
+  it.each([
+    ["tests/preview-e2e/access.spec.ts", 25],
+    ["tests/preview-e2e/content.spec.ts", 66],
+    ["tests/preview-e2e/responsive-accessibility.spec.ts", 90],
+    ["tests/preview-e2e/access.spec.ts", 65],
+    ["tests/preview-e2e/content.spec.ts", 89],
+    ["tests/preview-e2e/responsive-accessibility.spec.ts", Number.MAX_SAFE_INTEGER],
+  ])("rejects %s source line %i when it is out of range", (file, line) => {
+    expect(formatPreviewTestDiagnostic({
+      project: "desktop",
+      file,
+      line,
+      status: "failed",
+    })).toBeUndefined();
+  });
+
+  it("rejects a canonical-looking line carrying a 16-digit numeric secret", () => {
+    const numericSecret =
+      "OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/access.spec.ts line=1234567890123456 status=failed";
+
+    expect(parsePreviewTestDiagnostics(numericSecret)).toEqual([]);
+  });
+
+  it.each([
     { project: "other", file: "tests/preview-e2e/access.spec.ts", line: 5, status: "failed" },
     { project: "desktop", file: "/tmp/access.spec.ts", line: 5, status: "failed" },
     { project: "desktop", file: "tests/preview-e2e/../secret.ts", line: 5, status: "failed" },

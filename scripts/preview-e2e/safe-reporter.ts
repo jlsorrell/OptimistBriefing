@@ -8,11 +8,11 @@ import type {
 } from "@playwright/test/reporter";
 
 const PROJECTS = new Set(["desktop", "tablet", "mobile"]);
-const FILES = new Set([
-  "tests/preview-e2e/access.spec.ts",
-  "tests/preview-e2e/content.spec.ts",
-  "tests/preview-e2e/responsive-accessibility.spec.ts",
-]);
+const FILE_MAX_SOURCE_LINES = {
+  "tests/preview-e2e/access.spec.ts": 24,
+  "tests/preview-e2e/content.spec.ts": 65,
+  "tests/preview-e2e/responsive-accessibility.spec.ts": 89,
+} as const;
 const STATUSES = new Set<TestStatus>([
   "passed",
   "failed",
@@ -33,11 +33,15 @@ interface PreviewTestDiagnostic {
 export function formatPreviewTestDiagnostic(
   diagnostic: PreviewTestDiagnostic,
 ): string | undefined {
+  const maximumLine = FILE_MAX_SOURCE_LINES[
+    diagnostic.file as keyof typeof FILE_MAX_SOURCE_LINES
+  ];
   if (
     !PROJECTS.has(diagnostic.project) ||
-    !FILES.has(diagnostic.file) ||
+    maximumLine === undefined ||
     !Number.isSafeInteger(diagnostic.line) ||
     diagnostic.line <= 0 ||
+    diagnostic.line > maximumLine ||
     !STATUSES.has(diagnostic.status as TestStatus)
   ) {
     return undefined;
