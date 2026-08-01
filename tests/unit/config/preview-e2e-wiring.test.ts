@@ -33,6 +33,7 @@ describe("preview E2E wiring", () => {
       "node --import tsx scripts/run-preview-e2e.ts",
     );
     expect(tsconfig.include).toContain("playwright.preview.config.ts");
+    expect(vitestConfig).toContain('".worktrees/**"');
     expect(vitestConfig).toContain('"tests/preview-e2e/**"');
     expect(previewConfig).toContain('testDir: "./tests/preview-e2e"');
     expect(previewConfig).toContain('trace: "off"');
