@@ -8,20 +8,28 @@ import {
 } from "../../../scripts/preview-e2e/harness";
 
 const tempDirectory = "/tmp/optimist-preview-e2e-unit";
+const ownedTempDirectory = {
+  path: tempDirectory,
+  device: 1,
+  inode: 2,
+  mode: 0o40700,
+};
 const baseURL = "https://optimist-briefing-preview.optimistindustries.workers.dev";
 
 function createDependencies(
 ): PreviewHarnessDependencies & {
   createTempDirectory: ReturnType<typeof vi.fn>;
   removeTempDirectory: ReturnType<typeof vi.fn>;
+  removeTempDirectorySync: ReturnType<typeof vi.fn>;
   registerExitCleanup: ReturnType<typeof vi.fn>;
   registerSignalCleanup: ReturnType<typeof vi.fn>;
   captureAccessState: ReturnType<typeof vi.fn>;
   runPreviewSuite: ReturnType<typeof vi.fn>;
 } {
   return {
-    createTempDirectory: vi.fn().mockResolvedValue(tempDirectory),
+    createTempDirectory: vi.fn().mockResolvedValue(ownedTempDirectory),
     removeTempDirectory: vi.fn().mockResolvedValue(undefined),
+    removeTempDirectorySync: vi.fn((_tempDirectory: typeof ownedTempDirectory) => undefined),
     registerExitCleanup: vi.fn().mockReturnValue(vi.fn()),
     registerSignalCleanup: vi.fn().mockReturnValue(vi.fn()),
     captureAccessState: vi.fn().mockResolvedValue(undefined),
@@ -55,7 +63,7 @@ describe("preview E2E harness", () => {
     expect(deps.removeTempDirectory.mock.invocationCallOrder[0]!).toBeLessThan(
       unregister.mock.invocationCallOrder[0]!,
     );
-    expect(deps.registerExitCleanup).toHaveBeenCalledWith(tempDirectory);
+    expect(deps.registerExitCleanup).toHaveBeenCalledWith(ownedTempDirectory);
     expect(deps.createTempDirectory.mock.invocationCallOrder[0]!).toBeLessThan(
       deps.registerExitCleanup.mock.invocationCallOrder[0]!,
     );
@@ -147,25 +155,25 @@ describe("preview E2E harness", () => {
   it("awaits and removes a temporary directory interrupted during creation", async () => {
     const deps = createDependencies();
     let signalCleanup: ((signal: NodeJS.Signals) => Promise<void>) | undefined;
-    let resolveTempDirectory: ((path: string) => void) | undefined;
+    let resolveTempDirectory: ((path: typeof ownedTempDirectory) => void) | undefined;
     deps.registerSignalCleanup.mockImplementation((cleanup) => {
       signalCleanup = cleanup as unknown as (signal: NodeJS.Signals) => Promise<void>;
       return vi.fn();
     });
-    deps.createTempDirectory.mockImplementation(() => new Promise<string>((resolve) => {
+    deps.createTempDirectory.mockImplementation(() => new Promise<typeof ownedTempDirectory>((resolve) => {
       resolveTempDirectory = resolve;
     }));
 
     const running = runPreviewHarness({}, deps);
     await vi.waitFor(() => expect(deps.registerSignalCleanup).toHaveBeenCalledOnce());
     const signalHandling = signalCleanup!("SIGINT");
-    resolveTempDirectory!(tempDirectory);
+    resolveTempDirectory!(ownedTempDirectory);
 
     await expect(signalHandling).resolves.toBeUndefined();
     await expect(running).resolves.toBe(1);
     expect(deps.captureAccessState).not.toHaveBeenCalled();
     expect(deps.removeTempDirectory).toHaveBeenCalledOnce();
-    expect(deps.registerExitCleanup).toHaveBeenCalledWith(tempDirectory);
+    expect(deps.registerExitCleanup).toHaveBeenCalledWith(ownedTempDirectory);
   });
 
   it("keeps the exit fallback registered when asynchronous cleanup fails", async () => {
@@ -177,5 +185,19 @@ describe("preview E2E harness", () => {
     const unregisterExitCleanup = deps.registerExitCleanup.mock.results[0]
       ?.value as ReturnType<typeof vi.fn>;
     expect(unregisterExitCleanup).not.toHaveBeenCalled();
+  });
+
+  it("recovers synchronously and never authenticates when exit cleanup registration fails", async () => {
+    const deps = createDependencies();
+    deps.registerExitCleanup.mockImplementation(() => {
+      throw new Error("registration failed");
+    });
+    deps.removeTempDirectory.mockRejectedValue(new Error("async cleanup failed"));
+
+    await expect(runPreviewHarness({}, deps)).rejects.toThrow();
+
+    expect(deps.removeTempDirectorySync).toHaveBeenCalledWith(ownedTempDirectory);
+    expect(deps.captureAccessState).not.toHaveBeenCalled();
+    expect(deps.runPreviewSuite).not.toHaveBeenCalled();
   });
 });

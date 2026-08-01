@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { constants, lstatSync, rmSync } from "node:fs";
-import { chmod, lstat, mkdtemp, open, rm } from "node:fs/promises";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdtemp, open } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -16,6 +16,18 @@ import {
   resolvePreviewStorageStatePath,
 } from "./environment";
 import type { PreviewHarnessDependencies } from "./harness";
+import {
+  capturePreviewTempDirectoryOwnership,
+  registerPreviewExitCleanup,
+  removePreviewTempDirectory,
+  removePreviewTempDirectorySync,
+} from "./temp-cleanup";
+
+export {
+  registerPreviewExitCleanup,
+  removePreviewTempDirectory,
+  removePreviewTempDirectorySync,
+};
 
 interface PreviewFrame {
   url(): string;
@@ -67,11 +79,6 @@ interface PreviewSuiteOptions {
   terminationFallbackMilliseconds?: number;
 }
 
-interface PreviewExitEventSource {
-  on(event: "exit", listener: () => void): unknown;
-  off(event: "exit", listener: () => void): unknown;
-}
-
 const DEFAULT_TERMINATION_GRACE_MILLISECONDS = 2_000;
 const DEFAULT_TERMINATION_FALLBACK_MILLISECONDS = 2_000;
 const PREVIEW_BROWSER_LAUNCH_TIMEOUT_MILLISECONDS = 15_000;
@@ -80,46 +87,6 @@ export async function createPreviewTempDirectory(): Promise<string> {
   const tempDirectory = await mkdtemp(join(tmpdir(), PREVIEW_TEMP_PREFIX));
   await chmod(tempDirectory, 0o700);
   return tempDirectory;
-}
-
-export async function removePreviewTempDirectory(
-  tempDirectory: string,
-): Promise<void> {
-  await rm(assertProtectedTemporaryDirectory(tempDirectory), {
-    force: true,
-    recursive: true,
-  });
-}
-
-export function registerPreviewExitCleanup(
-  tempDirectory: string,
-  processEvents: PreviewExitEventSource = process,
-): () => void {
-  const protectedDirectory = assertProtectedTemporaryDirectory(tempDirectory);
-  const ownedMetadata = lstatSync(protectedDirectory);
-  let registered = true;
-  const cleanup = () => {
-    try {
-      const candidate = assertProtectedTemporaryDirectory(protectedDirectory);
-      const currentMetadata = lstatSync(candidate);
-      if (
-        currentMetadata.dev !== ownedMetadata.dev ||
-        currentMetadata.ino !== ownedMetadata.ino
-      ) {
-        return;
-      }
-      rmSync(candidate, { force: true, recursive: true });
-    } catch {
-      // Exit cleanup must fail closed without exposing paths or following replacements.
-    }
-  };
-  const unregister = () => {
-    if (!registered) return;
-    registered = false;
-    processEvents.off("exit", cleanup);
-  };
-  processEvents.on("exit", cleanup);
-  return unregister;
 }
 
 function isPlaywrightNavigationError(error: unknown): boolean {
@@ -378,13 +345,23 @@ export function createPreviewSignalHandler(
   shutdown: (signal: NodeJS.Signals) => Promise<void>,
   unregister: () => void,
   relaySignal: (signal: NodeJS.Signals) => void,
+  fallbackCleanup: () => void = () => undefined,
 ): (signal: NodeJS.Signals) => Promise<void> {
   let handlingPromise: Promise<void> | undefined;
   return (signal) => {
     handlingPromise ??= (async () => {
+      let shutdownCompleted = false;
       try {
         await shutdown(signal);
+        shutdownCompleted = true;
       } finally {
+        if (!shutdownCompleted) {
+          try {
+            fallbackCleanup();
+          } catch {
+            // Refusal is fail-closed; signal relay must still complete.
+          }
+        }
         unregister();
         relaySignal(signal);
       }
@@ -395,6 +372,7 @@ export function createPreviewSignalHandler(
 
 export function registerPreviewSignalCleanup(
   cleanup: (signal: NodeJS.Signals) => Promise<void>,
+  fallbackCleanup: () => void,
 ): () => void {
   const listeners = new Map<NodeJS.Signals, () => void>();
   let registered = true;
@@ -405,7 +383,7 @@ export function registerPreviewSignalCleanup(
   };
   const handler = createPreviewSignalHandler(cleanup, unregister, (signal) => {
     process.kill(process.pid, signal);
-  });
+  }, fallbackCleanup);
   for (const signal of ["SIGINT", "SIGTERM"] as const) {
     const listener = () => { void handler(signal).catch(() => undefined); };
     listeners.set(signal, listener);
@@ -501,8 +479,11 @@ export async function runPreviewSuite(
 
 export function createNodePreviewHarnessDependencies(): PreviewHarnessDependencies {
   return {
-    createTempDirectory: createPreviewTempDirectory,
+    createTempDirectory: async () => capturePreviewTempDirectoryOwnership(
+      await createPreviewTempDirectory(),
+    ),
     removeTempDirectory: removePreviewTempDirectory,
+    removeTempDirectorySync: removePreviewTempDirectorySync,
     registerExitCleanup: registerPreviewExitCleanup,
     registerSignalCleanup: registerPreviewSignalCleanup,
     captureAccessState: (input, signal) =>

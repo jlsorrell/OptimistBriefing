@@ -1,8 +1,10 @@
-import { EventEmitter } from "node:events";
+import { spawn as spawnChild } from "node:child_process";
+import { EventEmitter, once } from "node:events";
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
+import { pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -14,6 +16,7 @@ import {
   previewNpxExecutable,
   registerPreviewExitCleanup,
   removePreviewTempDirectory,
+  removePreviewTempDirectorySync,
   runPreviewSuite,
 } from "../../../scripts/preview-e2e/node-runtime";
 
@@ -43,6 +46,16 @@ class FakePreviewChild extends EventEmitter {
   stdout = new PassThrough();
   stderr = new PassThrough();
   kill = vi.fn((_signal?: NodeJS.Signals) => true);
+}
+
+async function ownTemporaryDirectory(path: string) {
+  const metadata = await lstat(path);
+  return {
+    path,
+    device: metadata.dev,
+    inode: metadata.ino,
+    mode: metadata.mode,
+  };
 }
 
 afterEach(async () => {
@@ -551,15 +564,116 @@ describe("preview E2E Node runtime", () => {
   it("removes only exact-prefix directories under the supplied temporary parent", async () => {
     const allowedDirectory = await createPreviewTempDirectory();
     temporaryParents.push(allowedDirectory);
+    const ownership = await ownTemporaryDirectory(allowedDirectory);
     const unrelatedDirectory = await createTemporaryParent();
 
-    await removePreviewTempDirectory(allowedDirectory);
+    await removePreviewTempDirectory(ownership);
 
     await expect(stat(allowedDirectory)).rejects.toThrow();
-    await expect(removePreviewTempDirectory(unrelatedDirectory)).rejects.toThrow(
+    await expect(removePreviewTempDirectory({
+      ...ownership,
+      path: unrelatedDirectory,
+    })).rejects.toThrow(
       "Refusing unsafe preview cleanup target",
     );
     await expect(stat(unrelatedDirectory)).resolves.toBeDefined();
+  });
+
+  it("atomically quarantines and removes the captured directory identity", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const ownership = await ownTemporaryDirectory(tempDirectory);
+    await writeFile(join(tempDirectory, "storage-state.json"), "{}", { mode: 0o600 });
+
+    await removePreviewTempDirectory(ownership);
+
+    await expect(stat(tempDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("does not delete a replacement present before asynchronous cleanup", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const ownership = await ownTemporaryDirectory(tempDirectory);
+    const movedDirectory = `${tempDirectory}-owned`;
+    temporaryParents.push(movedDirectory);
+    await rename(tempDirectory, movedDirectory);
+    await mkdir(tempDirectory, { mode: 0o700 });
+    await writeFile(join(tempDirectory, "keep.txt"), "keep");
+    let quarantineEntry = "";
+
+    await expect(removePreviewTempDirectory(ownership, {
+      beforeQuarantineRename: (_source, entry) => { quarantineEntry = entry; },
+    })).rejects.toThrow("Refusing changed preview temporary directory");
+
+    temporaryParents.push(dirname(quarantineEntry));
+    await expect(stat(movedDirectory)).resolves.toBeDefined();
+    await expect(readFile(join(quarantineEntry, "keep.txt"), "utf8"))
+      .resolves.toBe("keep");
+  });
+
+  it("does not delete a replacement introduced at the quarantine rename interleave", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const ownership = await ownTemporaryDirectory(tempDirectory);
+    const movedDirectory = `${tempDirectory}-owned`;
+    temporaryParents.push(movedDirectory);
+    let quarantineEntry = "";
+
+    await expect(removePreviewTempDirectory(ownership, {
+      beforeQuarantineRename: async (source, entry) => {
+        quarantineEntry = entry;
+        await rename(source, movedDirectory);
+        await mkdir(source, { mode: 0o700 });
+        await writeFile(join(source, "keep.txt"), "keep");
+      },
+    })).rejects.toThrow("Refusing changed preview temporary directory");
+
+    temporaryParents.push(dirname(quarantineEntry));
+    await expect(stat(movedDirectory)).resolves.toBeDefined();
+    await expect(readFile(join(quarantineEntry, "keep.txt"), "utf8"))
+      .resolves.toBe("keep");
+  });
+
+  it("uses the captured identity for synchronous quarantine cleanup", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const ownership = await ownTemporaryDirectory(tempDirectory);
+    const movedDirectory = `${tempDirectory}-owned`;
+    temporaryParents.push(movedDirectory);
+    await rename(tempDirectory, movedDirectory);
+    await mkdir(tempDirectory, { mode: 0o700 });
+    await writeFile(join(tempDirectory, "keep.txt"), "keep");
+    let quarantineEntry = "";
+
+    expect(() => removePreviewTempDirectorySync(ownership, {
+      beforeQuarantineRename: (_source, entry) => { quarantineEntry = entry; },
+    })).toThrow("Refusing changed preview temporary directory");
+
+    temporaryParents.push(dirname(quarantineEntry));
+    await expect(stat(movedDirectory)).resolves.toBeDefined();
+    await expect(readFile(join(quarantineEntry, "keep.txt"), "utf8"))
+      .resolves.toBe("keep");
+  });
+
+  it("lets synchronous fallback finish an async cleanup interrupted after quarantine", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const ownership = await ownTemporaryDirectory(tempDirectory);
+    let quarantineRoot = "";
+
+    await expect(removePreviewTempDirectory(ownership, {
+      beforeQuarantineRename: (_source, entry) => {
+        quarantineRoot = dirname(entry);
+      },
+      afterQuarantineRename: () => {
+        throw new Error("process exit interrupted async cleanup");
+      },
+    })).rejects.toThrow("process exit interrupted async cleanup");
+
+    removePreviewTempDirectorySync(ownership);
+
+    await expect(stat(tempDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(quarantineRoot)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
   it("registers a synchronous exit cleanup for the exact protected directory", async () => {
@@ -567,8 +681,9 @@ describe("preview E2E Node runtime", () => {
     temporaryParents.push(tempDirectory);
     await writeFile(join(tempDirectory, "storage-state.json"), "{}", { mode: 0o600 });
     const processEvents = new EventEmitter();
+    const ownership = await ownTemporaryDirectory(tempDirectory);
 
-    registerPreviewExitCleanup(tempDirectory, processEvents);
+    registerPreviewExitCleanup(ownership, processEvents);
     processEvents.emit("exit");
     processEvents.emit("exit");
 
@@ -579,7 +694,8 @@ describe("preview E2E Node runtime", () => {
     const tempDirectory = await createPreviewTempDirectory();
     temporaryParents.push(tempDirectory);
     const processEvents = new EventEmitter();
-    const unregister = registerPreviewExitCleanup(tempDirectory, processEvents);
+    const ownership = await ownTemporaryDirectory(tempDirectory);
+    const unregister = registerPreviewExitCleanup(ownership, processEvents);
 
     unregister();
     processEvents.emit("exit");
@@ -591,7 +707,8 @@ describe("preview E2E Node runtime", () => {
     const tempDirectory = await createPreviewTempDirectory();
     temporaryParents.push(tempDirectory);
     const processEvents = new EventEmitter();
-    registerPreviewExitCleanup(tempDirectory, processEvents);
+    const ownership = await ownTemporaryDirectory(tempDirectory);
+    registerPreviewExitCleanup(ownership, processEvents);
     let finishShutdown: (() => void) | undefined;
     const shutdownGate = new Promise<void>((resolve) => { finishShutdown = resolve; });
     const handler = createPreviewSignalHandler(
@@ -614,15 +731,20 @@ describe("preview E2E Node runtime", () => {
     const movedDirectory = `${tempDirectory}-owned`;
     temporaryParents.push(movedDirectory);
     const processEvents = new EventEmitter();
-    registerPreviewExitCleanup(tempDirectory, processEvents);
+    const ownership = await ownTemporaryDirectory(tempDirectory);
+    let quarantineEntry = "";
+    registerPreviewExitCleanup(ownership, processEvents, {
+      beforeQuarantineRename: (_source, entry) => { quarantineEntry = entry; },
+    });
     await rename(tempDirectory, movedDirectory);
     await mkdir(tempDirectory, { mode: 0o700 });
     await writeFile(join(tempDirectory, "keep.txt"), "keep");
 
     processEvents.emit("exit");
 
+    temporaryParents.push(dirname(quarantineEntry));
     await expect(stat(movedDirectory)).resolves.toBeDefined();
-    await expect(readFile(join(tempDirectory, "keep.txt"), "utf8"))
+    await expect(readFile(join(quarantineEntry, "keep.txt"), "utf8"))
       .resolves.toBe("keep");
   });
 
@@ -632,10 +754,17 @@ describe("preview E2E Node runtime", () => {
     temporaryParents.push(linkedDirectory);
     await writeFile(join(targetDirectory, "keep.txt"), "keep");
     await symlink(targetDirectory, linkedDirectory);
+    let quarantineEntry = "";
 
-    await expect(removePreviewTempDirectory(linkedDirectory)).rejects.toThrow(
-      "Refusing unsafe preview temporary directory",
-    );
+    expect(() => removePreviewTempDirectorySync({
+      path: linkedDirectory,
+      device: 0,
+      inode: 0,
+      mode: 0o40700,
+    }, {
+      beforeQuarantineRename: (_source, entry) => { quarantineEntry = entry; },
+    })).toThrow("Refusing changed preview temporary directory");
+    temporaryParents.push(dirname(quarantineEntry));
     await expect(readFile(join(targetDirectory, "keep.txt"), "utf8")).resolves.toBe("keep");
   });
 
@@ -647,11 +776,12 @@ describe("preview E2E Node runtime", () => {
     await writeFile(join(directory, "keep.txt"), "keep");
 
     const removeWithUnexpectedRoot = removePreviewTempDirectory as unknown as (
-      path: string,
+      ownership: Awaited<ReturnType<typeof ownTemporaryDirectory>>,
       temporaryRoot: string,
     ) => Promise<void>;
+    const ownership = await ownTemporaryDirectory(directory);
 
-    await expect(removeWithUnexpectedRoot(directory, untrustedParent)).rejects.toThrow(
+    await expect(removeWithUnexpectedRoot(ownership, untrustedParent)).rejects.toThrow(
       "Refusing unsafe preview cleanup target",
     );
     await expect(readFile(join(directory, "keep.txt"), "utf8")).resolves.toBe("keep");
@@ -672,6 +802,92 @@ describe("preview E2E Node runtime", () => {
       "unregister",
       "relay:SIGTERM",
     ]);
+  });
+
+  it("runs the synchronous fallback before relaying a failed shutdown", async () => {
+    const order: string[] = [];
+    const handler = createPreviewSignalHandler(
+      async () => {
+        order.push("shutdown");
+        throw new Error("cleanup failed");
+      },
+      () => { order.push("unregister"); },
+      (signal) => { order.push(`relay:${signal}`); },
+      () => { order.push("fallback"); },
+    );
+
+    await expect(handler("SIGTERM")).rejects.toThrow("cleanup failed");
+    expect(order).toEqual([
+      "shutdown",
+      "fallback",
+      "unregister",
+      "relay:SIGTERM",
+    ]);
+  });
+
+  it("still unregisters and relays when the synchronous fallback refuses cleanup", async () => {
+    const order: string[] = [];
+    const handler = createPreviewSignalHandler(
+      async () => {
+        order.push("shutdown");
+        throw new Error("async cleanup failed");
+      },
+      () => { order.push("unregister"); },
+      (signal) => { order.push(`relay:${signal}`); },
+      () => {
+        order.push("fallback");
+        throw new Error("changed identity");
+      },
+    );
+
+    await expect(handler("SIGINT")).rejects.toThrow("async cleanup failed");
+    expect(order).toEqual([
+      "shutdown",
+      "fallback",
+      "unregister",
+      "relay:SIGINT",
+    ]);
+  });
+
+  it("runs the fallback in a real child before default SIGTERM termination", async () => {
+    const parent = await createTemporaryParent();
+    const markerPath = join(parent, "fallback-ran");
+    const moduleURL = pathToFileURL(resolve(
+      import.meta.dirname,
+      "../../../scripts/preview-e2e/node-runtime.ts",
+    )).href;
+    const script = `
+      import { writeFileSync } from "node:fs";
+      const { createPreviewSignalHandler } = await import(${JSON.stringify(moduleURL)});
+      let handler;
+      const listener = () => { void handler("SIGTERM").catch(() => undefined); };
+      const unregister = () => process.off("SIGTERM", listener);
+      handler = createPreviewSignalHandler(
+        async () => { throw new Error("cleanup failed"); },
+        unregister,
+        (signal) => process.kill(process.pid, signal),
+        () => writeFileSync(${JSON.stringify(markerPath)}, "fallback", { mode: 0o600 }),
+      );
+      process.on("SIGTERM", listener);
+      process.stdout.write("ready\\n");
+      setInterval(() => undefined, 1_000);
+    `;
+    const child = spawnChild(process.execPath, [
+      "--import",
+      "tsx",
+      "--input-type=module",
+      "--eval",
+      script,
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    const [ready] = await once(child.stdout!, "data");
+    expect(String(ready)).toContain("ready");
+
+    child.kill("SIGTERM");
+    const [code, signal] = await once(child, "close");
+
+    expect(code).toBeNull();
+    expect(signal).toBe("SIGTERM");
+    await expect(readFile(markerPath, "utf8")).resolves.toBe("fallback");
   });
 
   it("uses the platform-aware npx launcher", () => {
