@@ -1,5 +1,6 @@
 import { spawn as spawnChild } from "node:child_process";
 import { EventEmitter, once } from "node:events";
+import { lstatSync } from "node:fs";
 import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -673,6 +674,87 @@ describe("preview E2E Node runtime", () => {
     removePreviewTempDirectorySync(ownership);
 
     await expect(stat(tempDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(stat(quarantineRoot)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("rejects a replaced quarantine root and keeps its owned entry armed for fallback", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const ownership = await ownTemporaryDirectory(tempDirectory);
+    await writeFile(join(tempDirectory, "keep.txt"), "keep", { mode: 0o600 });
+    const processEvents = new EventEmitter();
+    registerPreviewExitCleanup(ownership, processEvents);
+    let quarantineRoot = "";
+    let movedQuarantineRoot = "";
+
+    await expect(removePreviewTempDirectory(ownership, {
+      afterQuarantineRename: async (_source, entry) => {
+        quarantineRoot = dirname(entry);
+        movedQuarantineRoot = `${quarantineRoot}-moved`;
+        temporaryParents.push(quarantineRoot, movedQuarantineRoot);
+        await rename(quarantineRoot, movedQuarantineRoot);
+        await symlink(movedQuarantineRoot, quarantineRoot);
+      },
+    })).rejects.toThrow("Refusing changed preview quarantine root");
+
+    expect((await lstat(quarantineRoot)).isSymbolicLink()).toBe(true);
+    await expect(readFile(join(movedQuarantineRoot, "owned", "keep.txt"), "utf8"))
+      .resolves.toBe("keep");
+    expect(processEvents.listenerCount("exit")).toBe(1);
+    processEvents.emit("exit");
+    expect(processEvents.listenerCount("exit")).toBe(1);
+    expect(() => removePreviewTempDirectorySync(ownership))
+      .toThrow("Refusing changed preview quarantine root");
+    await expect(readFile(join(movedQuarantineRoot, "owned", "keep.txt"), "utf8"))
+      .resolves.toBe("keep");
+  });
+
+  it("removes only the verified owned entry and leaves an unvalidated sibling quarantined", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const ownership = await ownTemporaryDirectory(tempDirectory);
+    await writeFile(join(tempDirectory, "storage-state.json"), "{}", { mode: 0o600 });
+    let quarantineRoot = "";
+    let quarantineEntry = "";
+    let sibling = "";
+
+    await expect(removePreviewTempDirectory(ownership, {
+      afterQuarantineRename: async (_source, entry) => {
+        quarantineEntry = entry;
+        quarantineRoot = dirname(entry);
+        sibling = join(quarantineRoot, "unvalidated-sibling.txt");
+        temporaryParents.push(quarantineRoot);
+        await writeFile(sibling, "leave me alone", { mode: 0o600 });
+      },
+    })).rejects.toMatchObject({ code: "ENOTEMPTY" });
+
+    await expect(stat(quarantineEntry)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(readFile(sibling, "utf8")).resolves.toBe("leave me alone");
+    expect(() => removePreviewTempDirectorySync(ownership)).toThrow();
+    await expect(readFile(sibling, "utf8")).resolves.toBe("leave me alone");
+  });
+
+  it("normalizes synchronous quarantine permissions under a restrictive umask", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const ownership = await ownTemporaryDirectory(tempDirectory);
+    const previousUmask = process.umask(0o777);
+    let quarantineRoot = "";
+    let observedMode = -1;
+
+    try {
+      removePreviewTempDirectorySync(ownership, {
+        beforeQuarantineRename: (_source, entry) => {
+          quarantineRoot = dirname(entry);
+          temporaryParents.push(quarantineRoot);
+          observedMode = lstatSync(quarantineRoot).mode & 0o777;
+        },
+      });
+    } finally {
+      process.umask(previousUmask);
+    }
+
+    expect(observedMode).toBe(0o700);
     await expect(stat(quarantineRoot)).rejects.toMatchObject({ code: "ENOENT" });
   });
 
