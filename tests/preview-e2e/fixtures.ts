@@ -64,15 +64,23 @@ export async function routePreviewRequest(
     await route.continue();
     return;
   }
-  const response = await route.fetch({
-    headers: headersForPreviewRequest(
-      request.url(),
-      accessToken,
-      request.headers(),
-    ),
-    maxRedirects: 0,
-  });
-  await route.fulfill({ response });
+  try {
+    const response = await route.fetch({
+      headers: headersForPreviewRequest(
+        request.url(),
+        accessToken,
+        request.headers(),
+      ),
+      maxRedirects: 0,
+    });
+    await route.fulfill({ response });
+  } catch {
+    try {
+      await route.abort();
+    } catch {
+      // The route or page may already be disposed during teardown.
+    }
+  }
 }
 
 export const test = base.extend<{ previewAuthorization: void }>({

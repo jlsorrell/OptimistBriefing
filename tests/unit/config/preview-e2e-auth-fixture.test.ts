@@ -91,6 +91,52 @@ describe("preview E2E bearer fixture", () => {
     expect(route.continue).not.toHaveBeenCalled();
   });
 
+  it("aborts an exact-origin request when the bearer-bearing fetch rejects", async () => {
+    const abort = vi.fn().mockResolvedValue(undefined);
+    const route = {
+      request: () => ({
+        url: () => `${PREVIEW_ORIGIN}/archive`,
+        headers: () => ({ accept: "text/html" }),
+      }),
+      abort,
+      fetch: vi.fn().mockRejectedValue(new Error("route disposed")),
+      fulfill: vi.fn(),
+    };
+
+    await expect(routePreviewRequest(route as never, token)).resolves.toBeUndefined();
+    expect(abort).toHaveBeenCalledWith();
+  });
+
+  it("aborts an exact-origin request when fulfilling the fetched response rejects", async () => {
+    const abort = vi.fn().mockResolvedValue(undefined);
+    const route = {
+      request: () => ({
+        url: () => `${PREVIEW_ORIGIN}/archive`,
+        headers: () => ({ accept: "text/html" }),
+      }),
+      abort,
+      fetch: vi.fn().mockResolvedValue({ status: () => 200 }),
+      fulfill: vi.fn().mockRejectedValue(new Error("route disposed")),
+    };
+
+    await expect(routePreviewRequest(route as never, token)).resolves.toBeUndefined();
+    expect(abort).toHaveBeenCalledWith();
+  });
+
+  it("contains a secondary abort rejection after an exact-origin lifecycle failure", async () => {
+    const route = {
+      request: () => ({
+        url: () => `${PREVIEW_ORIGIN}/archive`,
+        headers: () => ({ accept: "text/html" }),
+      }),
+      abort: vi.fn().mockRejectedValue(new Error("route already disposed")),
+      fetch: vi.fn().mockRejectedValue(new Error("page closed")),
+      fulfill: vi.fn(),
+    };
+
+    await expect(routePreviewRequest(route as never, token)).resolves.toBeUndefined();
+  });
+
   it("continues an off-origin request without adding or forwarding a bearer", async () => {
     const route = {
       request: () => ({
