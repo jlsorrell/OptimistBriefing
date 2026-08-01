@@ -54,6 +54,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 function createDiscoveryDependencies(
   options: {
     challenge?: string;
+    healthStatus?: number;
     protectedResource?: Record<string, unknown>;
     authorizationServer?: Record<string, unknown>;
     registration?: unknown;
@@ -68,7 +69,7 @@ function createDiscoveryDependencies(
       else seenRequests.push({ url: requestURL, init });
       if (requestURL === `${PREVIEW_ORIGIN}/health`) {
         return new Response(null, {
-          status: 401,
+          status: options.healthStatus ?? 401,
           headers: {
             "www-authenticate": options.challenge ??
               `Bearer resource_metadata="${PREVIEW_ORIGIN}/.well-known/cloudflare-access-protected-resource/health"`,
@@ -111,6 +112,19 @@ describe("preview managed OAuth discovery", () => {
       [`${PREVIEW_ORIGIN}/.well-known/cloudflare-access-protected-resource/health`, "GET"],
       [`${ACCESS_TEAM_ORIGIN}/.well-known/oauth-authorization-server`, "GET"],
       [`${ACCESS_TEAM_ORIGIN}/cdn-cgi/access/oauth/registration`, "POST"],
+    ]);
+  });
+
+  it.each([200, 302, 500])("rejects a %i health response before discovery", async (healthStatus) => {
+    const dependencies = createDiscoveryDependencies({ healthStatus });
+
+    await expect(authorizePreviewWithManagedOAuth(
+      { baseURL: PREVIEW_ORIGIN },
+      dependencies,
+    )).rejects.toSatisfy((error: unknown) => expectGenericFailure(error));
+
+    expect(dependencies.seenRequests.map(({ url }) => url)).toEqual([
+      `${PREVIEW_ORIGIN}/health`,
     ]);
   });
 
@@ -375,6 +389,7 @@ describe("preview managed OAuth authorization", () => {
       { options: { token: { token_body_fixture: "token-body" } }, forbidden: ["token-body", "code-fixture"] },
       { options: { token: { access_token: "access-token-fixture", token_type: "mac" } }, forbidden: ["access-token-fixture"] },
       { options: { validatedHealth: jsonResponse({ status: "not-ok", health_body_fixture: "health-body" }) }, forbidden: ["health-body", "access-token-fixture"] },
+      { options: { validatedHealth: jsonResponse({ status: "ok" }, 201) }, forbidden: ["access-token-fixture"] },
       { options: { validatedHealth: jsonResponse({ status: "ok" }, 403) }, forbidden: ["access-token-fixture"] },
     ];
 

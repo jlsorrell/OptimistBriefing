@@ -278,6 +278,7 @@ export async function authorizePreviewWithManagedOAuth(
     if (input.baseURL !== PREVIEW_ORIGIN || signal?.aborted) throw failure();
     const fetchImplementation = dependencies.fetch ?? fetch;
     const health = await fetchImplementation(`${PREVIEW_ORIGIN}/health`, requestOptions(signal));
+    if (health.status !== 401) throw failure();
     const resourceMetadataURL = parseResourceMetadataURL(health.headers.get("www-authenticate"));
     const protectedResource = await readJSON(await fetchImplementation(resourceMetadataURL, requestOptions(signal)));
     assertProtectedResourceMetadata(protectedResource);
@@ -350,7 +351,9 @@ export async function authorizePreviewWithManagedOAuth(
     const validatedHealth = await fetchImplementation(`${PREVIEW_ORIGIN}/health`, requestOptions(signal, {
       headers: { authorization: `Bearer ${token}` },
     }));
-    if (!validatedHealth.ok || !isExactHealthyResponse(await readJSON(validatedHealth))) throw failure();
+    if (validatedHealth.status !== 200 || !isExactHealthyResponse(await readJSON(validatedHealth))) {
+      throw failure();
+    }
     return token;
   } catch {
     throw failure();
