@@ -21,12 +21,13 @@ const STATUSES = new Set<TestStatus>([
   "interrupted",
 ]);
 const DIAGNOSTIC_PATTERN =
-  /^OPTIMIST_PREVIEW_TEST_RESULT project=(desktop|tablet|mobile) file=(tests\/preview-e2e\/(?:access\.spec\.ts|content\.spec\.ts|responsive-accessibility\.spec\.ts)) line=([1-9]\d*) status=(passed|failed|timedOut|skipped|interrupted)$/;
+  /^OPTIMIST_PREVIEW_TEST_RESULT project=(desktop|tablet|mobile) file=(tests\/preview-e2e\/(?:access\.spec\.ts|content\.spec\.ts|responsive-accessibility\.spec\.ts)) line=([1-9]\d*) errorLine=(0|[1-9]\d*) status=(passed|failed|timedOut|skipped|interrupted)$/;
 
 interface PreviewTestDiagnostic {
   project: string;
   file: string;
   line: number;
+  errorLine: number;
   status: string;
 }
 
@@ -42,6 +43,9 @@ export function formatPreviewTestDiagnostic(
     !Number.isSafeInteger(diagnostic.line) ||
     diagnostic.line <= 0 ||
     diagnostic.line > maximumLine ||
+    !Number.isSafeInteger(diagnostic.errorLine) ||
+    diagnostic.errorLine < 0 ||
+    diagnostic.errorLine > maximumLine ||
     !STATUSES.has(diagnostic.status as TestStatus)
   ) {
     return undefined;
@@ -50,6 +54,7 @@ export function formatPreviewTestDiagnostic(
     ` project=${diagnostic.project}` +
     ` file=${diagnostic.file}` +
     ` line=${diagnostic.line}` +
+    ` errorLine=${diagnostic.errorLine}` +
     ` status=${diagnostic.status}`;
 }
 
@@ -62,7 +67,8 @@ export function parsePreviewTestDiagnostics(output: string): string[] {
       project: match[1]!,
       file: match[2]!,
       line: Number(match[3]),
-      status: match[4]!,
+      errorLine: Number(match[4]),
+      status: match[5]!,
     });
     if (formatted === line) diagnostics.push(formatted);
   }
@@ -90,10 +96,32 @@ export default class SafePreviewReporter implements Reporter {
       this.#rootDirectory,
       resolve(this.#rootDirectory, test.location.file),
     ).split(sep).join("/");
+    const errorLocation = result.errors[0]?.location;
+    let errorLine = 0;
+    if (errorLocation !== undefined) {
+      const errorFile = relative(
+        this.#rootDirectory,
+        resolve(this.#rootDirectory, errorLocation.file),
+      ).split(sep).join("/");
+      const maximumLine = FILE_MAX_SOURCE_LINES[
+        file as keyof typeof FILE_MAX_SOURCE_LINES
+      ];
+      if (
+        errorLocation.file === test.location.file &&
+        errorFile === file &&
+        maximumLine !== undefined &&
+        Number.isSafeInteger(errorLocation.line) &&
+        errorLocation.line > 0 &&
+        errorLocation.line <= maximumLine
+      ) {
+        errorLine = errorLocation.line;
+      }
+    }
     const diagnostic = formatPreviewTestDiagnostic({
       project: project ?? "",
       file,
       line: test.location.line,
+      errorLine,
       status: result.status,
     });
     if (diagnostic !== undefined) this.#write(`${diagnostic}\n`);
