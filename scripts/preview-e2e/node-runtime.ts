@@ -14,6 +14,7 @@ import type { PreviewHarnessDependencies } from "./harness";
 import {
   authorizePreviewWithManagedOAuth,
   openPreviewAuthorizationURL,
+  type ManagedOAuthStage,
 } from "./managed-oauth";
 import {
   capturePreviewTempDirectoryOwnership,
@@ -41,6 +42,9 @@ interface PreviewSuiteOptions {
   writeOutput?: (text: string, destination: "stdout" | "stderr") => void;
   terminationGraceMilliseconds?: number;
   terminationFallbackMilliseconds?: number;
+}
+interface NodePreviewHarnessOptions {
+  writeOutput?: (text: string, destination: "stdout" | "stderr") => void;
 }
 const DEFAULT_TERMINATION_GRACE_MILLISECONDS = 2_000;
 const DEFAULT_TERMINATION_FALLBACK_MILLISECONDS = 2_000;
@@ -187,7 +191,15 @@ export async function runPreviewSuite(
   });
 }
 
-export function createNodePreviewHarnessDependencies(): PreviewHarnessDependencies {
+export function createNodePreviewHarnessDependencies(
+  options: NodePreviewHarnessOptions = {},
+): PreviewHarnessDependencies {
+  const writeOutput = options.writeOutput ?? ((text: string, destination: "stdout" | "stderr") => {
+    process[destination].write(text);
+  });
+  const reportStage = (stage: ManagedOAuthStage) => {
+    writeOutput(`Preview authorization: ${stage}\n`, "stdout");
+  };
   return {
     createTempDirectory: async () => capturePreviewTempDirectoryOwnership(
       await createPreviewTempDirectory(),
@@ -199,7 +211,7 @@ export function createNodePreviewHarnessDependencies(): PreviewHarnessDependenci
     authorizePreview: (input, signal) =>
       authorizePreviewWithManagedOAuth(
         input,
-        { openAuthorizationURL: openPreviewAuthorizationURL },
+        { openAuthorizationURL: openPreviewAuthorizationURL, reportStage },
         signal,
       ),
     runPreviewSuite,

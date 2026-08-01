@@ -202,14 +202,18 @@ function createAuthorizationDependencies(options: {
   registrationBodies: unknown[];
   tokenBodies: URLSearchParams[];
   authorizationURLs: URL[];
+  stages: string[];
 } {
   const registrationBodies: unknown[] = [];
   const tokenBodies: URLSearchParams[] = [];
   const authorizationURLs: URL[] = [];
+  const stages: string[] = [];
   return {
     registrationBodies,
     tokenBodies,
     authorizationURLs,
+    stages,
+    reportStage: (stage) => { stages.push(stage); },
     fetch: async (url, init) => {
       const requestURL = String(url);
       if (requestURL === `${PREVIEW_ORIGIN}/health`) {
@@ -307,6 +311,65 @@ describe("preview managed OAuth authorization", () => {
     expect(verifier).toMatch(/^[A-Za-z0-9._~-]{43,128}$/);
     expect(challenge).toBe(s256(verifier));
     expect(state).toMatch(/^[A-Za-z0-9_-]+$/);
+    expect(dependencies.stages).toEqual([
+      "preview discovery",
+      "resource metadata",
+      "authorization-server metadata",
+      "client registration",
+      "waiting for browser authorization callback",
+      "token exchange",
+      "authenticated health validation",
+      "authorization complete",
+    ]);
+  });
+
+  it.each([
+    {
+      name: "client registration",
+      options: { registration: { registration_body_fixture: "registration-body" } },
+      lastStage: "client registration",
+    },
+    {
+      name: "browser authorization callback",
+      options: { callback: async () => { throw new Error("callback-secret-fixture"); } },
+      lastStage: "waiting for browser authorization callback",
+    },
+    {
+      name: "token exchange",
+      options: {
+        callback: async (url: URL) => {
+          await fetch(authorizationCallbackURL(url, {
+            state: url.searchParams.get("state")!,
+            code: "code-secret-fixture",
+          }));
+        },
+        token: { token_body_fixture: "token-secret-fixture" },
+      },
+      lastStage: "token exchange",
+    },
+    {
+      name: "authenticated health validation",
+      options: {
+        callback: async (url: URL) => {
+          await fetch(authorizationCallbackURL(url, {
+            state: url.searchParams.get("state")!,
+            code: "code-secret-fixture",
+          }));
+        },
+        validatedHealth: jsonResponse({ status: "health-secret-fixture" }),
+      },
+      lastStage: "authenticated health validation",
+    },
+  ])("localizes a $name failure to the last fixed stage", async ({ options, lastStage }) => {
+    const dependencies = createAuthorizationDependencies(options);
+
+    await expect(authorizePreviewWithManagedOAuth(
+      { baseURL: PREVIEW_ORIGIN },
+      dependencies,
+    )).rejects.toThrow(GENERIC_FAILURE);
+
+    expect(dependencies.stages.at(-1)).toBe(lastStage);
+    expect(dependencies.stages).not.toContain("authorization complete");
   });
 
   const callbackFailures: Array<{

@@ -90,9 +90,35 @@ describe("preview E2E Node runtime", () => {
     );
     expect(authorizePreviewWithManagedOAuth).toHaveBeenCalledWith(
       { baseURL },
-      { openAuthorizationURL: openPreviewAuthorizationURL },
+      {
+        openAuthorizationURL: openPreviewAuthorizationURL,
+        reportStage: expect.any(Function),
+      },
       signal,
     );
+  });
+
+  it("writes only fixed Managed OAuth stage text to stdout", async () => {
+    const secret = "url-state-code-verifier-token-cookie-body-secret-fixture";
+    const writeOutput = vi.fn();
+    vi.mocked(authorizePreviewWithManagedOAuth).mockImplementation(
+      async (_input, oauthDependencies) => {
+        oauthDependencies?.reportStage?.("client registration");
+        throw new Error(secret);
+      },
+    );
+    const dependencies = createNodePreviewHarnessDependencies({ writeOutput });
+
+    await expect(dependencies.authorizePreview(
+      { baseURL },
+      new AbortController().signal,
+    )).rejects.toThrow(secret);
+
+    expect(writeOutput).toHaveBeenCalledExactlyOnceWith(
+      "Preview authorization: client registration\n",
+      "stdout",
+    );
+    expect(JSON.stringify(writeOutput.mock.calls)).not.toContain(secret);
   });
 
   it("removes only exact-prefix directories under the supplied temporary parent", async () => {

@@ -26,9 +26,20 @@ interface AuthorizationServerMetadata {
   code_challenge_methods_supported: string[];
 }
 
+export type ManagedOAuthStage =
+  | "preview discovery"
+  | "resource metadata"
+  | "authorization-server metadata"
+  | "client registration"
+  | "waiting for browser authorization callback"
+  | "token exchange"
+  | "authenticated health validation"
+  | "authorization complete";
+
 export interface ManagedOAuthDependencies {
   fetch?: (url: string, init?: RequestInit) => Promise<Response>;
   openAuthorizationURL?: (url: string) => Promise<void>;
+  reportStage?: (stage: ManagedOAuthStage) => void;
   setAuthorizationTimeout?: (handler: () => void, milliseconds: number) => NodeJS.Timeout;
   clearAuthorizationTimeout?: (timeout: NodeJS.Timeout) => void;
 }
@@ -277,11 +288,14 @@ export async function authorizePreviewWithManagedOAuth(
   try {
     if (input.baseURL !== PREVIEW_ORIGIN || signal?.aborted) throw failure();
     const fetchImplementation = dependencies.fetch ?? fetch;
+    dependencies.reportStage?.("preview discovery");
     const health = await fetchImplementation(`${PREVIEW_ORIGIN}/health`, requestOptions(signal));
     if (health.status !== 401) throw failure();
     const resourceMetadataURL = parseResourceMetadataURL(health.headers.get("www-authenticate"));
+    dependencies.reportStage?.("resource metadata");
     const protectedResource = await readJSON(await fetchImplementation(resourceMetadataURL, requestOptions(signal)));
     assertProtectedResourceMetadata(protectedResource);
+    dependencies.reportStage?.("authorization-server metadata");
     const authorizationServer = await readJSON(await fetchImplementation(
       AUTHORIZATION_SERVER_METADATA_URL,
       requestOptions(signal),
@@ -290,6 +304,7 @@ export async function authorizePreviewWithManagedOAuth(
     const verifier = randomBase64URL(48);
     const state = randomBase64URL(32);
     loopback = await createLoopbackCallback(state, signal);
+    dependencies.reportStage?.("client registration");
     const registration = await readJSON(await fetchImplementation(
       authorizationServer.registration_endpoint,
       requestOptions(signal, {
@@ -315,6 +330,7 @@ export async function authorizePreviewWithManagedOAuth(
       resource: PREVIEW_ORIGIN,
       state,
     }).toString();
+    dependencies.reportStage?.("waiting for browser authorization callback");
     const setAuthorizationTimeout = dependencies.setAuthorizationTimeout ?? setTimeout;
     const timeoutCallback = loopback.callback.then(
       (code) => code,
@@ -334,6 +350,7 @@ export async function authorizePreviewWithManagedOAuth(
     if (timeout === undefined) throw failure();
     clearAuthorizationTimeout(timeout);
     timeout = undefined;
+    dependencies.reportStage?.("token exchange");
     const token = validateToken(await readJSON(await fetchImplementation(
       authorizationServer.token_endpoint,
       requestOptions(signal, {
@@ -348,12 +365,14 @@ export async function authorizePreviewWithManagedOAuth(
         }).toString(),
       }),
     )));
+    dependencies.reportStage?.("authenticated health validation");
     const validatedHealth = await fetchImplementation(`${PREVIEW_ORIGIN}/health`, requestOptions(signal, {
       headers: { authorization: `Bearer ${token}` },
     }));
     if (validatedHealth.status !== 200 || !isExactHealthyResponse(await readJSON(validatedHealth))) {
       throw failure();
     }
+    dependencies.reportStage?.("authorization complete");
     return token;
   } catch {
     throw failure();
