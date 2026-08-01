@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, lstatSync, rmSync } from "node:fs";
 import { chmod, lstat, mkdtemp, open, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -46,6 +46,7 @@ interface PreviewBrowser {
 
 interface PreviewChromium {
   launch(options: {
+    channel: "chrome";
     headless: boolean;
     timeout: number;
   }): Promise<PreviewBrowser>;
@@ -66,6 +67,11 @@ interface PreviewSuiteOptions {
   terminationFallbackMilliseconds?: number;
 }
 
+interface PreviewExitEventSource {
+  on(event: "exit", listener: () => void): unknown;
+  off(event: "exit", listener: () => void): unknown;
+}
+
 const DEFAULT_TERMINATION_GRACE_MILLISECONDS = 2_000;
 const DEFAULT_TERMINATION_FALLBACK_MILLISECONDS = 2_000;
 const PREVIEW_BROWSER_LAUNCH_TIMEOUT_MILLISECONDS = 15_000;
@@ -83,6 +89,37 @@ export async function removePreviewTempDirectory(
     force: true,
     recursive: true,
   });
+}
+
+export function registerPreviewExitCleanup(
+  tempDirectory: string,
+  processEvents: PreviewExitEventSource = process,
+): () => void {
+  const protectedDirectory = assertProtectedTemporaryDirectory(tempDirectory);
+  const ownedMetadata = lstatSync(protectedDirectory);
+  let registered = true;
+  const cleanup = () => {
+    try {
+      const candidate = assertProtectedTemporaryDirectory(protectedDirectory);
+      const currentMetadata = lstatSync(candidate);
+      if (
+        currentMetadata.dev !== ownedMetadata.dev ||
+        currentMetadata.ino !== ownedMetadata.ino
+      ) {
+        return;
+      }
+      rmSync(candidate, { force: true, recursive: true });
+    } catch {
+      // Exit cleanup must fail closed without exposing paths or following replacements.
+    }
+  };
+  const unregister = () => {
+    if (!registered) return;
+    registered = false;
+    processEvents.off("exit", cleanup);
+  };
+  processEvents.on("exit", cleanup);
+  return unregister;
 }
 
 function isPlaywrightNavigationError(error: unknown): boolean {
@@ -246,12 +283,15 @@ async function launchPreviewBrowser(
     // Playwright owns launch-process cleanup at this deadline, so shutdown can
     // join the real launch instead of abandoning it behind a separate timer.
     browser = await browserDriver.launch({
+      channel: "chrome",
       headless: false,
       timeout: PREVIEW_BROWSER_LAUNCH_TIMEOUT_MILLISECONDS,
     });
-  } catch (error) {
+  } catch {
     if (signal.aborted) throw new Error("Preview harness terminated.");
-    throw error;
+    throw new Error(
+      "Preview authentication browser could not start; install stable Google Chrome and retry.",
+    );
   }
   if (!signal.aborted) return browser;
   await browser.close().catch(() => undefined);
@@ -463,6 +503,7 @@ export function createNodePreviewHarnessDependencies(): PreviewHarnessDependenci
   return {
     createTempDirectory: createPreviewTempDirectory,
     removeTempDirectory: removePreviewTempDirectory,
+    registerExitCleanup: registerPreviewExitCleanup,
     registerSignalCleanup: registerPreviewSignalCleanup,
     captureAccessState: (input, signal) =>
       capturePreviewAccessState(input, chromium, signal),

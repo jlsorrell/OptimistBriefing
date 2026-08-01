@@ -5,6 +5,7 @@ import { resolvePreviewBaseURL } from "./environment";
 export interface PreviewHarnessDependencies {
   createTempDirectory(): Promise<string>;
   removeTempDirectory(tempDirectory: string): Promise<void>;
+  registerExitCleanup(tempDirectory: string): () => void;
   registerSignalCleanup(
     cleanup: (signal: NodeJS.Signals) => Promise<void>,
   ): () => void;
@@ -22,9 +23,13 @@ export async function runPreviewHarness(
   const baseURL = resolvePreviewBaseURL(env.OPTIMIST_PREVIEW_BASE_URL);
   let tempDirectory: string | undefined;
   let cleanupPromise: Promise<void> | undefined;
+  let unregisterExitCleanup: (() => void) | undefined;
   const cleanup = () => {
     if (tempDirectory === undefined) return Promise.resolve();
-    cleanupPromise ??= dependencies.removeTempDirectory(tempDirectory);
+    cleanupPromise ??= dependencies.removeTempDirectory(tempDirectory).then(() => {
+      unregisterExitCleanup?.();
+      unregisterExitCleanup = undefined;
+    });
     return cleanupPromise;
   };
   const abortController = new AbortController();
@@ -50,6 +55,7 @@ export async function runPreviewHarness(
   try {
     activeOperation = dependencies.createTempDirectory().then((createdDirectory) => {
       tempDirectory = createdDirectory;
+      unregisterExitCleanup = dependencies.registerExitCleanup(createdDirectory);
       return createdDirectory;
     });
     await activeOperation;

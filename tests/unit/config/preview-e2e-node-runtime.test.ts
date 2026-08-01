@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { chmod, link, lstat, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -12,6 +12,7 @@ import {
   createPreviewSignalHandler,
   createPreviewTempDirectory,
   previewNpxExecutable,
+  registerPreviewExitCleanup,
   removePreviewTempDirectory,
   runPreviewSuite,
 } from "../../../scripts/preview-e2e/node-runtime";
@@ -81,11 +82,18 @@ describe("preview E2E Node runtime", () => {
       close: vi.fn().mockResolvedValue(undefined),
     };
 
+    const launch = vi.fn().mockResolvedValue(browser);
+
     await capturePreviewAccessState(
       { baseURL, storageStatePath },
-      { launch: vi.fn().mockResolvedValue(browser) },
+      { launch },
     );
 
+    expect(launch).toHaveBeenCalledWith({
+      channel: "chrome",
+      headless: false,
+      timeout: 15_000,
+    });
     const metadata = await lstat(storageStatePath);
     expect(metadata.isSymbolicLink()).toBe(false);
     expect(metadata.isFile()).toBe(true);
@@ -378,6 +386,26 @@ describe("preview E2E Node runtime", () => {
     });
   });
 
+  it("redacts a missing stable Chrome channel failure", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const launch = vi.fn().mockRejectedValue(new Error(
+      "Chromium distribution 'chrome' is not found at /Applications/Google Chrome.app",
+    ));
+
+    await expect(capturePreviewAccessState(
+      { baseURL, storageStatePath: join(tempDirectory, "storage-state.json") },
+      { launch },
+    )).rejects.toMatchObject({
+      message: "Preview authentication browser could not start; install stable Google Chrome and retry.",
+    });
+    expect(launch).toHaveBeenCalledWith({
+      channel: "chrome",
+      headless: false,
+      timeout: 15_000,
+    });
+  });
+
   it("closes and awaits the authentication browser when aborted", async () => {
     const tempDirectory = await createPreviewTempDirectory();
     temporaryParents.push(tempDirectory);
@@ -466,7 +494,11 @@ describe("preview E2E Node runtime", () => {
     await vi.advanceTimersByTimeAsync(1);
 
     await expect(signalHandling).resolves.toBeUndefined();
-    expect(launch).toHaveBeenCalledWith({ headless: false, timeout: 15_000 });
+    expect(launch).toHaveBeenCalledWith({
+      channel: "chrome",
+      headless: false,
+      timeout: 15_000,
+    });
     expect(launchTerminated).toBe(true);
     expect(order).toEqual(["cleanup", "unregister", "relay:SIGTERM"]);
   });
@@ -528,6 +560,70 @@ describe("preview E2E Node runtime", () => {
       "Refusing unsafe preview cleanup target",
     );
     await expect(stat(unrelatedDirectory)).resolves.toBeDefined();
+  });
+
+  it("registers a synchronous exit cleanup for the exact protected directory", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    await writeFile(join(tempDirectory, "storage-state.json"), "{}", { mode: 0o600 });
+    const processEvents = new EventEmitter();
+
+    registerPreviewExitCleanup(tempDirectory, processEvents);
+    processEvents.emit("exit");
+    processEvents.emit("exit");
+
+    await expect(stat(tempDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("unregisters synchronous exit cleanup after successful asynchronous cleanup", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const processEvents = new EventEmitter();
+    const unregister = registerPreviewExitCleanup(tempDirectory, processEvents);
+
+    unregister();
+    processEvents.emit("exit");
+
+    await expect(stat(tempDirectory)).resolves.toBeDefined();
+  });
+
+  it("runs synchronous exit cleanup while signal shutdown is still pending", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const processEvents = new EventEmitter();
+    registerPreviewExitCleanup(tempDirectory, processEvents);
+    let finishShutdown: (() => void) | undefined;
+    const shutdownGate = new Promise<void>((resolve) => { finishShutdown = resolve; });
+    const handler = createPreviewSignalHandler(
+      async () => { await shutdownGate; },
+      vi.fn(),
+      vi.fn(),
+    );
+
+    const signalHandling = handler("SIGINT");
+    processEvents.emit("exit");
+
+    await expect(stat(tempDirectory)).rejects.toMatchObject({ code: "ENOENT" });
+    finishShutdown!();
+    await expect(signalHandling).resolves.toBeUndefined();
+  });
+
+  it("refuses synchronous exit cleanup after the owned path is replaced", async () => {
+    const tempDirectory = await createPreviewTempDirectory();
+    temporaryParents.push(tempDirectory);
+    const movedDirectory = `${tempDirectory}-owned`;
+    temporaryParents.push(movedDirectory);
+    const processEvents = new EventEmitter();
+    registerPreviewExitCleanup(tempDirectory, processEvents);
+    await rename(tempDirectory, movedDirectory);
+    await mkdir(tempDirectory, { mode: 0o700 });
+    await writeFile(join(tempDirectory, "keep.txt"), "keep");
+
+    processEvents.emit("exit");
+
+    await expect(stat(movedDirectory)).resolves.toBeDefined();
+    await expect(readFile(join(tempDirectory, "keep.txt"), "utf8"))
+      .resolves.toBe("keep");
   });
 
   it("rejects a symlinked cleanup directory without touching its target", async () => {

@@ -14,6 +14,7 @@ function createDependencies(
 ): PreviewHarnessDependencies & {
   createTempDirectory: ReturnType<typeof vi.fn>;
   removeTempDirectory: ReturnType<typeof vi.fn>;
+  registerExitCleanup: ReturnType<typeof vi.fn>;
   registerSignalCleanup: ReturnType<typeof vi.fn>;
   captureAccessState: ReturnType<typeof vi.fn>;
   runPreviewSuite: ReturnType<typeof vi.fn>;
@@ -21,6 +22,7 @@ function createDependencies(
   return {
     createTempDirectory: vi.fn().mockResolvedValue(tempDirectory),
     removeTempDirectory: vi.fn().mockResolvedValue(undefined),
+    registerExitCleanup: vi.fn().mockReturnValue(vi.fn()),
     registerSignalCleanup: vi.fn().mockReturnValue(vi.fn()),
     captureAccessState: vi.fn().mockResolvedValue(undefined),
     runPreviewSuite: vi.fn().mockResolvedValue(0),
@@ -52,6 +54,18 @@ describe("preview E2E harness", () => {
     const unregister = deps.registerSignalCleanup.mock.results[0]?.value as ReturnType<typeof vi.fn>;
     expect(deps.removeTempDirectory.mock.invocationCallOrder[0]!).toBeLessThan(
       unregister.mock.invocationCallOrder[0]!,
+    );
+    expect(deps.registerExitCleanup).toHaveBeenCalledWith(tempDirectory);
+    expect(deps.createTempDirectory.mock.invocationCallOrder[0]!).toBeLessThan(
+      deps.registerExitCleanup.mock.invocationCallOrder[0]!,
+    );
+    expect(deps.registerExitCleanup.mock.invocationCallOrder[0]!).toBeLessThan(
+      deps.captureAccessState.mock.invocationCallOrder[0]!,
+    );
+    const unregisterExitCleanup = deps.registerExitCleanup.mock.results[0]
+      ?.value as ReturnType<typeof vi.fn>;
+    expect(deps.removeTempDirectory.mock.invocationCallOrder[0]!).toBeLessThan(
+      unregisterExitCleanup.mock.invocationCallOrder[0]!,
     );
   });
 
@@ -151,5 +165,17 @@ describe("preview E2E harness", () => {
     await expect(running).resolves.toBe(1);
     expect(deps.captureAccessState).not.toHaveBeenCalled();
     expect(deps.removeTempDirectory).toHaveBeenCalledOnce();
+    expect(deps.registerExitCleanup).toHaveBeenCalledWith(tempDirectory);
+  });
+
+  it("keeps the exit fallback registered when asynchronous cleanup fails", async () => {
+    const deps = createDependencies();
+    deps.removeTempDirectory.mockRejectedValue(new Error("cleanup failed"));
+
+    await expect(runPreviewHarness({}, deps)).rejects.toThrow("cleanup failed");
+
+    const unregisterExitCleanup = deps.registerExitCleanup.mock.results[0]
+      ?.value as ReturnType<typeof vi.fn>;
+    expect(unregisterExitCleanup).not.toHaveBeenCalled();
   });
 });
