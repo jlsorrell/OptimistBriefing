@@ -1395,7 +1395,7 @@ describe("manual editorial run", () => {
     )).toBe(true);
   });
 
-  it("uses embeddings for clustering without retaining them in cluster output", async () => {
+  it("accepts compact cluster and shortlist checkpoints after semantic clustering", async () => {
     const embedding = [1, ...Array<number>(1_535).fill(0)];
     const candidates = ["source-a", "source-b"].map((id) => ({
       ...fixtureItem(id, "world"),
@@ -1405,10 +1405,11 @@ describe("manual editorial run", () => {
         namedEntities: ["Example Agency"],
       },
     }));
+    const store = new FixtureStore();
     const context = createProductionPipelineContext({
       editionDate: "2033-02-08",
       runId: "run-compact-cluster-checkpoint",
-      store: new FixtureStore(),
+      store,
       now: () => now,
       providers: {
         summary: new FakeModelProvider({
@@ -1424,16 +1425,30 @@ describe("manual editorial run", () => {
       },
       collectCandidates: async () => candidates,
     });
+    context.synthesize = async (items) => items.map((item) => ({
+      item,
+      summary: fixtureSummary(item),
+    }));
+    context.validate = async (entries) => entries.map((entry) => ({
+      ...entry,
+      valid: true,
+    }));
 
-    const normalized = await context.normalize(await context.collect());
-    const enriched = await context.enrich(normalized);
-    const scored = await context.score(await context.prefilter(enriched));
+    await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+      status: "failed",
+    });
+    expect(await store.readCheckpoint(context.runId, "cluster")).toBe(true);
+    expect(await store.readCheckpoint(context.runId, "shortlist")).toBe(true);
+
+    const scored = store.artifacts.get(`${context.runId}:score`);
+    const clustered = store.artifacts.get(`${context.runId}:cluster`);
+    const shortlisted = store.artifacts.get(`${context.runId}:shortlist`);
+
     expect(JSON.stringify(scored)).toContain('"embedding"');
-
-    const clustered = await context.cluster(scored);
-
-    expect(clustered).toHaveLength(1);
+    expect(clustered).toBeDefined();
+    expect(shortlisted).toBeDefined();
     expect(JSON.stringify(clustered)).not.toContain('"embedding"');
+    expect(JSON.stringify(shortlisted)).not.toContain('"embedding"');
   });
 
   it("rejects a claim when its cited source lacks the claimed evidence", async () => {

@@ -163,9 +163,7 @@ function stageItemsSchema(stage: ItemStage) {
           stage === "enrich" ||
           stage === "prefilter" ||
           stage === "assess" ||
-          stage === "score" ||
-          stage === "cluster" ||
-          stage === "shortlist"
+          stage === "score"
         ) {
           requireField(payload.embedding !== undefined, "embedding");
           requireField(
