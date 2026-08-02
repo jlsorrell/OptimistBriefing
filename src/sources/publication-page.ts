@@ -233,7 +233,10 @@ export class PublicationPageAdapter {
           extractionLevel: extraction.extractionLevel,
           contentUse: restriction(this.source, "contentUse", "metadata-only"),
           paywall: restriction(this.source, "paywall", "unknown"),
-          retention: content === null ? "metadata-only" : "ephemeral-only",
+          retention:
+            abstract === null && content === null
+              ? "metadata-only"
+              : "ephemeral-only",
           discoveryMechanism: "page",
           listingUrl: response.finalUrl,
         },

@@ -98,3 +98,55 @@ The implementation enforces the same boundary in `normalizedCandidate`: it first
 
 - Full `npm test -- --run tests/unit` produced 13 failures in `tests/unit/config/preview-e2e-managed-oauth.test.ts` during authorization-server metadata setup (565 of 578 tests passed). Task 3 does not touch that code; this is the same existing suite concern recorded in Task 2.
 - The first worker command inside the sandbox could not bind `127.0.0.1` (`EPERM`); the approved unsandboxed rerun produced the integration result above.
+
+## Fix Round 1
+
+### Findings addressed
+
+1. RSS `content:encoded`/description text and unfetched page listing summaries were stored in `abstract` but labeled `metadata-only`. Because durable checkpoint sanitation only bounds `ephemeral-only` candidates, those source bodies could persist unbounded.
+2. Governance routing matched abstract/body evidence but accepted the route only when `deriveNewsSignals` selected AI Policy from the title. A generic-title official evaluation-policy publication therefore fell back to Technology and was discarded.
+
+### Exact RED evidence
+
+- Command: `npm test -- --run tests/unit/sources/publication-collector.test.ts -t "durable checkpoints"`
+- Output: 2 failed, 6 skipped. Both regressions expected `metadata.retention` to be `ephemeral-only` but received `metadata-only`, proving the durable sanitizer was bypassed for oversized RSS text and an unfetched listing summary.
+- Command: `npm test -- --run tests/unit/editorial/route-publication.test.ts -t "body governance evidence"`
+- Output: 1 failed, 7 skipped. The generic-title post with explicit AI governance/evaluation-policy evidence in its abstract returned `null` instead of an `article` with `primarySection: "ai_policy"`.
+
+### Minimal fixes
+
+- `src/sources/publication-collector.ts`: RSS publications now use `ephemeral-only` retention whenever the parsed item contains abstract or content text; genuinely text-free records remain `metadata-only`.
+- `src/sources/publication-page.ts`: page publications apply the same retention rule to listing/JSON-LD summaries as well as fetched detail content.
+- `src/editorial/route-publication.ts`: the governance branch supplies the already-retrieved material it matched to the existing news-signal section selector. Catalog `ai_policy` eligibility remains mandatory, and the candidate's actual title is unchanged.
+
+### Exact GREEN evidence
+
+- `npm test -- --run tests/unit/sources/publication-collector.test.ts -t "durable checkpoints"` — 2 passed, 6 skipped.
+- `npm test -- --run tests/unit/editorial/route-publication.test.ts -t "body governance evidence"` — 1 passed, 7 skipped.
+- `npm test -- --run tests/unit/sources/publication-collector.test.ts tests/unit/editorial/route-publication.test.ts tests/unit/sources/news-signals.test.ts tests/unit/sources/durable-evidence.test.ts` — 4 files, 47 tests passed.
+- `npm run check` — `tsc --noEmit` exited 0.
+- `git diff --check` — exited 0.
+
+### Files changed
+
+- `src/sources/publication-collector.ts`
+- `src/sources/publication-page.ts`
+- `src/editorial/route-publication.ts`
+- `tests/unit/sources/publication-collector.test.ts`
+- `tests/unit/editorial/route-publication.test.ts`
+- `.superpowers/sdd/2026-08-02-research-ai-discovery/task-3-report.md`
+
+### Commit
+
+- `fix: bound publication evidence and route policy bodies` (this Fix Round 1 commit)
+
+### Self-review
+
+- Text-free RSS/page candidates remain `metadata-only`; only retrieved source text is routed through ephemeral checkpoint sanitation.
+- Both new persistence regressions exercise real collector output and the same `durableCollectedCandidate` function used by production collection checkpoints. They assert the 2,000-code-point boundary and absence of sentinel tails.
+- Governance evidence may come from title, abstract, or body, but the route still requires both deterministic governance vocabulary and catalog `ai_policy` eligibility. Existing technology fallback behavior is unchanged.
+- The news-signal implementation remains shared; no parallel governance classifier or model call was added.
+
+### Concerns
+
+- None specific to Fix Round 1.

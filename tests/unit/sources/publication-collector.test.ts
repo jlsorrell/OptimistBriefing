@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 import type { SourceRecord } from "../../../src/db/repository";
+import { durableCollectedCandidate } from "../../../src/sources/durable-evidence";
 import { SourceHttpClient } from "../../../src/sources/http-client";
 import { PapersWithCodeAdapter } from "../../../src/sources/papers-with-code";
 import {
@@ -145,6 +146,40 @@ describe("PublicationCollector", () => {
     ]));
   });
 
+  it("marks oversized RSS bodies ephemeral so durable checkpoints bound them", async () => {
+    const oversized = `${"feed evidence ".repeat(220)}RSS_BODY_TAIL`;
+    const rss = `<?xml version="1.0"?><rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item><title>Bounded feed study</title><link>https://www.alignmentforum.org/posts/example/bounded-feed</link><guid>bounded-feed</guid><pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate><content:encoded><![CDATA[${oversized}]]></content:encoded></item></channel></rss>`;
+    const forum = source({
+      id: "alignment-forum",
+      canonicalName: "Alignment Forum",
+      canonicalUrl: "https://www.alignmentforum.org/",
+      restrictions: {
+        bodyRetrieval: "permitted",
+        paywall: "none",
+        contentUse: "ephemeral-summarization",
+        feedUrl: "https://www.alignmentforum.org/feed.xml?view=frontpage",
+        urlPolicy: { allowedHosts: ["www.alignmentforum.org"], allowedPorts: [""], allowedPathPrefixes: ["/feed.xml", "/posts/"] },
+      },
+      discoveryMechanism: "rss",
+      sectionEligibility: ["research", "research_radar"],
+    });
+    const collector = createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(rss, { headers: { "content-type": "application/rss+xml" } })),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [forum],
+    });
+
+    const candidate = (await collector.collect(window)).candidates[0]!;
+    const durable = durableCollectedCandidate(candidate);
+
+    expect(candidate.metadata.retention).toBe("ephemeral-only");
+    expect([...durable.abstract!]).toHaveLength(2_000);
+    expect(durable.abstract).not.toContain("RSS_BODY_TAIL");
+    expect(durable.content).toBeNull();
+  });
+
   it("settles eligible blog sources independently and ignores ineligible catalog rows", async () => {
     const collector = createPublicationCollectorFromCatalog({
       http: new SourceHttpClient({
@@ -203,6 +238,40 @@ describe("PublicationCollector", () => {
     expect(result.candidates).toHaveLength(20);
     expect(fetch).toHaveBeenCalledTimes(11);
     expect(result.candidates.filter((candidate) => candidate.content !== null)).toHaveLength(10);
+  });
+
+  it("marks unfetched listing summaries ephemeral so durable checkpoints bound them", async () => {
+    const oversized = `${"listing evidence ".repeat(180)}LISTING_SUMMARY_TAIL`;
+    const listing = `<!doctype html><html><body><article class="result"><a class="link" href="/research/unfetched">Unfetched study</a><time datetime="2026-08-01T12:00:00Z"></time><p>${oversized}</p></article></body></html>`;
+    const configured = source({
+      restrictions: {
+        ...source().restrictions,
+        listing: {
+          itemSelector: ".result",
+          linkSelector: ".link",
+          dateSelector: "time",
+          dateAttribute: "datetime",
+          summarySelector: "p",
+          maxItems: 20,
+          maxBodyFetches: 0,
+        },
+      },
+    });
+    const collector = createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(listing, { headers: { "content-type": "text/html" } })),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [configured],
+    });
+
+    const candidate = (await collector.collect(window)).candidates[0]!;
+    const durable = durableCollectedCandidate(candidate);
+
+    expect(candidate.content).toBeNull();
+    expect(candidate.metadata.retention).toBe("ephemeral-only");
+    expect([...durable.abstract!]).toHaveLength(2_000);
+    expect(durable.abstract).not.toContain("LISTING_SUMMARY_TAIL");
   });
 
   it("falls back to semantic article markup when structured configuration is absent", async () => {

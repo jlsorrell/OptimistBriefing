@@ -70,7 +70,10 @@ function routeResearch(
   });
 }
 
-function routeNews(candidate: RawPublicationCandidate): RawNewsCandidate {
+function routeNews(
+  candidate: RawPublicationCandidate,
+  sectionEvidence = candidate.title,
+): RawNewsCandidate {
   const metadata = {
     ...candidate.metadata,
     discoveryFamily: candidate.discoveryFamily,
@@ -83,7 +86,7 @@ function routeNews(candidate: RawPublicationCandidate): RawNewsCandidate {
     canCorroborateFacts: false,
     ...deriveNewsSignals({
       kind: "article",
-      title: candidate.title,
+      title: sectionEvidence,
       abstract: candidate.abstract,
       content: candidate.content,
       originalUrl: candidate.originalUrl,
@@ -107,7 +110,7 @@ export function routePublication(
     return routeResearch(candidate, topics, identifiers, explicitPaperEvidence);
   }
   if (candidate.sectionEligibility.includes("ai_policy") && GOVERNANCE.test(searchable)) {
-    const routed = routeNews(candidate);
+    const routed = routeNews(candidate, searchable);
     return routed.metadata.primarySection === "ai_policy" ? routed : null;
   }
   if (candidate.sectionEligibility.includes("technology") && TECHNOLOGY.test(searchable)) {

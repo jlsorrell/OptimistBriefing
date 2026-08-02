@@ -60,6 +60,20 @@ describe("routePublication", () => {
     });
   });
 
+  it("routes generic-title publications with body governance evidence to AI Policy", () => {
+    const governancePost = publication({
+      title: "An update from our lab",
+      abstract:
+        "We publish an official AI evaluation-policy standard with governance and regulatory accountability requirements.",
+    });
+
+    expect(routePublication(governancePost)).toMatchObject({
+      kind: "article",
+      canCorroborateFacts: false,
+      metadata: { primarySection: "ai_policy" },
+    });
+  });
+
   it("routes eligible product publications to Technology", () => {
     const productPost = publication({
       title: "We launch a new AI assistant product",

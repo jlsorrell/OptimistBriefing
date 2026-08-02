@@ -32,7 +32,10 @@ function publicationFromRss(item: RawItem, source: SourceRecord): RawPublication
       ...item.metadata,
       canCorroborateFacts: false,
       contentUse: typeof source.restrictions.contentUse === "string" ? source.restrictions.contentUse : "metadata-only",
-      retention: "metadata-only",
+      retention:
+        item.abstract === null && item.content === null
+          ? "metadata-only"
+          : "ephemeral-only",
       discoveryMechanism: "rss",
     },
   });
