@@ -30,6 +30,18 @@ export const CollectionFailureKindSchema = z.enum([
   "unknown",
 ]);
 
+export const DiscoveryFamilySchema = z.enum([
+  "arxiv",
+  "bibliographic",
+  "official-publication",
+  "commentary",
+]);
+
+export const DiscoveryWindowKindSchema = z.enum([
+  "fresh",
+  "reconsideration",
+]);
+
 export const ResearchSourceRestrictionsSchema = z
   .object({
     bodyRetrieval: z.enum(["forbidden", "permitted"]).default("forbidden"),
@@ -74,6 +86,46 @@ export const RawResearchCandidateSchema = RawItemSchema.extend({
   influentialCitationCount: z.number().int().nonnegative().nullable(),
   topics: z.array(z.string().min(1)),
 });
+
+export const RawPublicationCandidateSchema = RawItemSchema
+  .omit({ kind: true })
+  .extend({
+    kind: z.literal("publication"),
+    sectionEligibility: z.array(EditionSectionSchema).min(1),
+    discoveryFamily: DiscoveryFamilySchema,
+    relatedPaperIds: z.array(z.string().min(1)).max(16),
+  });
+
+export const DiscoveryObservationSchema = z
+  .object({
+    runId: z.string().min(1),
+    canonicalId: z.string().min(1),
+    sourceId: z.string().min(1),
+    discoveryFamily: DiscoveryFamilySchema,
+    windowKind: DiscoveryWindowKindSchema,
+    publishedAt: z.string().datetime().nullable(),
+    retrievedAt: z.string().datetime(),
+    observedAt: z.string().datetime(),
+    contentFingerprint: z.string().min(1),
+    evidenceFingerprint: z.string().min(1),
+    joinedExternalIds: z.array(z.string().min(1)).max(32),
+    route: z.enum(["research", "technology", "ai_policy", "excluded"]),
+    expiresAt: z.string().datetime(),
+  })
+  .strict();
+
+export const DiscoveryLaneDiagnosticSchema = z
+  .object({
+    laneId: z.string().min(1),
+    sourceId: z.string().min(1),
+    discoveryFamily: DiscoveryFamilySchema,
+    discovered: z.number().int().nonnegative().max(10_000),
+    deduplicated: z.number().int().nonnegative().max(10_000),
+    triaged: z.number().int().nonnegative().max(10_000),
+    assessed: z.number().int().nonnegative().max(10_000),
+    outcome: z.enum(["success", "fetch", "parse", "policy", "timeout", "unknown"]),
+  })
+  .strict();
 
 export const NewsMaterialFactSchema = z.object({
   kind: z.enum(["status", "number", "date", "amount"]),
@@ -160,6 +212,8 @@ export type CollectionWindow = z.infer<typeof CollectionWindowSchema>;
 export type CollectionFailureKind = z.infer<
   typeof CollectionFailureKindSchema
 >;
+export type DiscoveryFamily = z.infer<typeof DiscoveryFamilySchema>;
+export type DiscoveryWindowKind = z.infer<typeof DiscoveryWindowKindSchema>;
 export type CollectionFailure = {
   sourceId: string;
   kind: CollectionFailureKind;
@@ -186,6 +240,13 @@ export type RawItem = z.infer<typeof RawItemSchema>;
 export type RawResearchCandidate = z.infer<
   typeof RawResearchCandidateSchema
 >;
+export type RawPublicationCandidate = z.infer<
+  typeof RawPublicationCandidateSchema
+>;
+export type DiscoveryObservation = z.infer<typeof DiscoveryObservationSchema>;
+export type DiscoveryLaneDiagnostic = z.infer<
+  typeof DiscoveryLaneDiagnosticSchema
+>;
 export type RawNewsCandidate = z.infer<typeof RawNewsCandidateSchema>;
 export type NewsMaterialFact = z.infer<typeof NewsMaterialFactSchema>;
 export type CanonicalEventDomain = z.infer<
@@ -204,6 +265,11 @@ export type EditorialSignalRecord = z.infer<
 export interface SourceAdapter {
   readonly sourceId: string;
   collect(window: CollectionWindow): Promise<RawItem[]>;
+}
+
+export interface DiscoverySourceAdapter extends SourceAdapter {
+  readonly laneId: string;
+  readonly discoveryFamily: DiscoveryFamily;
 }
 
 export interface ResearchEnricher {

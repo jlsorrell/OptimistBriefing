@@ -5,6 +5,11 @@ import {
   ItemSchema,
   StructuredSummarySchema,
 } from "../../../src/contracts/editorial";
+import {
+  DiscoveryLaneDiagnosticSchema,
+  DiscoveryObservationSchema,
+  RawPublicationCandidateSchema,
+} from "../../../src/sources/types";
 
 describe("StructuredSummarySchema", () => {
   it("rejects a factual claim without supporting sources", () => {
@@ -95,5 +100,92 @@ describe("StructuredSummarySchema", () => {
     });
 
     expect(result.success).toBe(false);
+  });
+});
+
+describe("research discovery source contracts", () => {
+  const publication = {
+    kind: "publication",
+    sourceId: "alignment-forum",
+    sourceName: "Alignment Forum",
+    sourceRole: "blog",
+    title: "A new result on debate",
+    originalUrl: "https://www.alignmentforum.org/posts/example/result",
+    externalId: "example",
+    externalIds: ["example"],
+    publishedAt: "2026-08-01T12:00:00.000Z",
+    retrievedAt: "2026-08-02T09:00:00.000Z",
+    accessLevel: "secondary",
+    authors: ["Ada Example"],
+    institutions: [],
+    abstract: "We analyze debate under strategic incentives.",
+    content: null,
+    relatedPaperIds: [],
+    sectionEligibility: ["research", "research_radar"],
+    discoveryFamily: "commentary",
+    metadata: {},
+  };
+
+  it("accepts a bounded publication candidate", () => {
+    expect(RawPublicationCandidateSchema.parse(publication)).toMatchObject({
+      kind: "publication",
+      discoveryFamily: "commentary",
+    });
+  });
+
+  it("rejects an unknown discovery family", () => {
+    expect(
+      RawPublicationCandidateSchema.safeParse({
+        ...publication,
+        discoveryFamily: "newsletter",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects more than 16 related paper IDs", () => {
+    expect(
+      RawPublicationCandidateSchema.safeParse({
+        ...publication,
+        relatedPaperIds: Array.from(
+          { length: 17 },
+          (_, index) => `paper-${index}`,
+        ),
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects diagnostics with negative counts", () => {
+    expect(
+      DiscoveryLaneDiagnosticSchema.safeParse({
+        laneId: "alignment-forum:frontpage",
+        sourceId: "alignment-forum",
+        discoveryFamily: "commentary",
+        discovered: -1,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "success",
+      }).success,
+    ).toBe(false);
+  });
+
+  it("rejects observations with non-ISO timestamps", () => {
+    expect(
+      DiscoveryObservationSchema.safeParse({
+        runId: "run-1",
+        canonicalId: "https://example.com/publication",
+        sourceId: "alignment-forum",
+        discoveryFamily: "commentary",
+        windowKind: "fresh",
+        observedAt: "August 2, 2026",
+        publishedAt: "2026-08-01T12:00:00.000Z",
+        retrievedAt: "2026-08-02T09:00:00.000Z",
+        contentFingerprint: "content-1",
+        evidenceFingerprint: "evidence-1",
+        joinedExternalIds: ["example"],
+        route: "research",
+        expiresAt: "2026-08-09T09:00:00.000Z",
+      }).success,
+    ).toBe(false);
   });
 });

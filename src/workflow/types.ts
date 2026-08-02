@@ -19,6 +19,7 @@ import {
 import { NewsScoreSchema } from "../editorial/news-score";
 import {
   RawNewsCandidateSchema,
+  RawPublicationCandidateSchema,
   RawResearchCandidateSchema,
 } from "../sources/types";
 import type { BudgetPolicy } from "../models/cost-ledger";
@@ -46,6 +47,7 @@ export const CollectedCandidateSchema = z.union([
   ItemSchema,
   RawResearchCandidateSchema,
   RawNewsCandidateSchema,
+  RawPublicationCandidateSchema,
 ]);
 
 export type CollectedCandidate = z.infer<typeof CollectedCandidateSchema>;
