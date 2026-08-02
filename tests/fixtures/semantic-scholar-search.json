@@ -1,0 +1,39 @@
+{
+  "total": 2,
+  "token": "unused-next-page",
+  "data": [
+    {
+      "paperId": "paper-id",
+      "externalIds": {
+        "ArXiv": "2608.00001v2",
+        "DOI": "https://doi.org/10.1000/EXAMPLE"
+      },
+      "title": "Interpretable Provenance for Secure Model Evaluation",
+      "abstract": "We connect interpretability, provenance, and secure evaluation.",
+      "authors": [
+        { "authorId": "author-1", "name": "Ada Example" }
+      ],
+      "year": 2026,
+      "publicationDate": "2026-07-29",
+      "venue": "Fixture Conference",
+      "citationCount": 11,
+      "influentialCitationCount": 3,
+      "fieldsOfStudy": ["Computer Science"],
+      "url": "https://www.semanticscholar.org/paper/paper-id"
+    },
+    {
+      "paperId": "old-paper-id",
+      "externalIds": {},
+      "title": "An older result outside the collection window",
+      "abstract": "This result should be filtered locally.",
+      "authors": [],
+      "year": 2025,
+      "publicationDate": "2025-07-20",
+      "venue": null,
+      "citationCount": 1,
+      "influentialCitationCount": 0,
+      "fieldsOfStudy": ["Computer Science"],
+      "url": "https://www.semanticscholar.org/paper/old-paper-id"
+    }
+  ]
+}

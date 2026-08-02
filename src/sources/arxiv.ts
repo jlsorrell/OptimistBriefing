@@ -8,6 +8,7 @@ import {
 } from "./identifiers";
 import {
   assertSafeOutboundUrl,
+  UnsafeOutboundUrlError,
   type OutboundUrlPolicy,
 } from "./outbound-url";
 import {
@@ -15,10 +16,10 @@ import {
   RawItemSchema,
   ResearchSourceRecordSchema,
   type CollectionWindow,
+  type DiscoverySourceAdapter,
   type RawItem,
   type ResearchSourceInput,
   type ResearchSourceRecord,
-  type SourceAdapter,
 } from "./types";
 
 const ArxivAuthorSchema = z.object({
@@ -60,6 +61,7 @@ const ArxivFeedSchema = z.object({
 
 type ArxivAdapterOptions = {
   apiUrl?: string;
+  laneId?: string;
   query?: string;
   maxResults?: number;
   maxPages?: number;
@@ -82,7 +84,9 @@ function normalizeWhitespace(value: string): string {
   return value.replace(/\s+/g, " ").trim();
 }
 
-export class ArxivAdapter implements SourceAdapter {
+export class ArxivAdapter implements DiscoverySourceAdapter {
+  readonly discoveryFamily = "arxiv" as const;
+  readonly laneId: string;
   readonly sourceId: string;
   private readonly source: ResearchSourceRecord;
   private readonly apiUrl: string;
@@ -97,10 +101,18 @@ export class ArxivAdapter implements SourceAdapter {
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
     this.sourceId = this.source.id;
-    this.apiUrl = assertSafeOutboundUrl(
+    this.laneId = z
+      .string()
+      .min(1)
+      .parse(options.laneId ?? `${this.source.id}:broad`);
+    const apiUrl = assertSafeOutboundUrl(
       options.apiUrl ?? "https://export.arxiv.org/api/query",
       ARXIV_API_POLICY,
-    ).toString();
+    );
+    if (apiUrl.pathname !== "/api/query") {
+      throw new UnsafeOutboundUrlError("provider endpoint path is not pinned");
+    }
+    this.apiUrl = apiUrl.toString();
     this.query = z
       .string()
       .min(1)

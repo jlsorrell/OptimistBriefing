@@ -17,11 +17,16 @@ import {
 } from "../../../src/sources/identifiers";
 import { OpenAlexAdapter } from "../../../src/sources/openalex";
 import { PaperContentRetriever } from "../../../src/sources/paper-content";
+import {
+  createPaperDiscoveryAdapters,
+  SEMANTIC_SCHOLAR_SEED_SET_V1,
+} from "../../../src/sources/paper-discovery";
 import { ResearchCollector } from "../../../src/sources/research-collector";
 import { RssAdapter } from "../../../src/sources/rss";
 import { SemanticScholarAdapter } from "../../../src/sources/semantic-scholar";
 import type {
   CollectionWindow,
+  DiscoverySourceAdapter,
   RawItem,
   ResearchSourceRecord,
 } from "../../../src/sources/types";
@@ -177,6 +182,121 @@ async function collectorWithFixtures() {
 }
 
 describe("ResearchCollector", () => {
+  it("runs three targeted arXiv lanes and merges repeated paper identities", async () => {
+    const fixture = await loadFixture("arxiv-response.xml");
+    const requestQueries: string[] = [];
+    const http = new SourceHttpClient({
+      fetch: vi.fn(async (input: string | URL | Request) => {
+        requestQueries.push(
+          new URL(String(input)).searchParams.get("search_query") ?? "",
+        );
+        return new Response(fixture, {
+          headers: { "content-type": "application/atom+xml" },
+        });
+      }),
+      now: () => new Date("2026-07-29T08:30:00.000Z"),
+    });
+    const arxivAdapters = createPaperDiscoveryAdapters(http, [arxivSource]);
+    const collector = new ResearchCollector({
+      discoveryAdapters: arxivAdapters,
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(arxivAdapters.map(({ laneId }) => laneId)).toEqual([
+      "arxiv:alignment-interpretability",
+      "arxiv:oversight-governance",
+      "arxiv:secure-ml",
+    ]);
+    expect(arxivAdapters.every(({ sourceId }) => sourceId === "arxiv")).toBe(
+      true,
+    );
+    expect(requestQueries).toHaveLength(3);
+    expect(requestQueries.every((query) => query.includes("cat:cs."))).toBe(
+      true,
+    );
+    expect(requestQueries.join(" ")).toContain("interpretability");
+    expect(requestQueries.join(" ")).toContain("provenance");
+    expect(requestQueries.join(" ")).toContain("homomorphic encryption");
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]?.externalId).toBe("arXiv:2607.00001");
+  });
+
+  it("caps each paper discovery lane at 100 candidates", async () => {
+    const papers = Array.from({ length: 101 }, (_, index) => {
+      const paper = rawPaper();
+      const identifier = `arXiv:2607.${String(index).padStart(5, "0")}`;
+      return {
+        ...paper,
+        originalUrl: `https://arxiv.org/abs/${identifier.slice(6)}`,
+        externalId: identifier,
+        externalIds: [identifier],
+      };
+    });
+    const collector = new ResearchCollector({
+      discoveryAdapters: [{
+        sourceId: "arxiv",
+        collect: async () => papers,
+      }],
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates).toHaveLength(100);
+    expect(result.candidates.at(-1)?.externalId).toBe("arXiv:2607.00099");
+  });
+
+  it("orders paper results by lane, recency, and canonical identity", async () => {
+    const paper = (
+      identifier: string,
+      publishedAt: string,
+    ): RawItem => ({
+      ...rawPaper(),
+      originalUrl: `https://arxiv.org/abs/${identifier.slice(6)}`,
+      externalId: identifier,
+      externalIds: [identifier],
+      publishedAt,
+    });
+    const adapters = [
+      {
+        laneId: "z-lane",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        collect: async () => [
+          paper("arXiv:2607.00004", "2026-07-29T10:00:00.000Z"),
+        ],
+      },
+      {
+        laneId: "a-lane",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        collect: async () => [
+          paper("arXiv:2607.00003", "2026-07-28T10:00:00.000Z"),
+          paper("arXiv:2607.00002", "2026-07-29T10:00:00.000Z"),
+          paper("arXiv:2607.00001", "2026-07-29T10:00:00.000Z"),
+        ],
+      },
+    ] satisfies readonly DiscoverySourceAdapter[];
+    const collector = new ResearchCollector({
+      discoveryAdapters: adapters,
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates.map(({ externalId }) => externalId)).toEqual([
+      "arXiv:2607.00001",
+      "arXiv:2607.00002",
+      "arXiv:2607.00003",
+      "arXiv:2607.00004",
+    ]);
+  });
+
   it("retains a successful discovery adapter when another adapter fails", async () => {
     const collector = new ResearchCollector({
       discoveryAdapters: [
@@ -288,6 +408,225 @@ describe("ResearchCollector", () => {
     expect(
       requestedUrls.filter((url) => url.includes("api.openalex.org")),
     ).toHaveLength(1);
+  });
+});
+
+describe("bibliographic discovery", () => {
+  it("discovers recent Semantic Scholar search and recommendation papers", async () => {
+    const searchFixture = await loadFixture("semantic-scholar-search.json");
+    const recommendationFixture = await loadFixture(
+      "semantic-scholar-recommendations.json",
+    );
+    const fetch = vi.fn(
+      async (input: string | URL | Request, init?: RequestInit) => {
+        const url = new URL(String(input));
+        if (url.pathname === "/graph/v1/paper/search/bulk") {
+          expect(init?.method ?? "GET").toBe("GET");
+          return new Response(searchFixture, {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        if (url.pathname === "/recommendations/v1/papers") {
+          expect(init?.method).toBe("POST");
+          return new Response(recommendationFixture, {
+            headers: { "content-type": "application/json" },
+          });
+        }
+        throw new Error(`Unexpected Semantic Scholar URL: ${url}`);
+      },
+    );
+    const collector = new ResearchCollector({
+      discoveryAdapters: createPaperDiscoveryAdapters(
+        new SourceHttpClient({
+          fetch,
+          now: () => new Date("2026-07-29T08:30:00.000Z"),
+        }),
+        [semanticScholarSource],
+      ),
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates).toHaveLength(2);
+    const searched = result.candidates.find(
+      ({ externalId }) => externalId === "arXiv:2608.00001",
+    );
+    expect(searched?.externalIds).toEqual(expect.arrayContaining([
+      "SemanticScholar:paper-id",
+      "arXiv:2608.00001",
+      "DOI:10.1000/example",
+    ]));
+    expect(searched).toMatchObject({
+      citationCount: 11,
+      influentialCitationCount: 3,
+      topics: ["Computer Science"],
+      publishedAt: "2026-07-29T00:00:00.000Z",
+    });
+    expect(result.candidates.some(
+      ({ externalIds }) => externalIds.includes("SemanticScholar:old-paper-id"),
+    )).toBe(false);
+    expect(result.candidates.some(
+      ({ externalIds }) => externalIds.includes("SemanticScholar:undated-paper-id"),
+    )).toBe(false);
+
+    const urls = fetch.mock.calls.map(([input]) => new URL(String(input)));
+    const searchUrls = urls.filter(
+      ({ pathname }) => pathname === "/graph/v1/paper/search/bulk",
+    );
+    const recommendationUrls = urls.filter(
+      ({ pathname }) => pathname === "/recommendations/v1/papers",
+    );
+    expect(searchUrls).toHaveLength(3);
+    expect(recommendationUrls).toHaveLength(3);
+    const fields =
+      "paperId,externalIds,title,abstract,authors,year,publicationDate,venue,citationCount,influentialCitationCount,fieldsOfStudy,url";
+    expect(urls.every((url) => url.searchParams.get("fields") === fields)).toBe(
+      true,
+    );
+    expect(searchUrls.every(
+      (url) => url.searchParams.get("sort") === "publicationDate:desc",
+    )).toBe(true);
+    expect(recommendationUrls.every(
+      (url) => url.searchParams.get("limit") === "100",
+    )).toBe(true);
+    const recommendationBodies = fetch.mock.calls.flatMap(([, init]) =>
+      init?.method === "POST" ? [JSON.parse(String(init.body))] : [],
+    );
+    expect(recommendationBodies).toEqual(
+      SEMANTIC_SCHOLAR_SEED_SET_V1.map(({ paperId }) => ({
+        positivePaperIds: [paperId],
+        negativePaperIds: [],
+      })),
+    );
+  });
+
+  it("discovers OpenAlex topic and preferred-institution papers", async () => {
+    const worksFixture = await loadFixture("openalex-discovery.json");
+    const resolvedInstitutions = new Map([
+      ["MIT", "https://openalex.org/I63966007"],
+      ["OpenAI", "https://openalex.org/I987654321"],
+    ]);
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/institutions") {
+        const requestedName = url.searchParams.get("search") ?? "";
+        const id = resolvedInstitutions.get(requestedName);
+        return Response.json({
+          meta: { count: id === undefined ? 0 : 1, page: 1, per_page: 100 },
+          results: id === undefined
+            ? []
+            : [{ id, display_name: requestedName }],
+          group_by: [],
+        });
+      }
+      if (url.pathname === "/works") {
+        return new Response(worksFixture, {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      throw new Error(`Unexpected OpenAlex URL: ${url}`);
+    });
+    const collector = new ResearchCollector({
+      discoveryAdapters: createPaperDiscoveryAdapters(
+        new SourceHttpClient({
+          fetch,
+          now: () => new Date("2026-07-29T08:30:00.000Z"),
+        }),
+        [openAlexSource],
+      ),
+      enrichers: [],
+      preferredInstitutions: READER_PROFILE.preferredInstitutions,
+      preferredLabs: READER_PROFILE.preferredLabs,
+    });
+
+    const result = await collector.collect({
+      from: "2026-07-01T00:00:00.000Z",
+      to: "2026-07-29T12:00:00.000Z",
+    });
+
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]).toMatchObject({
+      externalId: "arXiv:2608.00001",
+      authors: ["Ada Example"],
+      institutions: ["MIT"],
+      preferredInstitutionMatches: ["MIT"],
+      abstract: "Secure models retain provenance.",
+      citationCount: 13,
+      topics: ["Interpretable machine learning"],
+      metadata: expect.objectContaining({
+        discoveryFamily: "bibliographic",
+        openAlexId: "https://openalex.org/W260800001",
+      }),
+    });
+    expect(result.candidates[0]?.externalIds).toEqual(expect.arrayContaining([
+      "OpenAlex:W260800001",
+      "arXiv:2608.00001",
+      "DOI:10.1000/example",
+    ]));
+
+    const urls = fetch.mock.calls.map(([input]) => new URL(String(input)));
+    expect(urls.every(({ pathname }) =>
+      pathname === "/institutions" || pathname === "/works",
+    )).toBe(true);
+    const institutionUrls = urls.filter(
+      ({ pathname }) => pathname === "/institutions",
+    );
+    const workUrls = urls.filter(({ pathname }) => pathname === "/works");
+    expect(institutionUrls).toHaveLength(
+      READER_PROFILE.preferredInstitutions.length +
+        READER_PROFILE.preferredLabs.length,
+    );
+    expect(institutionUrls.every(
+      (url) => url.searchParams.get("select") === "id,display_name",
+    )).toBe(true);
+    expect(workUrls).toHaveLength(4);
+    expect(workUrls.every(
+      (url) => url.searchParams.get("per-page") === "100",
+    )).toBe(true);
+    expect(workUrls.every(
+      (url) =>
+        url.searchParams.get("select") ===
+        "id,doi,title,publication_date,updated_date,cited_by_count,ids,authorships,topics,abstract_inverted_index,primary_location",
+    )).toBe(true);
+    const institutionWorkUrl = workUrls.find((url) =>
+      url.searchParams.get("filter")?.includes("authorships.institutions.id"),
+    );
+    expect(institutionWorkUrl?.searchParams.get("filter")).toContain(
+      "I63966007|I987654321",
+    );
+    expect(institutionWorkUrl?.searchParams.has("search")).toBe(false);
+    expect(workUrls.filter((url) => url.searchParams.has("search"))).toHaveLength(
+      3,
+    );
+  });
+
+  it("keeps arXiv papers when bibliographic discovery returns malformed data", async () => {
+    const malformedFetch = vi.fn(async () => Response.json({ unexpected: [] }));
+    const http = new SourceHttpClient({ fetch: malformedFetch });
+    const collector = new ResearchCollector({
+      discoveryAdapters: [
+        {
+          sourceId: "arxiv",
+          collect: async () => [rawPaper()],
+        },
+        ...createPaperDiscoveryAdapters(http, [semanticScholarSource]),
+      ],
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates.map(({ externalId }) => externalId)).toEqual([
+      "arXiv:2607.00001",
+    ]);
+    expect(result.failures).toContainEqual({
+      sourceId: "semantic-scholar",
+      kind: "parse",
+    });
+    expect(JSON.stringify(result)).not.toContain("unexpected");
   });
 });
 
@@ -703,6 +1042,43 @@ describe("provider endpoint and identifier policy", () => {
           http,
           openAlexSource,
           "https://attacker.example/works",
+        ),
+    ).toThrow();
+  });
+
+  it("rejects same-host enrichment endpoints outside exact provider paths", () => {
+    const http = new SourceHttpClient({
+      fetch: vi.fn(async () => new Response("unused")),
+    });
+
+    expect(
+      () =>
+        new ArxivAdapter(http, arxivSource, {
+          apiUrl: "https://export.arxiv.org/api/unintended",
+        }),
+    ).toThrow();
+    expect(
+      () =>
+        new SemanticScholarAdapter(
+          http,
+          semanticScholarSource,
+          "https://api.semanticscholar.org/graph/v1/paper/batch/unintended",
+        ),
+    ).toThrow();
+    expect(
+      () =>
+        new OpenAlexAdapter(
+          http,
+          openAlexSource,
+          "https://api.openalex.org/institutions",
+        ),
+    ).toThrow();
+    expect(
+      () =>
+        new OpenAlexAdapter(
+          http,
+          openAlexSource,
+          "https://api.openalex.org/works/unintended",
         ),
     ).toThrow();
   });

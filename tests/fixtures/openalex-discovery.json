@@ -1,0 +1,59 @@
+{
+  "meta": { "count": 2, "page": 1, "per_page": 100 },
+  "results": [
+    {
+      "id": "https://openalex.org/W260800001",
+      "doi": "https://doi.org/10.1000/example",
+      "title": "Interpretable Provenance for Secure Model Evaluation",
+      "publication_date": "2026-07-29",
+      "updated_date": "2026-07-29T06:00:00.000Z",
+      "cited_by_count": 13,
+      "ids": {
+        "openalex": "https://openalex.org/W260800001",
+        "doi": "https://doi.org/10.1000/example",
+        "arxiv": "https://arxiv.org/abs/2608.00001v2"
+      },
+      "authorships": [
+        {
+          "author": {
+            "id": "https://openalex.org/A260800001",
+            "display_name": "Ada Example"
+          },
+          "institutions": [
+            {
+              "id": "https://openalex.org/I63966007",
+              "display_name": "Massachusetts Institute of Technology"
+            }
+          ]
+        }
+      ],
+      "topics": [
+        { "display_name": "Interpretable machine learning", "score": 0.97 }
+      ],
+      "abstract_inverted_index": {
+        "Secure": [0],
+        "models": [1],
+        "retain": [2],
+        "provenance.": [3]
+      },
+      "primary_location": {
+        "landing_page_url": "https://doi.org/10.1000/example",
+        "source": { "display_name": "Fixture Proceedings" }
+      }
+    },
+    {
+      "id": "https://openalex.org/W201900001",
+      "doi": null,
+      "title": "An old work outside the seven-day discovery bound",
+      "publication_date": "2019-01-01",
+      "updated_date": "2026-07-01T00:00:00.000Z",
+      "cited_by_count": 100,
+      "ids": { "openalex": "https://openalex.org/W201900001" },
+      "authorships": [],
+      "topics": [],
+      "abstract_inverted_index": null,
+      "primary_location": null
+    }
+  ],
+  "group_by": []
+}

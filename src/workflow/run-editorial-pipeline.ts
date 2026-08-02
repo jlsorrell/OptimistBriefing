@@ -43,7 +43,7 @@ import {
 import { APPROVED_SECTION_MAXIMA } from "../editorial/shortlist";
 import { editorialSignals } from "../editorial/editorial-signals";
 import { READER_PROFILE } from "../config/reader-profile";
-import { ArxivAdapter } from "../sources/arxiv";
+import { createPaperDiscoveryAdapters } from "../sources/paper-discovery";
 import { SemanticScholarAdapter } from "../sources/semantic-scholar";
 import { OpenAlexAdapter } from "../sources/openalex";
 import { ResearchCollector } from "../sources/research-collector";
@@ -1449,9 +1449,11 @@ export function createD1ProductionPipelineContext(
       const semanticScholarSource = source("semantic-scholar");
       const openAlexSource = source("openalex");
       const researchCollector = new ResearchCollector({
-        discoveryAdapters: arxivSource.enabled
-          ? [new ArxivAdapter(http, arxivSource)]
-          : [],
+        discoveryAdapters: createPaperDiscoveryAdapters(http, [
+          arxivSource,
+          semanticScholarSource,
+          openAlexSource,
+        ]),
         enrichers: [
           ...(semanticScholarSource.enabled
             ? [new SemanticScholarAdapter(http, semanticScholarSource)]

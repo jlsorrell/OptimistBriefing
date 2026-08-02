@@ -1,0 +1,34 @@
+{
+  "recommendedPapers": [
+    {
+      "paperId": "recommended-paper-id",
+      "externalIds": { "ArXiv": "2607.99999" },
+      "title": "Recommended Secure Learning Systems",
+      "abstract": "A recent recommendation grounded in a versioned seed.",
+      "authors": [
+        { "authorId": "author-2", "name": "Grace Example" }
+      ],
+      "year": 2026,
+      "publicationDate": "2026-07-28",
+      "venue": "Fixture Journal",
+      "citationCount": 5,
+      "influentialCitationCount": 1,
+      "fieldsOfStudy": ["Computer Science"],
+      "url": "https://www.semanticscholar.org/paper/recommended-paper-id"
+    },
+    {
+      "paperId": "undated-paper-id",
+      "externalIds": {},
+      "title": "An undated recommendation",
+      "abstract": null,
+      "authors": [],
+      "year": 2026,
+      "publicationDate": null,
+      "venue": null,
+      "citationCount": 0,
+      "influentialCitationCount": 0,
+      "fieldsOfStudy": null,
+      "url": "https://www.semanticscholar.org/paper/undated-paper-id"
+    }
+  ]
+}
