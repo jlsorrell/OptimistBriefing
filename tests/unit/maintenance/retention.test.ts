@@ -15,6 +15,8 @@ describe("pruneExpiredData", () => {
           deletedWorkflowRuns: 1,
           deletedWorkflowArtifacts: 4,
           deletedDiagnosticLogs: 3,
+          deletedDiscoveryObservations: 5,
+          deletedResearchAssessmentCacheEntries: 6,
         };
       },
       async recordRetentionAudit(now: string, report: unknown) {
@@ -29,6 +31,8 @@ describe("pruneExpiredData", () => {
     expect(report.deletedUnselectedCandidates).toBe(2);
     expect(report.deletedWorkflowArtifacts).toBe(4);
     expect(report.deletedDiagnosticLogs).toBe(3);
+    expect(report.deletedDiscoveryObservations).toBe(5);
+    expect(report.deletedResearchAssessmentCacheEntries).toBe(6);
     expect(await repository.getEditionByDate("2026-07-28")).not.toBeNull();
     expect(events).toEqual([{ now: fixedNow, report }]);
   });
@@ -39,6 +43,26 @@ describe("pruneExpiredData", () => {
       pruneExpiredData: async () => { throw new Error("D1_UNAVAILABLE"); },
       recordRetentionAudit: async () => { audited = true; },
     }, fixedNow)).rejects.toThrow("D1_UNAVAILABLE");
+    expect(audited).toBe(false);
+  });
+
+  it("rejects an incomplete extended retention report before auditing it", async () => {
+    let audited = false;
+    const repository = {
+      async pruneExpiredData() {
+        return {
+          deletedUnselectedCandidates: 2,
+          deletedWorkflowRuns: 1,
+          deletedWorkflowArtifacts: 4,
+          deletedDiagnosticLogs: 3,
+        } as never;
+      },
+      async recordRetentionAudit() {
+        audited = true;
+      },
+    };
+
+    await expect(pruneExpiredData(repository, fixedNow)).rejects.toThrow();
     expect(audited).toBe(false);
   });
 });

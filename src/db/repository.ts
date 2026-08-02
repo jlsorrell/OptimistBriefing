@@ -15,11 +15,15 @@ import {
   type EditionMetadata,
   type Item,
   type ItemScore,
+  type ResearchAssessment,
   type RetentionReport,
   type SourceRef,
   type StructuredSummary,
 } from "../contracts/editorial";
-import type { CollectionFailureKind } from "../sources/types";
+import type {
+  CollectionFailureKind,
+  DiscoveryObservation,
+} from "../sources/types";
 import type { BudgetReservation } from "../models/budget-gate";
 
 export type EditionListInput = {
@@ -590,6 +594,25 @@ export const WorkflowRunDetailSchema = WorkflowRunSchema.extend({
 }).strict();
 
 export interface BriefingRepository {
+  upsertDiscoveryObservations(
+    observations: readonly DiscoveryObservation[],
+  ): Promise<void>;
+  getDiscoveryObservations(
+    canonicalIds: readonly string[],
+    since: string,
+    excludingRunId: string,
+  ): Promise<readonly DiscoveryObservation[]>;
+  getCachedResearchAssessment(
+    canonicalId: string,
+    evidenceFingerprint: string,
+    now: string,
+  ): Promise<ResearchAssessment | null>;
+  putCachedResearchAssessment(
+    canonicalId: string,
+    evidenceFingerprint: string,
+    assessment: ResearchAssessment,
+    expiresAt: string,
+  ): Promise<void>;
   upsertItems(items: readonly Item[]): Promise<void>;
   saveScores(scores: readonly ItemScore[]): Promise<void>;
   saveSummary(itemId: string, summary: StructuredSummary): Promise<void>;

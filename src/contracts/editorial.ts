@@ -165,7 +165,9 @@ export const RetentionReportSchema = z.object({
   deletedWorkflowRuns: z.number().int().nonnegative(),
   deletedWorkflowArtifacts: z.number().int().nonnegative(),
   deletedDiagnosticLogs: z.number().int().nonnegative(),
-});
+  deletedDiscoveryObservations: z.number().int().nonnegative(),
+  deletedResearchAssessmentCacheEntries: z.number().int().nonnegative(),
+}).strict();
 
 export type ItemKind = z.infer<typeof ItemKindSchema>;
 export type AccessLevel = z.infer<typeof AccessLevelSchema>;

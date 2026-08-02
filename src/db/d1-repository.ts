@@ -14,6 +14,7 @@ import {
   EditionWithEntriesSchema,
   ItemSchema,
   ItemScoreSchema,
+  ResearchAssessmentSchema,
   RetentionReportSchema,
   StructuredSummarySchema,
   type Edition,
@@ -22,6 +23,7 @@ import {
   type EditionWithEntries,
   type Item,
   type ItemScore,
+  type ResearchAssessment,
   type RetentionReport,
   type StructuredSummary,
 } from "../contracts/editorial";
@@ -64,11 +66,32 @@ import {
 } from "../pagination/edition-cursor";
 import {
   CollectionFailureKindSchema,
+  DiscoveryObservationSchema,
   type CollectionFailureKind,
+  type DiscoveryObservation,
 } from "../sources/types";
 import { PIPELINE_STEPS } from "../workflow/types";
 
 const DateTimeSchema = z.string().datetime();
+const StrictResearchAssessmentSchema = ResearchAssessmentSchema.strict();
+const DiscoveryObservationLookupSchema = z.object({
+  canonicalIds: z.array(z.string().min(1)),
+  since: DateTimeSchema,
+  excludingRunId: z.string().min(1),
+}).strict();
+const ResearchAssessmentCacheLookupSchema = z.object({
+  canonicalId: z.string().min(1),
+  evidenceFingerprint: z.string().min(1),
+  now: DateTimeSchema,
+}).strict();
+const ResearchAssessmentCacheMutationSchema = z.object({
+  canonicalId: z.string().min(1),
+  evidenceFingerprint: z.string().min(1),
+  assessment: StrictResearchAssessmentSchema,
+  createdAt: DateTimeSchema,
+  expiresAt: DateTimeSchema,
+}).strict();
+const DISCOVERY_OBSERVATION_LOOKUP_CHUNK_SIZE = 50;
 const ModelUsageRecordSchema = z.object({
   provider: z.string().min(1).max(100),
   model: z.string().min(1).max(200),
@@ -196,6 +219,26 @@ type PublishedRunRow = {
   metadata_json: string;
 };
 
+type DiscoveryObservationRow = {
+  run_id: string;
+  canonical_id: string;
+  source_id: string;
+  discovery_family: string;
+  window_kind: string;
+  published_at: string | null;
+  retrieved_at: string;
+  observed_at: string;
+  content_fingerprint: string;
+  evidence_fingerprint: string;
+  joined_external_ids_json: string;
+  route: string;
+  expires_at: string;
+};
+
+type ResearchAssessmentCacheRow = {
+  assessment_json: string;
+};
+
 function validated<T>(
   schema: z.ZodType<T, z.ZodTypeDef, unknown>,
   value: unknown,
@@ -312,6 +355,33 @@ function entryFromRow(row: EntryRow): EditionEntry {
       ),
     },
     "Invalid edition entry row",
+  );
+}
+
+function discoveryObservationFromRow(
+  row: DiscoveryObservationRow,
+): DiscoveryObservation {
+  return validated(
+    DiscoveryObservationSchema,
+    {
+      runId: row.run_id,
+      canonicalId: row.canonical_id,
+      sourceId: row.source_id,
+      discoveryFamily: row.discovery_family,
+      windowKind: row.window_kind,
+      publishedAt: row.published_at,
+      retrievedAt: row.retrieved_at,
+      observedAt: row.observed_at,
+      contentFingerprint: row.content_fingerprint,
+      evidenceFingerprint: row.evidence_fingerprint,
+      joinedExternalIds: parsedJson(
+        row.joined_external_ids_json,
+        "Invalid discovery observation joined external IDs",
+      ),
+      route: row.route,
+      expiresAt: row.expires_at,
+    },
+    "Invalid discovery observation row",
   );
 }
 
@@ -553,6 +623,182 @@ function summaryStatements(
 
 export class D1BriefingRepository implements BriefingRepository {
   constructor(private readonly db: D1Database) {}
+
+  async upsertDiscoveryObservations(
+    observations: readonly DiscoveryObservation[],
+  ): Promise<void> {
+    const validObservations = observations.map((observation) => {
+      serializeJsonMutation(
+        observation,
+        "Invalid discovery observation mutation",
+      );
+      return validated(
+        DiscoveryObservationSchema,
+        observation,
+        "Invalid discovery observation",
+      );
+    });
+    if (validObservations.length === 0) {
+      return;
+    }
+
+    await this.db.batch(validObservations.map((observation) =>
+      this.db.prepare(
+        `INSERT INTO discovery_observations (
+          run_id, canonical_id, source_id, discovery_family, window_kind,
+          published_at, retrieved_at, observed_at, content_fingerprint,
+          evidence_fingerprint, joined_external_ids_json, route, expires_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run_id, canonical_id, source_id, evidence_fingerprint)
+        DO UPDATE SET
+          discovery_family = excluded.discovery_family,
+          window_kind = excluded.window_kind,
+          published_at = excluded.published_at,
+          retrieved_at = excluded.retrieved_at,
+          observed_at = excluded.observed_at,
+          content_fingerprint = excluded.content_fingerprint,
+          joined_external_ids_json = excluded.joined_external_ids_json,
+          route = excluded.route,
+          expires_at = excluded.expires_at`,
+      ).bind(
+        observation.runId,
+        observation.canonicalId,
+        observation.sourceId,
+        observation.discoveryFamily,
+        observation.windowKind,
+        observation.publishedAt,
+        observation.retrievedAt,
+        observation.observedAt,
+        observation.contentFingerprint,
+        observation.evidenceFingerprint,
+        JSON.stringify(observation.joinedExternalIds),
+        observation.route,
+        observation.expiresAt,
+      )
+    ));
+  }
+
+  async getDiscoveryObservations(
+    canonicalIds: readonly string[],
+    since: string,
+    excludingRunId: string,
+  ): Promise<readonly DiscoveryObservation[]> {
+    const valid = validated(
+      DiscoveryObservationLookupSchema,
+      { canonicalIds, since, excludingRunId },
+      "Invalid discovery observation lookup",
+    );
+    const uniqueCanonicalIds = [...new Set(valid.canonicalIds)];
+    if (uniqueCanonicalIds.length === 0) {
+      return [];
+    }
+
+    const observations: DiscoveryObservation[] = [];
+    for (
+      let offset = 0;
+      offset < uniqueCanonicalIds.length;
+      offset += DISCOVERY_OBSERVATION_LOOKUP_CHUNK_SIZE
+    ) {
+      const chunk = uniqueCanonicalIds.slice(
+        offset,
+        offset + DISCOVERY_OBSERVATION_LOOKUP_CHUNK_SIZE,
+      );
+      const placeholders = chunk.map(() => "?").join(", ");
+      const rows = await this.db.prepare(
+        `SELECT
+          run_id, canonical_id, source_id, discovery_family, window_kind,
+          published_at, retrieved_at, observed_at, content_fingerprint,
+          evidence_fingerprint, joined_external_ids_json, route, expires_at
+        FROM discovery_observations
+        WHERE canonical_id IN (${placeholders})
+          AND observed_at >= ?
+          AND run_id <> ?
+        ORDER BY observed_at DESC, canonical_id, source_id,
+          evidence_fingerprint, run_id`,
+      ).bind(...chunk, valid.since, valid.excludingRunId)
+        .all<DiscoveryObservationRow>();
+      observations.push(...rows.results.map(discoveryObservationFromRow));
+    }
+
+    return observations.sort((left, right) =>
+      right.observedAt.localeCompare(left.observedAt) ||
+      left.canonicalId.localeCompare(right.canonicalId) ||
+      left.sourceId.localeCompare(right.sourceId) ||
+      left.evidenceFingerprint.localeCompare(right.evidenceFingerprint) ||
+      left.runId.localeCompare(right.runId)
+    );
+  }
+
+  async getCachedResearchAssessment(
+    canonicalId: string,
+    evidenceFingerprint: string,
+    now: string,
+  ): Promise<ResearchAssessment | null> {
+    const valid = validated(
+      ResearchAssessmentCacheLookupSchema,
+      { canonicalId, evidenceFingerprint, now },
+      "Invalid research assessment cache lookup",
+    );
+    const row = await this.db.prepare(
+      `SELECT assessment_json
+       FROM research_assessment_cache
+       WHERE canonical_id = ?
+         AND evidence_fingerprint = ?
+         AND expires_at > ?`,
+    ).bind(
+      valid.canonicalId,
+      valid.evidenceFingerprint,
+      valid.now,
+    ).first<ResearchAssessmentCacheRow>();
+    if (row === null) {
+      return null;
+    }
+    return validated(
+      StrictResearchAssessmentSchema,
+      parsedJson(row.assessment_json, "Invalid cached research assessment"),
+      "Invalid cached research assessment",
+    );
+  }
+
+  async putCachedResearchAssessment(
+    canonicalId: string,
+    evidenceFingerprint: string,
+    assessment: ResearchAssessment,
+    expiresAt: string,
+  ): Promise<void> {
+    serializeJsonMutation(
+      assessment,
+      "Invalid research assessment cache mutation",
+    );
+    const createdAt = new Date().toISOString();
+    const valid = validated(
+      ResearchAssessmentCacheMutationSchema,
+      {
+        canonicalId,
+        evidenceFingerprint,
+        assessment,
+        createdAt,
+        expiresAt,
+      },
+      "Invalid research assessment cache mutation",
+    );
+    await this.db.prepare(
+      `INSERT INTO research_assessment_cache (
+        canonical_id, evidence_fingerprint, assessment_json,
+        created_at, expires_at
+      ) VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(canonical_id, evidence_fingerprint) DO UPDATE SET
+        assessment_json = excluded.assessment_json,
+        created_at = excluded.created_at,
+        expires_at = excluded.expires_at`,
+    ).bind(
+      valid.canonicalId,
+      valid.evidenceFingerprint,
+      JSON.stringify(valid.assessment),
+      valid.createdAt,
+      valid.expiresAt,
+    ).run();
+  }
 
   async upsertItems(items: readonly Item[]): Promise<void> {
     const validItems = items.map((item) => {
@@ -1926,7 +2172,14 @@ export class D1BriefingRepository implements BriefingRepository {
     );
     const runCutoff = new Date(Date.parse(validNow) - 90 * 24 * 60 * 60 * 1_000).toISOString();
     const diagnosticCutoff = new Date(Date.parse(validNow) - 30 * 24 * 60 * 60 * 1_000).toISOString();
-    const [candidateCount, runCount, workflowArtifactCount, eventCount] =
+    const [
+      candidateCount,
+      runCount,
+      workflowArtifactCount,
+      eventCount,
+      discoveryObservationCount,
+      researchAssessmentCacheCount,
+    ] =
       await this.db.batch([
       this.db
         .prepare(
@@ -1977,6 +2230,20 @@ export class D1BriefingRepository implements BriefingRepository {
         .bind(diagnosticCutoff),
       this.db
         .prepare(
+          `SELECT COUNT(*) AS count
+          FROM discovery_observations
+          WHERE expires_at <= ?`,
+        )
+        .bind(validNow),
+      this.db
+        .prepare(
+          `SELECT COUNT(*) AS count
+          FROM research_assessment_cache
+          WHERE expires_at <= ?`,
+        )
+        .bind(validNow),
+      this.db
+        .prepare(
           `DELETE FROM items
           WHERE expires_at IS NOT NULL
             AND expires_at <= ?
@@ -2018,6 +2285,18 @@ export class D1BriefingRepository implements BriefingRepository {
           WHERE created_at <= ? AND event_type = 'diagnostic_log'`,
         )
         .bind(diagnosticCutoff),
+      this.db
+        .prepare(
+          `DELETE FROM discovery_observations
+          WHERE expires_at <= ?`,
+        )
+        .bind(validNow),
+      this.db
+        .prepare(
+          `DELETE FROM research_assessment_cache
+          WHERE expires_at <= ?`,
+        )
+        .bind(validNow),
     ]);
     return validated(
       RetentionReportSchema,
@@ -2043,6 +2322,18 @@ export class D1BriefingRepository implements BriefingRepository {
         deletedDiagnosticLogs:
           (
             eventCount?.results[0] as
+              | { count: number }
+              | undefined
+          )?.count ?? 0,
+        deletedDiscoveryObservations:
+          (
+            discoveryObservationCount?.results[0] as
+              | { count: number }
+              | undefined
+          )?.count ?? 0,
+        deletedResearchAssessmentCacheEntries:
+          (
+            researchAssessmentCacheCount?.results[0] as
               | { count: number }
               | undefined
           )?.count ?? 0,

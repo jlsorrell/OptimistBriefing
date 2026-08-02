@@ -1,4 +1,7 @@
-import type { RetentionReport } from "../contracts/editorial";
+import {
+  RetentionReportSchema,
+  type RetentionReport,
+} from "../contracts/editorial";
 
 export type RetentionRepository = {
   pruneExpiredData(now: string): Promise<RetentionReport>;
@@ -9,7 +12,9 @@ export async function pruneExpiredData(
   repository: RetentionRepository,
   now: string,
 ): Promise<RetentionReport> {
-  const report = await repository.pruneExpiredData(now);
+  const report = RetentionReportSchema.parse(
+    await repository.pruneExpiredData(now),
+  );
   await repository.recordRetentionAudit(now, report);
   return report;
 }

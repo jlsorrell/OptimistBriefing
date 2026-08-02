@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import type {
   EditionEntry,
   Item,
+  ResearchAssessment,
   StructuredSummary,
 } from "../../../src/contracts/editorial";
 import { EditionMetadataSchema } from "../../../src/contracts/editorial";
@@ -11,6 +12,7 @@ import { D1BriefingRepository } from "../../../src/db/d1-repository";
 import { RepositoryValidationError } from "../../../src/db/repository";
 import { SourceHttpClient } from "../../../src/sources/http-client";
 import { createNewsCollectorFromCatalog } from "../../../src/sources/news-collector";
+import type { DiscoveryObservation } from "../../../src/sources/types";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv {
@@ -92,6 +94,39 @@ function fixtureSummary(): StructuredSummary {
   return fixtureEditionEntry("unused").summary;
 }
 
+function fixtureDiscoveryObservation(
+  canonicalId: string,
+  overrides: Partial<DiscoveryObservation> = {},
+): DiscoveryObservation {
+  return {
+    runId: "discovery-run-prior",
+    canonicalId,
+    sourceId: "arxiv",
+    discoveryFamily: "arxiv",
+    windowKind: "fresh",
+    publishedAt: "2026-08-02T06:00:00.000Z",
+    retrievedAt: "2026-08-02T08:00:00.000Z",
+    observedAt: "2026-08-02T08:05:00.000Z",
+    contentFingerprint: `content:${canonicalId}`,
+    evidenceFingerprint: `evidence:${canonicalId}`,
+    joinedExternalIds: [canonicalId, `doi:10.1000/${canonicalId}`],
+    route: "research",
+    expiresAt: "2026-08-09T08:05:00.000Z",
+    ...overrides,
+  };
+}
+
+function fixtureResearchAssessment(): ResearchAssessment {
+  return {
+    technicalQuality: 0.86,
+    novelty: 0.72,
+    strengths: ["Careful ablations"],
+    limitations: ["Single benchmark family"],
+    rationale: "The evidence is technically credible but narrow.",
+    accessLevel: "full_text",
+  };
+}
+
 async function publishFixtureEdition(
   repo: D1BriefingRepository,
   editionDate: string,
@@ -113,6 +148,149 @@ async function publishFixtureEdition(
 }
 
 describe("D1BriefingRepository", () => {
+  it("upserts discovery observations idempotently while preserving prior source history", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const canonicalId = "arxiv:2608.00001";
+    const arxiv = fixtureDiscoveryObservation(canonicalId);
+    const bibliographic = fixtureDiscoveryObservation(canonicalId, {
+      sourceId: "semantic-scholar",
+      discoveryFamily: "bibliographic",
+      retrievedAt: "2026-08-02T08:01:00.000Z",
+      observedAt: "2026-08-02T08:06:00.000Z",
+    });
+    const currentRun = fixtureDiscoveryObservation(canonicalId, {
+      runId: "discovery-run-current",
+      observedAt: "2026-08-02T08:07:00.000Z",
+    });
+
+    await repo.upsertDiscoveryObservations([arxiv]);
+    await repo.upsertDiscoveryObservations([arxiv]);
+    await repo.upsertDiscoveryObservations([bibliographic, currentRun]);
+
+    expect(await repo.getDiscoveryObservations(
+      [canonicalId],
+      "2026-07-27T00:00:00.000Z",
+      "discovery-run-current",
+    )).toEqual([bibliographic, arxiv]);
+    expect(await env.DB.prepare(
+      "SELECT COUNT(*) AS count FROM discovery_observations",
+    ).first<{ count: number }>()).toEqual({ count: 3 });
+  });
+
+  it("loads discovery observations across canonical-ID chunks of at most fifty", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const observations = Array.from({ length: 51 }, (_, index) =>
+      fixtureDiscoveryObservation(`arxiv:2608.${String(index).padStart(5, "0")}`, {
+        observedAt: `2026-08-02T08:${String(index).padStart(2, "0")}:00.000Z`,
+      })
+    );
+    await repo.upsertDiscoveryObservations(observations);
+
+    const canonicalIds = observations.map((observation) => observation.canonicalId);
+    const loaded = await repo.getDiscoveryObservations(
+      [...canonicalIds, canonicalIds[0]!],
+      "2026-08-02T00:00:00.000Z",
+      "another-run",
+    );
+    expect(new Set(loaded.map((observation) => observation.canonicalId))).toEqual(
+      new Set(canonicalIds),
+    );
+    expect(loaded).toHaveLength(51);
+  });
+
+  it("returns only unexpired research assessments with an exact evidence fingerprint", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const assessment = fixtureResearchAssessment();
+    await repo.putCachedResearchAssessment(
+      "arxiv:2608.00001",
+      "evidence:v1",
+      assessment,
+      "2026-11-01T00:00:00.000Z",
+    );
+
+    await expect(repo.getCachedResearchAssessment(
+      "arxiv:2608.00001",
+      "evidence:v1",
+      "2026-08-02T09:00:00.000Z",
+    )).resolves.toEqual(assessment);
+    await expect(repo.getCachedResearchAssessment(
+      "arxiv:2608.00001",
+      "evidence:v2",
+      "2026-08-02T09:00:00.000Z",
+    )).resolves.toBeNull();
+    await expect(repo.getCachedResearchAssessment(
+      "arxiv:2608.00001",
+      "evidence:v1",
+      "2026-11-01T00:00:00.000Z",
+    )).resolves.toBeNull();
+  });
+
+  it("rejects invalid discovery and assessment mutations before writing", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    await expect(repo.upsertDiscoveryObservations([{
+      ...fixtureDiscoveryObservation("arxiv:2608.invalid"),
+      unexpected: true,
+    } as unknown as DiscoveryObservation])).rejects.toBeInstanceOf(
+      RepositoryValidationError,
+    );
+    await expect(repo.putCachedResearchAssessment(
+      "arxiv:2608.00001",
+      "evidence:v1",
+      {
+        ...fixtureResearchAssessment(),
+        unexpected: true,
+      } as unknown as ResearchAssessment,
+      "2026-11-01T00:00:00.000Z",
+    )).rejects.toBeInstanceOf(RepositoryValidationError);
+  });
+
+  it("rejects malformed JSON read from discovery observations and assessment cache", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const observation = fixtureDiscoveryObservation("arxiv:2608.00001");
+    await repo.upsertDiscoveryObservations([observation]);
+    await env.DB.prepare(
+      `UPDATE discovery_observations
+       SET joined_external_ids_json = ?
+       WHERE canonical_id = ?`,
+    ).bind('{"not":"an array"}', observation.canonicalId).run();
+    await expect(repo.getDiscoveryObservations(
+      [observation.canonicalId],
+      "2026-07-27T00:00:00.000Z",
+      "another-run",
+    )).rejects.toBeInstanceOf(RepositoryValidationError);
+
+    await repo.putCachedResearchAssessment(
+      observation.canonicalId,
+      observation.evidenceFingerprint,
+      fixtureResearchAssessment(),
+      "2026-11-01T00:00:00.000Z",
+    );
+    await env.DB.prepare(
+      `UPDATE research_assessment_cache
+       SET assessment_json = ?
+       WHERE canonical_id = ? AND evidence_fingerprint = ?`,
+    ).bind(
+      '{"technicalQuality":0.8}',
+      observation.canonicalId,
+      observation.evidenceFingerprint,
+    ).run();
+    await expect(repo.getCachedResearchAssessment(
+      observation.canonicalId,
+      observation.evidenceFingerprint,
+      "2026-08-02T09:00:00.000Z",
+    )).rejects.toBeInstanceOf(RepositoryValidationError);
+  });
+
+  it("can safely reapply the discovery persistence migration", async () => {
+    const migration = env.TEST_MIGRATIONS.find(
+      (candidate) => candidate.name === "0008_discovery_observations.sql",
+    );
+    if (migration === undefined) {
+      throw new TypeError("Required test migration is missing");
+    }
+    await expect(applyD1Migrations(env.DB, [migration])).resolves.toBeUndefined();
+  });
+
   it("atomically reserves monthly model budget and counts reconciled cost instead of maxima", async () => {
     const repo = new D1BriefingRepository(env.DB);
     const createdAt = "2036-02-01T09:00:00.000Z";
@@ -943,6 +1121,8 @@ describe("D1BriefingRepository", () => {
       deletedWorkflowRuns: 0,
       deletedWorkflowArtifacts: 0,
       deletedDiagnosticLogs: 0,
+      deletedDiscoveryObservations: 0,
+      deletedResearchAssessmentCacheEntries: 0,
     });
 
     const persisted = await env.DB.prepare(
@@ -976,6 +1156,51 @@ describe("D1BriefingRepository", () => {
     ).bind("retention_pruned").first<{ event_json: string }>()).toEqual({
       event_json: JSON.stringify(report),
     });
+  });
+
+  it("prunes expired discovery observations and research assessment cache entries", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const expiredObservation = fixtureDiscoveryObservation("arxiv:2608.expired", {
+      expiresAt: "2026-08-01T00:00:00.000Z",
+    });
+    const retainedObservation = fixtureDiscoveryObservation("arxiv:2608.retained", {
+      expiresAt: "2026-08-09T00:00:00.000Z",
+    });
+    await repo.upsertDiscoveryObservations([
+      expiredObservation,
+      retainedObservation,
+    ]);
+    await repo.putCachedResearchAssessment(
+      expiredObservation.canonicalId,
+      expiredObservation.evidenceFingerprint,
+      fixtureResearchAssessment(),
+      "2026-08-01T00:00:00.000Z",
+    );
+    await repo.putCachedResearchAssessment(
+      retainedObservation.canonicalId,
+      retainedObservation.evidenceFingerprint,
+      fixtureResearchAssessment(),
+      "2026-08-09T00:00:00.000Z",
+    );
+
+    expect(await repo.pruneExpiredData("2026-08-02T09:00:00.000Z")).toEqual({
+      deletedUnselectedCandidates: 0,
+      deletedWorkflowRuns: 0,
+      deletedWorkflowArtifacts: 0,
+      deletedDiagnosticLogs: 0,
+      deletedDiscoveryObservations: 1,
+      deletedResearchAssessmentCacheEntries: 1,
+    });
+    expect((await env.DB.prepare(
+      "SELECT canonical_id FROM discovery_observations ORDER BY canonical_id",
+    ).all<{ canonical_id: string }>()).results).toEqual([
+      { canonical_id: retainedObservation.canonicalId },
+    ]);
+    expect((await env.DB.prepare(
+      "SELECT canonical_id FROM research_assessment_cache ORDER BY canonical_id",
+    ).all<{ canonical_id: string }>()).results).toEqual([
+      { canonical_id: retainedObservation.canonicalId },
+    ]);
   });
 
   it("expires workflow artifacts after 90 days while preserving durable audit and monthly usage history", async () => {
@@ -1078,6 +1303,8 @@ describe("D1BriefingRepository", () => {
       deletedWorkflowRuns: 1,
       deletedWorkflowArtifacts: 6,
       deletedDiagnosticLogs: 1,
+      deletedDiscoveryObservations: 0,
+      deletedResearchAssessmentCacheEntries: 0,
     });
     await repo.recordRetentionAudit("2026-07-29T10:00:00.000Z", report);
     expect((await env.DB.prepare(
