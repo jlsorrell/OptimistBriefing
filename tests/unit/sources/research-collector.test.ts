@@ -224,21 +224,29 @@ describe("ResearchCollector", () => {
     expect(result.candidates[0]?.externalId).toBe("arXiv:2607.00001");
   });
 
-  it("caps each paper discovery lane at 100 candidates", async () => {
-    const papers = Array.from({ length: 101 }, (_, index) => {
+  it("sorts each paper lane before applying the 100-candidate cap", async () => {
+    const olderPapers = Array.from({ length: 100 }, (_, index) => {
       const paper = rawPaper();
-      const identifier = `arXiv:2607.${String(index).padStart(5, "0")}`;
+      const identifier = `arXiv:2607.${String(99 - index).padStart(5, "0")}`;
       return {
         ...paper,
         originalUrl: `https://arxiv.org/abs/${identifier.slice(6)}`,
         externalId: identifier,
         externalIds: [identifier],
+        publishedAt: "2026-07-28T08:00:00.000Z",
       };
     });
+    const newestPaper = {
+      ...rawPaper(),
+      originalUrl: "https://arxiv.org/abs/2607.99999",
+      externalId: "arXiv:2607.99999",
+      externalIds: ["arXiv:2607.99999"],
+      publishedAt: "2026-07-29T08:00:00.000Z",
+    };
     const collector = new ResearchCollector({
       discoveryAdapters: [{
         sourceId: "arxiv",
-        collect: async () => papers,
+        collect: async () => [...olderPapers, newestPaper],
       }],
       enrichers: [],
       preferredInstitutions: [],
@@ -247,7 +255,12 @@ describe("ResearchCollector", () => {
     const result = await collector.collect(fixedWindow());
 
     expect(result.candidates).toHaveLength(100);
-    expect(result.candidates.at(-1)?.externalId).toBe("arXiv:2607.00099");
+    expect(result.candidates[0]?.externalId).toBe("arXiv:2607.99999");
+    expect(result.candidates[1]?.externalId).toBe("arXiv:2607.00000");
+    expect(result.candidates.at(-1)?.externalId).toBe("arXiv:2607.00098");
+    expect(result.candidates.some(
+      ({ externalId }) => externalId === "arXiv:2607.00099",
+    )).toBe(false);
   });
 
   it("orders paper results by lane, recency, and canonical identity", async () => {

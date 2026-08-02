@@ -247,10 +247,16 @@ export class ResearchCollector {
     const discovery = await settleCollectionBatch(
       adapters.map((adapter) => ({
         sourceId: adapter.sourceId,
-        collect: async () =>
-          (await adapter.collect(validWindow))
-            .slice(0, PAPER_LANE_LIMIT)
-            .map((item) => ({ laneId: adapterLaneId(adapter), item })),
+        collect: async () => {
+          const laneId = adapterLaneId(adapter);
+          return (await adapter.collect(validWindow))
+            .map((item) => ({
+              laneId,
+              item: RawItemSchema.parse(item),
+            }))
+            .sort(compareDiscovered)
+            .slice(0, PAPER_LANE_LIMIT);
+        },
       })),
     );
     const discovered = mergePaperIdentities(
