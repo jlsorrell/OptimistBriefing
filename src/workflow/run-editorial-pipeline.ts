@@ -9,12 +9,14 @@ import {
 import { z } from "zod";
 import { SourceHttpClient } from "../sources/http-client";
 import { createNewsCollectorFromCatalog } from "../sources/news-collector";
+import { createPublicationCollectorFromCatalog } from "../sources/publication-collector";
 import {
   boundedSourceFailureLabels,
   boundedSourceFailureMetadata,
 } from "../sources/collection-settlement";
 import { durableCollectedCandidate } from "../sources/durable-evidence";
 import { normalizeCandidate } from "../editorial/normalize";
+import { routePublication } from "../editorial/route-publication";
 import { deduplicateItems } from "../editorial/deduplicate";
 import {
   summarizeItem,
@@ -49,8 +51,10 @@ import { OpenAlexAdapter } from "../sources/openalex";
 import { ResearchCollector } from "../sources/research-collector";
 import {
   RawNewsCandidateSchema,
+  RawPublicationCandidateSchema,
   RawResearchCandidateSchema,
   type RawNewsCandidate,
+  type RawPublicationCandidate,
   type RawResearchCandidate,
   type ResearchSourceInput,
 } from "../sources/types";
@@ -777,14 +781,19 @@ function withWorkflowPayload(
   });
 }
 
-function normalizedCandidate(candidate: CollectedCandidate): Item {
+function normalizedCandidate(candidate: CollectedCandidate): Item | null {
   const storedItem = ItemSchema.safeParse(candidate);
   if (storedItem.success) {
     return withWorkflowPayload(storedItem.data, {});
   }
-  const research = RawResearchCandidateSchema.safeParse(candidate);
+  const publication = RawPublicationCandidateSchema.safeParse(candidate);
+  const routed = publication.success
+    ? routePublication(publication.data)
+    : candidate;
+  if (routed === null) return null;
+  const research = RawResearchCandidateSchema.safeParse(routed);
   return withWorkflowPayload(
-    normalizeCandidate(candidate),
+    normalizeCandidate(routed),
     research.success ? { rawResearch: research.data } : {},
   );
 }
@@ -1039,7 +1048,7 @@ function providerEligibleItems(
 
 function isRawCollectedCandidate(
   candidate: CollectedCandidate,
-): candidate is RawNewsCandidate | RawResearchCandidate {
+): candidate is RawNewsCandidate | RawResearchCandidate | RawPublicationCandidate {
   return "sourceId" in candidate && "retrievedAt" in candidate;
 }
 
@@ -1063,7 +1072,10 @@ export function createProductionPipelineContext(
         ),
       ),
     normalize: async (candidates) => {
-      const normalized = candidates.map(normalizedCandidate);
+      const normalized = candidates.flatMap((candidate) => {
+        const routed = normalizedCandidate(candidate);
+        return routed === null ? [] : [routed];
+      });
       return deduplicateItems(normalized).items.map((item) =>
         withWorkflowPayload(item, {}),
       );
@@ -1445,6 +1457,10 @@ export function createD1ProductionPipelineContext(
       };
       const http = new SourceHttpClient();
       const newsCollector = createNewsCollectorFromCatalog({ http, sources });
+      const publicationCollector = createPublicationCollectorFromCatalog({
+        http,
+        sources,
+      });
       const arxivSource = source("arxiv");
       const semanticScholarSource = source("semantic-scholar");
       const openAlexSource = source("openalex");
@@ -1469,17 +1485,20 @@ export function createD1ProductionPipelineContext(
       const from = new Date(
         Date.parse(to) - 36 * 60 * 60 * 1_000,
       ).toISOString();
-      const [news, research] = await Promise.all([
+      const [news, research, publications] = await Promise.all([
         newsCollector.collect({ from, to }),
         researchCollector.collect({ from, to }),
+        publicationCollector.collect({ from, to }),
       ]);
       const succeededSourceIds = new Set([
         ...news.succeededSourceIds,
         ...research.succeededSourceIds,
+        ...publications.succeededSourceIds,
       ]);
       const collectionFailures = [
         ...news.failures,
         ...research.failures,
+        ...publications.failures,
       ];
       const failuresBySourceId = new Map(
         collectionFailures.map((failure) => [
@@ -1514,6 +1533,9 @@ export function createD1ProductionPipelineContext(
         ),
         ...news.candidates.map((candidate) =>
           RawNewsCandidateSchema.parse(candidate),
+        ),
+        ...publications.candidates.map((candidate) =>
+          RawPublicationCandidateSchema.parse(candidate),
         ),
       ];
     },

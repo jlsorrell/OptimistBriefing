@@ -2099,6 +2099,26 @@ describe("manual editorial run", () => {
         }
         if (
           url.startsWith(
+            "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+          )
+        ) {
+          return Response.json({ total: 0, data: [] });
+        }
+        if (
+          url.startsWith(
+            "https://api.semanticscholar.org/recommendations/v1/papers",
+          )
+        ) {
+          return Response.json({ recommendedPapers: [] });
+        }
+        if (url.startsWith("https://api.openalex.org/institutions")) {
+          return Response.json({ results: [] });
+        }
+        if (url.startsWith("https://api.openalex.org/works")) {
+          return Response.json({ results: [] });
+        }
+        if (
+          url.startsWith(
             "https://www.federalregister.gov/api/v1/documents.json",
           )
         ) {

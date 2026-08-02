@@ -70,7 +70,7 @@ function normalizeWhitespace(value: string): string {
   return value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function relatedArxivIds(value: string): string[] {
+export function relatedArxivIds(value: string): string[] {
   const matches = value.matchAll(
     /(?:arxiv:|arxiv\.org\/(?:abs|html|pdf)\/)(\d{4}\.\d{4,5})(?:v\d+)?/gi,
   );
@@ -81,6 +81,17 @@ function relatedArxivIds(value: string): string[] {
         .filter((identifier): identifier is string => identifier !== null),
     ),
   ];
+}
+
+export function mapRssCollectionBatch<T>(
+  batch: CollectionBatch<RawItem>,
+  mapper: (item: RawItem) => T,
+): CollectionBatch<T> {
+  return {
+    candidates: batch.candidates.map(mapper),
+    succeededSourceIds: [...batch.succeededSourceIds],
+    failures: [...batch.failures],
+  };
 }
 
 export class RssAdapter {

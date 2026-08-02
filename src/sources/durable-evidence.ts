@@ -1,8 +1,8 @@
-import type { RawItem } from "./types";
+import type { RawItem, RawPublicationCandidate } from "./types";
 
 export const MAX_DURABLE_EVIDENCE_CODE_POINTS = 2_000;
 
-export function durableCollectedCandidate<T extends RawItem>(candidate: T): T {
+export function durableCollectedCandidate<T extends RawItem | RawPublicationCandidate>(candidate: T): T {
   if (candidate.metadata.retention !== "ephemeral-only") return candidate;
   const normalized = (candidate.abstract ?? candidate.content ?? candidate.title)
     .replace(/\s+/gu, " ")
