@@ -237,6 +237,44 @@ describe("consolidateResearchCandidates", () => {
     expect(consolidated.standaloneCommentary).toHaveLength(0);
   });
 
+  it("lets explicit discovery family override the legacy all-blog-role fallback", () => {
+    const official = normalized("official-lab", {
+      sourceRole: "blog",
+      metadata: { discoveryFamily: "official-publication" },
+    });
+    const explicitCommentary = normalized("commentary-analysis", {
+      kind: "paper",
+      sourceRole: "analysis",
+      title: "Independent analysis of a separate result",
+      originalUrl: "https://analysis.example.org/separate-result",
+      externalId: "analysis:separate-result",
+      externalIds: ["analysis:separate-result"],
+      metadata: { discoveryFamily: "commentary" },
+    });
+    const legacyCommentary = normalized("legacy-blog", {
+      kind: "paper",
+      sourceRole: "blog",
+      title: "Legacy untagged commentary",
+      originalUrl: "https://legacy.example.org/commentary",
+      externalId: "legacy:commentary",
+      externalIds: ["legacy:commentary"],
+      metadata: {},
+    });
+
+    expect(consolidateResearchCandidates([official])).toMatchObject({
+      papers: [expect.objectContaining({ kind: "paper" })],
+      standaloneCommentary: [],
+    });
+    expect(consolidateResearchCandidates([explicitCommentary])).toMatchObject({
+      papers: [],
+      standaloneCommentary: [expect.objectContaining({ kind: "blog" })],
+    });
+    expect(consolidateResearchCandidates([legacyCommentary])).toMatchObject({
+      papers: [],
+      standaloneCommentary: [expect.objectContaining({ kind: "blog" })],
+    });
+  });
+
   it("does not fall through conflicting arXiv identities to lower-priority matches", () => {
     const first = normalized("first", {
       externalId: "arXiv:2608.00011",

@@ -4,7 +4,10 @@ import {
   coordinateScheduledBriefing,
   shouldRunAt,
 } from "../../../src/workflow/schedule";
-import type { Item } from "../../../src/contracts/editorial";
+import type {
+  Item,
+  ResearchAssessment,
+} from "../../../src/contracts/editorial";
 import type {
   GenerateObjectRequest,
   ModelProvider,
@@ -89,6 +92,8 @@ function cachedItem(
     normalizedText: "Supported evidence.",
     metadata: {
       section: options.section,
+      contentFingerprint: `content:${id}`,
+      evidenceFingerprint: `evidence:${id}`,
       workflow: {
         version: 1,
         ...(options.researchTier === undefined
@@ -145,6 +150,9 @@ function cachedItem(
 function budgetContext(
   provider: ModelProvider,
   state: "degraded" | "hard_stop",
+  researchRepository?: Parameters<
+    typeof createProductionPipelineContext
+  >[0]["researchRepository"],
 ) {
   return createProductionPipelineContext({
     editionDate: "2026-07-29",
@@ -158,8 +166,18 @@ function budgetContext(
       radarSummaryTokens: state === "hard_stop" ? 0 : 120,
       featuredSummaryTokens: 900,
     },
+    ...(researchRepository === undefined ? {} : { researchRepository }),
   });
 }
+
+const cachedAssessment: ResearchAssessment = {
+  technicalQuality: 0.88,
+  novelty: 0.76,
+  strengths: ["Cached exact evidence."],
+  limitations: ["Cached exact evidence."],
+  rationale: "Cached exact evidence.",
+  accessLevel: "abstract",
+};
 
 describe("shouldRunAt", () => {
   it.each([
@@ -172,7 +190,7 @@ describe("shouldRunAt", () => {
       .toBe(expected);
   });
 
-  it("reapplies a hardened budget to cached radar before assessment and synthesis", async () => {
+  it("reapplies a hardened budget before uncached assessment and synthesis", async () => {
     const featured = cachedItem("featured", {
       kind: "paper",
       section: "research",
@@ -187,13 +205,12 @@ describe("shouldRunAt", () => {
     const hardProvider = new RecordingProvider();
     const hard = budgetContext(hardProvider, "hard_stop");
 
-    await expect(hard.assess([featured, radar])).resolves.toHaveLength(1);
+    await expect(hard.assess([featured, radar])).resolves.toHaveLength(0);
     await expect(hard.synthesize([featured, radar, news])).resolves.toHaveLength(2);
     expect(hardProvider.generateRequests.map((request) => [
       request.schemaName,
       request.maxOutputTokens,
     ])).toEqual([
-      ["research_assessment", 1_200],
       ["structured_summary", 900],
       ["structured_summary", 900],
     ]);
@@ -204,6 +221,93 @@ describe("shouldRunAt", () => {
     expect(degradedProvider.generateRequests.map(({ maxOutputTokens }) =>
       maxOutputTokens
     )).toEqual([900, 120, 900]);
+  });
+
+  it("uses exact assessment cache hits before hardened uncached-call caps", async () => {
+    const cachedIds = new Set(["cached-a", "cached-b"]);
+    const cacheGets: Array<[string, string, string]> = [];
+    const cachePuts: Array<[string, string, ResearchAssessment, string]> = [];
+    const researchRepository = {
+      getDiscoveryObservations: async () => [],
+      upsertDiscoveryObservations: async () => {},
+      getCachedResearchAssessment: async (
+        canonicalId: string,
+        evidenceFingerprint: string,
+        currentTime: string,
+      ) => {
+        cacheGets.push([canonicalId, evidenceFingerprint, currentTime]);
+        return [...cachedIds].some((id) => canonicalId.endsWith(`/${id}`))
+          ? cachedAssessment
+          : null;
+      },
+      putCachedResearchAssessment: async (
+        canonicalId: string,
+        evidenceFingerprint: string,
+        assessment: ResearchAssessment,
+        expiresAt: string,
+      ) => {
+        cachePuts.push([
+          canonicalId,
+          evidenceFingerprint,
+          assessment,
+          expiresAt,
+        ]);
+      },
+    };
+    const hardProvider = new RecordingProvider();
+    const hard = budgetContext(
+      hardProvider,
+      "hard_stop",
+      researchRepository,
+    );
+    const hardItems = ["cached-a", "uncached-a"].map((id) =>
+      cachedItem(id, { kind: "paper", section: "research" })
+    );
+
+    const hardAssessed = await hard.assess(hardItems);
+
+    expect(hardAssessed.map(({ id }) => id)).toEqual(["cached-a"]);
+    expect(hardProvider.generateRequests).toHaveLength(0);
+
+    cacheGets.length = 0;
+    const degradedProvider = new RecordingProvider();
+    const degraded = budgetContext(
+      degradedProvider,
+      "degraded",
+      researchRepository,
+    );
+    const degradedItems = [
+      "cached-a",
+      "cached-b",
+      ...Array.from({ length: 6 }, (_, index) => `uncached-${index}`),
+    ].map((id) => cachedItem(id, { kind: "paper", section: "research" }));
+
+    const degradedAssessed = await degraded.assess(degradedItems);
+
+    expect(degradedAssessed.map(({ id }) => id)).toEqual([
+      "cached-a",
+      "cached-b",
+      "uncached-0",
+      "uncached-1",
+      "uncached-2",
+      "uncached-3",
+    ]);
+    expect(degradedProvider.generateRequests).toHaveLength(4);
+    expect(cacheGets).toHaveLength(8);
+    expect(cacheGets[0]).toEqual([
+      "https://example.com/cached-a",
+      "evidence:cached-a",
+      "2026-07-29T08:30:00.000Z",
+    ]);
+    expect(cachePuts.map(([canonicalId, evidenceFingerprint]) => [
+      canonicalId,
+      evidenceFingerprint,
+    ])).toEqual([
+      ["https://example.com/uncached-0", "evidence:uncached-0"],
+      ["https://example.com/uncached-1", "evidence:uncached-1"],
+      ["https://example.com/uncached-2", "evidence:uncached-2"],
+      ["https://example.com/uncached-3", "evidence:uncached-3"],
+    ]);
   });
 
   it("assigns research tiers from ranked shortlist roles, not input order", async () => {

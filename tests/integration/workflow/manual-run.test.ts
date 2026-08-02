@@ -437,6 +437,23 @@ class RankingEmbeddingProvider implements ModelProvider {
   }
 }
 
+class RelevanceFirstEmbeddingProvider implements ModelProvider {
+  readonly embedRequests: string[][] = [];
+
+  async embed(
+    texts: readonly string[],
+  ): Promise<readonly (readonly number[])[]> {
+    this.embedRequests.push([...texts]);
+    return texts.map((text) =>
+      text.includes("Irrelevant arrival") ? [0, 1] : [1, 0]
+    );
+  }
+
+  async generateObject(input: GenerateObjectRequest): Promise<unknown> {
+    throw new Error(`Unexpected generation request: ${input.schemaName}`);
+  }
+}
+
 class FixtureStore implements PipelineStore {
   readonly checkpoints = new Map<string, Set<string>>();
   readonly artifacts = new Map<string, unknown>();
@@ -1456,6 +1473,9 @@ describe("manual editorial run", () => {
     expect(await store.readCheckpoint(context.runId, "cluster")).toBe(true);
     expect(await store.readCheckpoint(context.runId, "shortlist")).toBe(true);
 
+    const enriched = store.artifacts.get(`${context.runId}:enrich`) as
+      | CheckpointArtifact<readonly Item[]>
+      | undefined;
     const scored = store.artifacts.get(`${context.runId}:score`) as
       | CheckpointArtifact<readonly Item[]>
       | undefined;
@@ -1466,6 +1486,25 @@ describe("manual editorial run", () => {
       | CheckpointArtifact<readonly Item[]>
       | undefined;
 
+    expect(enriched).toBeDefined();
+    expect(JSON.stringify(enriched).length).toBeLessThan(1_000_000);
+    const enrichedResearch = enriched!.output.filter((item) =>
+      item.kind === "paper" || item.kind === "blog"
+    );
+    const enrichedNews = enriched!.output.filter((item) =>
+      item.kind !== "paper" && item.kind !== "blog"
+    );
+    expect(enrichedResearch).toHaveLength(1);
+    expect(enrichedResearch.every((item) =>
+      !("embedding" in (item.metadata.workflow as Record<string, unknown>))
+    )).toBe(true);
+    expect(enrichedResearch.every((item) =>
+      typeof (item.metadata.workflow as { topicalFit?: unknown }).topicalFit ===
+        "number"
+    )).toBe(true);
+    expect(enrichedNews.every((item) =>
+      "embedding" in (item.metadata.workflow as Record<string, unknown>)
+    )).toBe(true);
     expect(JSON.stringify(scored)).toContain('"embedding"');
     expect(clustered).toBeDefined();
     expect(shortlisted).toBeDefined();
@@ -1485,6 +1524,51 @@ describe("manual editorial run", () => {
     ).toEqual(["source-a", "source-b"]);
     expect(JSON.stringify(clustered)).not.toContain('"embedding"');
     expect(JSON.stringify(shortlisted)).not.toContain('"embedding"');
+  });
+
+  it("rejects a persisted research embedding in the enrich checkpoint", async () => {
+    const context = createProductionPipelineContext({
+      editionDate: "2033-02-10",
+      runId: "run-research-embedding-checkpoint",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider({
+          embeddingBatches: [[
+            [1, 0],
+            [1, 0],
+            [1, 0],
+            [1, 0],
+          ]],
+        }),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [rawResearchCandidate(
+        "2607.50003",
+        "Mechanistic interpretability without durable vectors",
+      )],
+    });
+    const enrich = context.enrich;
+    context.enrich = async (items) => (await enrich(items)).map((item) =>
+      ItemSchema.parse({
+        ...item,
+        metadata: {
+          ...item.metadata,
+          workflow: {
+            ...(item.metadata.workflow as Record<string, unknown>),
+            embedding: [1, 0],
+          },
+        },
+      })
+    );
+
+    await expect(runEditorialPipeline(context)).rejects.toMatchObject({
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          message: "Production enrich artifacts forbid research embedding.",
+        }),
+      ]),
+    });
   });
 
   it("rejects compact cluster checkpoints that omit relevance", async () => {
@@ -1735,6 +1819,176 @@ describe("manual editorial run", () => {
     );
   });
 
+  it("uses relevance-first research triage before assessment", async () => {
+    const candidates = Array.from({ length: 30 }, (_, index) => ({
+      ...rawResearchCandidate(
+        `2607.${String(32_000 + index)}`,
+        index < 9
+          ? `Irrelevant arrival ${index}`
+          : `Relevant candidate ${index} for interpretability oversight`,
+      ),
+      abstract: index < 9
+        ? "Unrelated agricultural logistics observations."
+        : "Mechanistic interpretability improves oversight with a concrete method.",
+      metadata: { discoveryFamily: "arxiv" },
+    }));
+    const embedding = new RelevanceFirstEmbeddingProvider();
+    const assessment = new ConcurrencyTrackingAssessmentProvider();
+    const context = createProductionPipelineContext({
+      editionDate: "2033-03-13",
+      runId: "relevance-first-research",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: { summary: embedding, assessment },
+      collectCandidates: async () => candidates,
+      budgetPolicy: {
+        state: "normal",
+        radarSummaryTokens: 300,
+        featuredSummaryTokens: 900,
+      },
+    });
+
+    const normalized = await context.normalize(await context.collect());
+    const enriched = await context.enrich(normalized);
+    const prefiltered = await context.prefilter(enriched);
+    const assessed = await context.assess(prefiltered);
+
+    const embeddedText = embedding.embedRequests.flat().join("\n");
+    for (const candidate of candidates) {
+      expect(embeddedText).toContain(candidate.title);
+    }
+    expect(prefiltered).toHaveLength(6);
+    expect(prefiltered.every(({ title }) =>
+      title.startsWith("Relevant candidate")
+    )).toBe(true);
+    expect(assessment.startedPackets).toHaveLength(6);
+    expect(assessment.startedPackets.every((packet) =>
+      packet.includes("Relevant candidate")
+    )).toBe(true);
+    expect(assessed).toHaveLength(6);
+    for (const item of enriched) {
+      const workflow = item.metadata.workflow as {
+        topicalFit?: number;
+        embedding?: readonly number[];
+      };
+      expect(workflow.topicalFit).toEqual(expect.any(Number));
+      expect(workflow).not.toHaveProperty("embedding");
+    }
+  });
+
+  it("keeps two-window research selection stable when the same run retries", async () => {
+    const repository = new D1BriefingRepository(env.DB);
+    const fourDaysOld = "2026-07-26T09:00:00.000Z";
+    const fresh = {
+      ...rawResearchCandidate("2607.31001", "Fresh interpretability result"),
+      publishedAt: "2026-07-29T12:00:00.000Z",
+      metadata: {
+        discoveryFamily: "arxiv",
+        contentFingerprint: "content:fresh",
+        evidenceFingerprint: "evidence:fresh",
+      },
+    };
+    const unchanged = {
+      ...rawResearchCandidate("2607.31002", "Unchanged interpretability result"),
+      publishedAt: fourDaysOld,
+      metadata: {
+        discoveryFamily: "arxiv",
+        contentFingerprint: "content:unchanged",
+        evidenceFingerprint: "evidence:unchanged",
+      },
+    };
+    const changed = {
+      ...rawResearchCandidate("2607.31003", "Changed interpretability evidence"),
+      publishedAt: fourDaysOld,
+      metadata: {
+        discoveryFamily: "arxiv",
+        contentFingerprint: "content:changed",
+        evidenceFingerprint: "evidence:new",
+      },
+    };
+    await repository.upsertDiscoveryObservations([
+      {
+        runId: "prior-run",
+        canonicalId: "arxiv:2607.31002",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        windowKind: "fresh",
+        publishedAt: fourDaysOld,
+        retrievedAt: fourDaysOld,
+        observedAt: "2026-07-27T09:00:00.000Z",
+        contentFingerprint: "content:unchanged",
+        evidenceFingerprint: "evidence:unchanged",
+        joinedExternalIds: ["arxiv:2607.31002"],
+        route: "research",
+        expiresAt: "2026-08-03T09:00:00.000Z",
+      },
+      {
+        runId: "prior-run",
+        canonicalId: "arxiv:2607.31003",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        windowKind: "fresh",
+        publishedAt: fourDaysOld,
+        retrievedAt: fourDaysOld,
+        observedAt: "2026-07-27T09:00:00.000Z",
+        contentFingerprint: "content:changed",
+        evidenceFingerprint: "evidence:old",
+        joinedExternalIds: ["arxiv:2607.31003"],
+        route: "research",
+        expiresAt: "2026-08-03T09:00:00.000Z",
+      },
+      {
+        runId: "two-window-current-run",
+        canonicalId: "arxiv:2607.31003",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        windowKind: "reconsideration",
+        publishedAt: fourDaysOld,
+        retrievedAt: now,
+        observedAt: now,
+        contentFingerprint: "content:changed",
+        evidenceFingerprint: "evidence:new",
+        joinedExternalIds: ["arxiv:2607.31003"],
+        route: "research",
+        expiresAt: "2026-08-06T09:00:00.000Z",
+      },
+    ]);
+    const context = createProductionPipelineContext({
+      editionDate: "2033-03-12",
+      runId: "two-window-current-run",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [unchanged, fresh, changed],
+      researchRepository: repository,
+    });
+
+    const collected = await context.collect();
+    const first = await context.normalize(collected);
+    const retried = await context.normalize(collected);
+
+    expect(first.map(({ title }) => title)).toEqual([
+      "Fresh interpretability result",
+      "Changed interpretability evidence",
+    ]);
+    expect(retried.map(({ id }) => id)).toEqual(first.map(({ id }) => id));
+    expect(first.map((item) => item.metadata.discoveryWindow)).toEqual([
+      "fresh",
+      "reconsideration",
+    ]);
+    const currentRunObservations = await repository.getDiscoveryObservations(
+      ["arxiv:2607.31001", "arxiv:2607.31003"],
+      "2026-07-23T09:00:00.000Z",
+      "another-run",
+    );
+    expect(currentRunObservations.filter(({ runId }) =>
+      runId === "two-window-current-run"
+    )).toHaveLength(2);
+  });
+
   it("runs paid synthesis calls sequentially", async () => {
     const summary = new ConcurrencyTrackingSummaryProvider();
     const context = createProductionPipelineContext({
@@ -1757,7 +2011,7 @@ describe("manual editorial run", () => {
     expect(summary.maximumActive).toBe(1);
   });
 
-  it("removes hard-stop radar before assessment and gives degraded radar only 120 summary tokens", async () => {
+  it("drops hard-stop uncached assessment and caps degraded calls before 120-token radar synthesis", async () => {
     const candidates = [
       rawResearchCandidate("2607.20001", "Interpretability study Alpha for oversight", 100),
       rawResearchCandidate("2607.20002", "Interpretability study Beta for oversight", 80),
@@ -1794,9 +2048,10 @@ describe("manual editorial run", () => {
     const hardNormalized = await hard.normalize(await hard.collect());
     const hardEnriched = await hard.enrich(hardNormalized);
     const hardPrefiltered = await hard.prefilter(hardEnriched);
-    await hard.assess(hardPrefiltered);
-    expect(hardPrefiltered).toHaveLength(3);
-    expect(hardAssessment.generateRequests).toHaveLength(3);
+    const hardAssessed = await hard.assess(hardPrefiltered);
+    expect(hardPrefiltered).toHaveLength(4);
+    expect(hardAssessed).toHaveLength(0);
+    expect(hardAssessment.generateRequests).toHaveLength(0);
 
     const summary = new GroundedProductionProvider();
     summary.failNextSummary = false;

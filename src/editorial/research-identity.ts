@@ -186,8 +186,10 @@ function find(parent: number[], index: number): number {
 }
 
 function isCommentary(item: Item): boolean {
+  if (typeof item.metadata.discoveryFamily === "string") {
+    return item.metadata.discoveryFamily === "commentary";
+  }
   return item.kind === "blog" ||
-    item.metadata.discoveryFamily === "commentary" ||
     item.sourceRefs.every((source) => source.role === "blog");
 }
 

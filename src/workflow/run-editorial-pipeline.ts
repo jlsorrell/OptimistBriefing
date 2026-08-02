@@ -4,6 +4,7 @@ import { D1BriefingRepository } from "../db/d1-repository";
 import {
   approvedBaselinePreferences,
   ReaderPreferencesSchema,
+  type BriefingRepository,
   type ReaderPreferences,
 } from "../db/repository";
 import { z } from "zod";
@@ -18,6 +19,17 @@ import { durableCollectedCandidate } from "../sources/durable-evidence";
 import { normalizeCandidate } from "../editorial/normalize";
 import { routePublication } from "../editorial/route-publication";
 import { deduplicateItems } from "../editorial/deduplicate";
+import {
+  canonicalResearchIdentity,
+  consolidateResearchCandidates,
+} from "../editorial/research-identity";
+import {
+  boundResearchDiscoveryPool,
+  classifyDiscoveryWindow,
+  researchFingerprints,
+  triageResearch,
+} from "../editorial/research-triage";
+import { CONFIGURED_RESEARCH_TOPIC_IDS } from "../editorial/research-topics";
 import {
   summarizeItem,
   SummaryRejectedError,
@@ -53,9 +65,12 @@ import {
   RawNewsCandidateSchema,
   RawPublicationCandidateSchema,
   RawResearchCandidateSchema,
+  DiscoveryFamilySchema,
   type RawNewsCandidate,
   type RawPublicationCandidate,
   type RawResearchCandidate,
+  type DiscoveryFamily,
+  type DiscoveryObservation,
   type ResearchSourceInput,
 } from "../sources/types";
 import {
@@ -68,6 +83,7 @@ import {
   type EditionSection,
   type Item,
   type ItemScore,
+  type ResearchAssessment,
   type StructuredSummary,
 } from "../contracts/editorial";
 import type {
@@ -169,7 +185,27 @@ function stageItemsSchema(stage: ItemStage) {
           stage === "assess" ||
           stage === "score"
         ) {
-          requireField(payload.embedding !== undefined, "embedding");
+          if (research && payload.embedding !== undefined) {
+            context.addIssue({
+              code: z.ZodIssueCode.custom,
+              message:
+                `Production ${stage} artifacts forbid research embedding.`,
+              path: [index, "metadata", "workflow", "embedding"],
+            });
+          }
+          if (!research) {
+            requireField(payload.embedding !== undefined, "embedding");
+          }
+        } else if (
+          research &&
+          (stage === "cluster" || stage === "shortlist") &&
+          payload.embedding !== undefined
+        ) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `Production ${stage} artifacts forbid research embedding.`,
+            path: [index, "metadata", "workflow", "embedding"],
+          });
         }
         if (
           stage === "enrich" ||
@@ -649,6 +685,13 @@ export type ProductionPipelineContextOptions = {
   loadSourceFailures?: PipelineContext["loadSourceFailures"];
   checkpointExecutor?: PipelineContext["checkpointExecutor"];
   budgetPolicy?: BudgetPolicy;
+  researchRepository?: Pick<
+    BriefingRepository,
+    | "getDiscoveryObservations"
+    | "upsertDiscoveryObservations"
+    | "getCachedResearchAssessment"
+    | "putCachedResearchAssessment"
+  >;
 };
 
 function defaultReaderPreferences(): ReaderPreferences {
@@ -1009,28 +1052,6 @@ function preferredSectionBudgets(
   };
 }
 
-function applyResearchBudget(
-  items: readonly Item[],
-  policy: BudgetPolicy | undefined,
-  budgets: SectionBudgets,
-): Item[] {
-  if (policy === undefined) return [...items];
-  const maximumRadar = policy.state === "hard_stop"
-    ? 0
-    : policy.state === "degraded"
-      ? Math.min(1, budgets.researchRadar)
-      : budgets.researchRadar;
-  const maximumFeatured = budgets.featuredResearch;
-  let researchIndex = 0;
-  return items.flatMap((item) => {
-    if (item.kind !== "paper" && item.kind !== "blog") return [item];
-    const tier = researchIndex < maximumFeatured ? "featured" : "radar";
-    researchIndex += 1;
-    if (researchIndex > maximumFeatured + maximumRadar) return [];
-    return [withWorkflowPayload(item, { researchTier: tier })];
-  });
-}
-
 function isOptionalRadar(item: Item): boolean {
   if (item.metadata.section === "research_radar") return true;
   const workflow = WorkflowItemPayloadSchema.safeParse(item.metadata.workflow);
@@ -1050,6 +1071,56 @@ function isRawCollectedCandidate(
   candidate: CollectedCandidate,
 ): candidate is RawNewsCandidate | RawResearchCandidate | RawPublicationCandidate {
   return "sourceId" in candidate && "retrievedAt" in candidate;
+}
+
+function isResearchItem(item: Item): boolean {
+  return item.kind === "paper" || item.kind === "blog";
+}
+
+function itemStringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === "string")
+    : [];
+}
+
+function itemDiscoveryFamily(item: Item): DiscoveryFamily {
+  const direct = DiscoveryFamilySchema.safeParse(item.metadata.discoveryFamily);
+  if (direct.success) return direct.data;
+  const sourceIds = new Set(item.sourceRefs.map(({ id }) => id));
+  if (sourceIds.has("arxiv")) return "arxiv";
+  if (sourceIds.has("semantic-scholar") || sourceIds.has("openalex")) {
+    return "bibliographic";
+  }
+  if (item.kind === "blog") return "commentary";
+  return "official-publication";
+}
+
+function researchObservation(
+  item: Item,
+  sourceId: string,
+  retrievedAt: string,
+  windowKind: DiscoveryObservation["windowKind"],
+  runId: string,
+  observedAt: string,
+): DiscoveryObservation {
+  const fingerprints = researchFingerprints(item);
+  return {
+    runId,
+    canonicalId: canonicalResearchIdentity(item),
+    sourceId,
+    discoveryFamily: itemDiscoveryFamily(item),
+    windowKind,
+    publishedAt: item.publishedAt,
+    retrievedAt,
+    observedAt,
+    contentFingerprint: fingerprints.contentFingerprint,
+    evidenceFingerprint: fingerprints.evidenceFingerprint,
+    joinedExternalIds: itemStringArray(item.metadata.externalIds).slice(0, 32),
+    route: "research",
+    expiresAt: new Date(
+      Date.parse(observedAt) + 7 * 24 * 60 * 60 * 1_000,
+    ).toISOString(),
+  };
 }
 
 export function createProductionPipelineContext(
@@ -1076,29 +1147,92 @@ export function createProductionPipelineContext(
         const routed = normalizedCandidate(candidate);
         return routed === null ? [] : [routed];
       });
-      return deduplicateItems(normalized).items.map((item) =>
-        withWorkflowPayload(item, {}),
+      const boundedResearch = boundResearchDiscoveryPool(
+        normalized.filter(isResearchItem),
       );
+      const consolidated = consolidateResearchCandidates(boundedResearch);
+      const fingerprintedResearch = [
+        ...consolidated.papers,
+        ...consolidated.standaloneCommentary,
+      ].map((item) => {
+        const fingerprints = researchFingerprints(item);
+        return withWorkflowPayload(item, {}, fingerprints);
+      });
+      const observedAt = options.now();
+      const since = new Date(
+        Date.parse(observedAt) - 7 * 24 * 60 * 60 * 1_000,
+      ).toISOString();
+      let priorObservations: readonly DiscoveryObservation[] = [];
+      if (
+        options.researchRepository !== undefined &&
+        fingerprintedResearch.length > 0
+      ) {
+        try {
+          priorObservations = await options.researchRepository
+            .getDiscoveryObservations(
+              fingerprintedResearch.map(canonicalResearchIdentity),
+              since,
+              options.runId,
+            );
+        } catch {
+          priorObservations = [];
+        }
+      }
+      const selectedResearch = fingerprintedResearch.flatMap((item) => {
+        const windowKind = classifyDiscoveryWindow(
+          item,
+          priorObservations,
+          observedAt,
+        );
+        return windowKind === null
+          ? []
+          : [withWorkflowPayload(item, {}, { discoveryWindow: windowKind })];
+      });
+      if (
+        options.researchRepository !== undefined &&
+        selectedResearch.length > 0
+      ) {
+        await options.researchRepository.upsertDiscoveryObservations(
+          selectedResearch.flatMap((item) => {
+            const windowKind = z.enum(["fresh", "reconsideration"])
+              .parse(item.metadata.discoveryWindow);
+            return item.sourceRefs.map((source) =>
+              researchObservation(
+                item,
+                source.id,
+                source.retrievedAt,
+                windowKind,
+                options.runId,
+                observedAt,
+              )
+            );
+          }),
+        );
+      }
+      const news = deduplicateItems(normalized.filter((item) =>
+        !isResearchItem(item)
+      )).items.map((item) => withWorkflowPayload(item, {}));
+      return [...selectedResearch, ...news];
     },
     ...(options.persistItems === undefined
       ? {}
       : { persistItems: options.persistItems }),
     enrich: async (items) => {
-      const budgetedItems = applyResearchBudget(
-        items,
-        options.budgetPolicy,
-        configuredBudgets,
-      );
-      if (budgetedItems.length === 0) return [];
+      if (items.length === 0) return [];
       const profileTexts = profileEmbeddingTexts();
+      const embeddingInputs = [
+        ...items.map(itemEmbeddingText),
+        ...profileTexts,
+      ];
+      const embedded: Array<readonly number[]> = [];
+      for (let offset = 0; offset < embeddingInputs.length; offset += 500) {
+        embedded.push(...await options.providers.summary.embed(
+          embeddingInputs.slice(offset, offset + 500),
+        ));
+      }
       const vectors = z.array(
         z.array(z.number().finite()).min(1).max(4_096),
-      ).length(budgetedItems.length + profileTexts.length).parse(
-        await options.providers.summary.embed([
-          ...budgetedItems.map(itemEmbeddingText),
-          ...profileTexts,
-        ]),
-      );
+      ).length(embeddingInputs.length).parse(embedded);
       const dimension = vectors[0]?.length;
       if (
         dimension === undefined ||
@@ -1106,8 +1240,8 @@ export function createProductionPipelineContext(
       ) {
         throw new Error("INVALID_EMBEDDING_BATCH");
       }
-      const profileVectors = vectors.slice(budgetedItems.length);
-      return budgetedItems.map((candidate, index) => {
+      const profileVectors = vectors.slice(items.length);
+      return items.map((candidate, index) => {
         const item = WorkflowItemSchema.parse(candidate);
         const embedding = vectors[index];
         if (embedding === undefined) throw new Error("MISSING_ITEM_EMBEDDING");
@@ -1128,7 +1262,6 @@ export function createProductionPipelineContext(
           item,
           item.kind === "paper" || item.kind === "blog"
             ? {
-                embedding,
                 topicalFit: adjustedRelevance(
                   relevance,
                   topicWeight === undefined ? [] : [topicWeight],
@@ -1147,24 +1280,32 @@ export function createProductionPipelineContext(
         );
       });
     },
-    prefilter: async (items) => items
-      .map((item) => WorkflowItemSchema.parse(item))
-      .filter((item) => {
-        if (item.normalizedText.trim().length === 0) return false;
-        if (item.kind !== "paper" && item.kind !== "blog") return true;
-        const topicalFit = workflowPayload(item).topicalFit;
-        return (
-          topicalFit !== undefined &&
-          topicalFit >=
-            READER_PROFILE.researchQualityGates.minimumTopicalFit
-        );
-      }),
+    prefilter: async (items) => {
+      const parsed = items.map((item) => WorkflowItemSchema.parse(item));
+      const research = parsed.filter(isResearchItem);
+      const news = parsed.filter((item) =>
+        !isResearchItem(item) && item.normalizedText.trim().length > 0
+      );
+      const triaged = triageResearch(research, {
+        maximum: 24,
+        maximumPerFamily: 12,
+        maximumPerPublisherDomain: 6,
+        configuredTopics: CONFIGURED_RESEARCH_TOPIC_IDS,
+        now: options.now(),
+        minimumTopicalFit:
+          READER_PROFILE.researchQualityGates.minimumTopicalFit,
+      });
+      return [...triaged.items, ...news];
+    },
     assess: async (items) => {
       const assessed: Item[] = [];
-      for (const candidate of providerEligibleItems(
-        items,
-        options.budgetPolicy,
-      )) {
+      const maximumUncached = options.budgetPolicy?.state === "hard_stop"
+        ? 0
+        : options.budgetPolicy?.state === "degraded"
+          ? 4
+          : 24;
+      let uncachedCalls = 0;
+      for (const candidate of items) {
         const item = WorkflowItemSchema.parse(candidate);
         if (item.kind !== "paper" && item.kind !== "blog") {
           assessed.push(item);
@@ -1174,10 +1315,44 @@ export function createProductionPipelineContext(
         if (rawResearch === undefined) {
           throw new Error(`MISSING_RAW_RESEARCH:${item.id}`);
         }
+        const canonicalId = canonicalResearchIdentity(item);
+        const evidenceFingerprint = researchFingerprints(item)
+          .evidenceFingerprint;
+        let cachedAssessment: ResearchAssessment | null = null;
+        if (options.researchRepository !== undefined) {
+          try {
+            cachedAssessment = await options.researchRepository
+              .getCachedResearchAssessment(
+                canonicalId,
+                evidenceFingerprint,
+                options.now(),
+              );
+          } catch {
+            cachedAssessment = null;
+          }
+        }
+        if (cachedAssessment !== null) {
+          assessed.push(withWorkflowPayload(item, {
+            assessment: cachedAssessment,
+          }));
+          continue;
+        }
+        if (uncachedCalls >= maximumUncached) continue;
+        uncachedCalls += 1;
         const assessment = await assessResearch(
           rawResearch,
           options.providers.assessment,
         );
+        if (options.researchRepository !== undefined) {
+          await options.researchRepository.putCachedResearchAssessment(
+            canonicalId,
+            evidenceFingerprint,
+            assessment,
+            new Date(
+              Date.parse(options.now()) + 7 * 24 * 60 * 60 * 1_000,
+            ).toISOString(),
+          );
+        }
         assessed.push(withWorkflowPayload(item, { assessment }));
       }
       return assessed;
@@ -1444,6 +1619,7 @@ export function createD1ProductionPipelineContext(
     now,
     providers,
     ...options,
+    researchRepository: store.repository,
     sourceFailures,
     loadSourceFailures: () => store.readCollectionSourceFailures(runId),
     persistItems: async (items) => store.repository.upsertItems(items),
@@ -1483,7 +1659,7 @@ export function createD1ProductionPipelineContext(
       });
       const to = now();
       const from = new Date(
-        Date.parse(to) - 36 * 60 * 60 * 1_000,
+        Date.parse(to) - 7 * 24 * 60 * 60 * 1_000,
       ).toISOString();
       const [news, research, publications] = await Promise.all([
         newsCollector.collect({ from, to }),
