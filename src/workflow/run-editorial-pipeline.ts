@@ -736,6 +736,17 @@ function workflowPayload(item: Item): WorkflowItemPayload {
   return WorkflowItemPayloadSchema.parse(item.metadata.workflow);
 }
 
+function withoutWorkflowEmbedding(item: Item): Item {
+  const { embedding: _embedding, ...workflow } = workflowPayload(item);
+  return WorkflowItemSchema.parse({
+    ...item,
+    metadata: {
+      ...item.metadata,
+      workflow,
+    },
+  });
+}
+
 function withWorkflowPayload(
   item: Item,
   patch: Partial<Omit<WorkflowItemPayload, "version">>,
@@ -1212,8 +1223,10 @@ export function createProductionPipelineContext(
         item.id,
         workflowPayload(item).embedding ?? [],
       ]));
-      const byId = new Map(news.map((item) => [item.id, item]));
-      const developments = clusterNews(news, embeddings);
+      const compactResearch = research.map(withoutWorkflowEmbedding);
+      const compactNews = news.map(withoutWorkflowEmbedding);
+      const byId = new Map(compactNews.map((item) => [item.id, item]));
+      const developments = clusterNews(compactNews, embeddings);
       const developmentItems = developments.map((development) => {
         const scores = development.itemIds.map((itemId) => {
           const item = byId.get(itemId);
@@ -1230,7 +1243,7 @@ export function createProductionPipelineContext(
         });
         return itemFromDevelopment(development, developmentScore);
       });
-      return [...research, ...developmentItems];
+      return [...compactResearch, ...developmentItems];
     },
     shortlist: async (items) => {
       const parsed = items.map((item) => WorkflowItemSchema.parse(item));

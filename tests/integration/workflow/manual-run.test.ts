@@ -1395,6 +1395,47 @@ describe("manual editorial run", () => {
     )).toBe(true);
   });
 
+  it("uses embeddings for clustering without retaining them in cluster output", async () => {
+    const embedding = [1, ...Array<number>(1_535).fill(0)];
+    const candidates = ["source-a", "source-b"].map((id) => ({
+      ...fixtureItem(id, "world"),
+      metadata: {
+        primarySection: "world",
+        sectionEligibility: ["world"],
+        namedEntities: ["Example Agency"],
+      },
+    }));
+    const context = createProductionPipelineContext({
+      editionDate: "2033-02-08",
+      runId: "run-compact-cluster-checkpoint",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider({
+          embeddingBatches: [[
+            embedding,
+            embedding,
+            embedding,
+            embedding,
+            embedding,
+          ]],
+        }),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => candidates,
+    });
+
+    const normalized = await context.normalize(await context.collect());
+    const enriched = await context.enrich(normalized);
+    const scored = await context.score(await context.prefilter(enriched));
+    expect(JSON.stringify(scored)).toContain('"embedding"');
+
+    const clustered = await context.cluster(scored);
+
+    expect(clustered).toHaveLength(1);
+    expect(JSON.stringify(clustered)).not.toContain('"embedding"');
+  });
+
   it("rejects a claim when its cited source lacks the claimed evidence", async () => {
     // This fails if validation accepts evidence from another source in the development.
     const sourceA: Item = {
