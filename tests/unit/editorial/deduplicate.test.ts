@@ -439,6 +439,38 @@ describe("deduplicateItems", () => {
     expect(deduplicateItems([paper, commentary]).items).toHaveLength(2);
   });
 
+  it("recognizes paper-shaped commentary from its only source role", () => {
+    const paper = normalizeCandidate({
+      ...rawNews({
+        kind: "article",
+        sourceId: "arxiv-role-check",
+        sourceRole: "primary",
+        originalUrl: "https://arxiv.org/abs/2608.00010",
+        externalId: "arXiv:2608.00010",
+        externalIds: ["arXiv:2608.00010"],
+      }),
+      kind: "paper",
+      metadata: {},
+    });
+    const commentary = normalizeCandidate({
+      ...rawNews({
+        kind: "article",
+        sourceId: "blog-role-check",
+        sourceRole: "blog",
+        originalUrl: "https://blog.example.org/paper-shaped-commentary",
+        externalId: "arXiv:2608.00010",
+        externalIds: ["arXiv:2608.00010"],
+        accessLevel: "full_text",
+        content: "Commentary must not become primary paper evidence.",
+        canCorroborateFacts: false,
+      }),
+      kind: "paper",
+      metadata: {},
+    });
+
+    expect(deduplicateItems([paper, commentary]).items).toHaveLength(2);
+  });
+
   it("does not merge same-title papers without an author match", () => {
     const first = normalizeCandidate({
       ...rawNews({

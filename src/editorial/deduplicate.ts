@@ -118,7 +118,9 @@ function hasAuthorOverlap(left: Item, right: Item): boolean {
 }
 
 function isResearchCommentary(item: Item): boolean {
-  return item.kind === "blog" || item.metadata.discoveryFamily === "commentary";
+  return item.kind === "blog" ||
+    item.metadata.discoveryFamily === "commentary" ||
+    item.sourceRefs.every((source) => source.role === "blog");
 }
 
 function duplicateReason(

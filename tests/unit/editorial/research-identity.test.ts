@@ -194,6 +194,93 @@ describe("consolidateResearchCandidates", () => {
     expect(consolidated.standaloneCommentary).toHaveLength(0);
   });
 
+  it("treats a paper-shaped blog source as commentary without metadata hints", () => {
+    const paper = normalized("arxiv", {
+      externalId: "arXiv:2608.00010",
+      externalIds: ["arXiv:2608.00010"],
+      accessLevel: "abstract",
+      abstract: "Primary abstract evidence.",
+      metadata: { discoveryFamily: "arxiv" },
+    });
+    const commentary = normalized("independent-blog", {
+      kind: "paper",
+      sourceRole: "blog",
+      originalUrl: "https://blog.example.org/oversight-commentary",
+      externalId: "arXiv:2608.00010",
+      externalIds: ["arXiv:2608.00010"],
+      accessLevel: "full_text",
+      abstract: null,
+      content: "A long commentary interpretation that is not paper evidence.",
+      relatedPaperIds: ["arXiv:2608.00010"],
+      metadata: {},
+    });
+
+    const consolidated = consolidateResearchCandidates([commentary, paper]);
+
+    expect(consolidated.papers).toHaveLength(1);
+    expect(consolidated.papers[0]).toMatchObject({
+      accessLevel: "abstract",
+      normalizedText: "Primary abstract evidence.",
+      metadata: {
+        primaryResearchSourceIds: ["arxiv"],
+        attachedCommentary: [expect.objectContaining({
+          sourceId: "independent-blog",
+          role: "blog",
+        })],
+      },
+    });
+    expect(consolidated.papers[0]?.metadata.provenance).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sourceId: "independent-blog" }),
+      ]),
+    );
+    expect(consolidated.standaloneCommentary).toHaveLength(0);
+  });
+
+  it("does not fall through conflicting arXiv identities to lower-priority matches", () => {
+    const first = normalized("first", {
+      externalId: "arXiv:2608.00011",
+      externalIds: [
+        "arXiv:2608.00011",
+        "DOI:10.1000/shared-lower-id",
+        "OpenAlex:W-SHARED",
+      ],
+      originalUrl: "https://publisher.example.org/shared-paper",
+    });
+    const second = normalized("second", {
+      externalId: "arXiv:2608.00012",
+      externalIds: [
+        "arXiv:2608.00012",
+        "DOI:10.1000/shared-lower-id",
+        "OpenAlex:W-SHARED",
+      ],
+      originalUrl: "https://publisher.example.org/shared-paper",
+    });
+
+    const consolidated = consolidateResearchCandidates([first, second]);
+
+    expect(consolidated.papers).toHaveLength(2);
+    expect(consolidated.merges).toHaveLength(0);
+  });
+
+  it("does not fall through conflicting DOI identities to URL or title", () => {
+    const first = normalized("first-doi", {
+      externalId: "DOI:10.1000/distinct-a",
+      externalIds: ["DOI:10.1000/distinct-a"],
+      originalUrl: "https://publisher.example.org/ambiguous-record",
+    });
+    const second = normalized("second-doi", {
+      externalId: "DOI:10.1000/distinct-b",
+      externalIds: ["DOI:10.1000/distinct-b"],
+      originalUrl: "https://publisher.example.org/ambiguous-record",
+    });
+
+    const consolidated = consolidateResearchCandidates([first, second]);
+
+    expect(consolidated.papers).toHaveLength(2);
+    expect(consolidated.merges).toHaveLength(0);
+  });
+
   it("attaches title-and-author commentary and retains substantive unlinked posts", () => {
     const paper = normalized("arxiv", {
       externalId: "arXiv:2608.00002",

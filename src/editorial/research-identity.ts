@@ -141,8 +141,11 @@ function researchMatchReason(
   const leftIds = itemDurableIdentities(left);
   const rightIds = itemDurableIdentities(right);
   if (intersects(leftIds.arxiv, rightIds.arxiv)) return "arxiv";
+  if (leftIds.arxiv.size > 0 && rightIds.arxiv.size > 0) return null;
   if (intersects(leftIds.doi, rightIds.doi)) return "doi";
+  if (leftIds.doi.size > 0 && rightIds.doi.size > 0) return null;
   if (intersects(leftIds.provider, rightIds.provider)) return "provider_id";
+  if (leftIds.provider.size > 0 && rightIds.provider.size > 0) return null;
   if (left.canonicalUrl === right.canonicalUrl) return "canonical_url";
   return titleAndAuthorMatch(left, right) ? "title_author" : null;
 }
@@ -183,7 +186,9 @@ function find(parent: number[], index: number): number {
 }
 
 function isCommentary(item: Item): boolean {
-  return item.kind === "blog" || item.metadata.discoveryFamily === "commentary";
+  return item.kind === "blog" ||
+    item.metadata.discoveryFamily === "commentary" ||
+    item.sourceRefs.every((source) => source.role === "blog");
 }
 
 function commentaryRelatedIds(item: Item): string[] {
