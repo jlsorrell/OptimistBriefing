@@ -1397,14 +1397,20 @@ describe("manual editorial run", () => {
 
   it("accepts compact cluster and shortlist checkpoints after semantic clustering", async () => {
     const embedding = [1, ...Array<number>(1_535).fill(0)];
-    const candidates = ["source-a", "source-b"].map((id) => ({
-      ...fixtureItem(id, "world"),
-      metadata: {
-        primarySection: "world",
-        sectionEligibility: ["world"],
-        namedEntities: ["Example Agency"],
-      },
-    }));
+    const candidates = [
+      rawResearchCandidate(
+        "2607.50001",
+        "Mechanistic interpretability for compact checkpoints",
+      ),
+      ...["source-a", "source-b"].map((id) => ({
+        ...fixtureItem(id, "world"),
+        metadata: {
+          primarySection: "world",
+          sectionEligibility: ["world"],
+          namedEntities: ["Example Agency"],
+        },
+      })),
+    ];
     const store = new FixtureStore();
     const context = createProductionPipelineContext({
       editionDate: "2033-02-08",
@@ -1419,9 +1425,19 @@ describe("manual editorial run", () => {
             embedding,
             embedding,
             embedding,
+            embedding,
           ]],
         }),
-        assessment: new FakeModelProvider(),
+        assessment: new FakeModelProvider({
+          generatedObjects: [{
+            technicalQuality: 0.9,
+            novelty: 0.8,
+            strengths: ["The abstract describes a concrete method."],
+            limitations: ["Only abstract evidence was supplied."],
+            rationale: "The available abstract supports a strong assessment.",
+            accessLevel: "abstract",
+          }],
+        }),
       },
       collectCandidates: async () => candidates,
     });
@@ -1440,15 +1456,107 @@ describe("manual editorial run", () => {
     expect(await store.readCheckpoint(context.runId, "cluster")).toBe(true);
     expect(await store.readCheckpoint(context.runId, "shortlist")).toBe(true);
 
-    const scored = store.artifacts.get(`${context.runId}:score`);
-    const clustered = store.artifacts.get(`${context.runId}:cluster`);
-    const shortlisted = store.artifacts.get(`${context.runId}:shortlist`);
+    const scored = store.artifacts.get(`${context.runId}:score`) as
+      | CheckpointArtifact<readonly Item[]>
+      | undefined;
+    const clustered = store.artifacts.get(`${context.runId}:cluster`) as
+      | CheckpointArtifact<readonly Item[]>
+      | undefined;
+    const shortlisted = store.artifacts.get(`${context.runId}:shortlist`) as
+      | CheckpointArtifact<readonly Item[]>
+      | undefined;
 
     expect(JSON.stringify(scored)).toContain('"embedding"');
     expect(clustered).toBeDefined();
     expect(shortlisted).toBeDefined();
+    const clusteredResearch = clustered!.output.filter((item) =>
+      item.kind === "paper" || item.kind === "blog"
+    );
+    const clusteredNews = clustered!.output.filter((item) =>
+      item.kind !== "paper" && item.kind !== "blog"
+    );
+    expect(clusteredResearch).toHaveLength(1);
+    expect(clusteredNews).toHaveLength(1);
+    expect(shortlisted!.output.some((item) => item.kind === "paper")).toBe(true);
+    expect(
+      (clusteredNews[0]!.metadata.workflow as {
+        development?: { itemIds?: readonly string[] };
+      }).development?.itemIds,
+    ).toEqual(["source-a", "source-b"]);
     expect(JSON.stringify(clustered)).not.toContain('"embedding"');
     expect(JSON.stringify(shortlisted)).not.toContain('"embedding"');
+  });
+
+  it("rejects compact cluster checkpoints that omit relevance", async () => {
+    const embedding = [1, ...Array<number>(1_535).fill(0)];
+    const context = createProductionPipelineContext({
+      editionDate: "2033-02-09",
+      runId: "run-compact-cluster-missing-relevance",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider({
+          embeddingBatches: [[
+            embedding,
+            embedding,
+            embedding,
+            embedding,
+            embedding,
+          ]],
+        }),
+        assessment: new FakeModelProvider({
+          generatedObjects: [{
+            technicalQuality: 0.9,
+            novelty: 0.8,
+            strengths: ["The abstract describes a concrete method."],
+            limitations: ["Only abstract evidence was supplied."],
+            rationale: "The available abstract supports a strong assessment.",
+            accessLevel: "abstract",
+          }],
+        }),
+      },
+      collectCandidates: async () => [
+        rawResearchCandidate(
+          "2607.50002",
+          "Mechanistic interpretability with required relevance",
+        ),
+        fixtureItem("relevance-news", "world"),
+      ],
+    });
+    const cluster = context.cluster;
+    context.cluster = async (items) => (await cluster(items)).map((item) => {
+      const workflow = {
+        ...(item.metadata.workflow as Record<string, unknown>),
+      };
+      if (item.kind === "paper" || item.kind === "blog") {
+        delete workflow.topicalFit;
+      } else {
+        delete workflow.personalRelevance;
+      }
+      return ItemSchema.parse({
+        ...item,
+        metadata: { ...item.metadata, workflow },
+      });
+    });
+    context.synthesize = async (items) => items.map((item) => ({
+      item,
+      summary: fixtureSummary(item),
+    }));
+    context.validate = async (entries) => entries.map((entry) => ({
+      ...entry,
+      valid: true,
+    }));
+
+    await expect(runEditorialPipeline(context)).rejects.toMatchObject({
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          message: "Production cluster artifacts require topicalFit.",
+        }),
+        expect.objectContaining({
+          message: "Production cluster artifacts require personalRelevance.",
+        }),
+      ]),
+    });
   });
 
   it("rejects a claim when its cited source lacks the claimed evidence", async () => {

@@ -166,6 +166,15 @@ function stageItemsSchema(stage: ItemStage) {
           stage === "score"
         ) {
           requireField(payload.embedding !== undefined, "embedding");
+        }
+        if (
+          stage === "enrich" ||
+          stage === "prefilter" ||
+          stage === "assess" ||
+          stage === "score" ||
+          stage === "cluster" ||
+          stage === "shortlist"
+        ) {
           requireField(
             research
               ? payload.topicalFit !== undefined
