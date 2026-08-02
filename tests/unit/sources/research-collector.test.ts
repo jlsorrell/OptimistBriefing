@@ -224,6 +224,43 @@ describe("ResearchCollector", () => {
     expect(result.candidates[0]?.externalId).toBe("arXiv:2607.00001");
   });
 
+  it("retains cross-source paper evidence for normalized identity consolidation", async () => {
+    const providerPaper = {
+      ...rawPaper("openalex"),
+      sourceName: "OpenAlex",
+      sourceRole: "analysis" as const,
+      originalUrl: "https://openalex.org/W260700001",
+      externalId: "OpenAlex:W260700001",
+      externalIds: ["OpenAlex:W260700001", "arXiv:2607.00001"],
+    };
+    const adapters = [
+      {
+        laneId: "arxiv:one",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        collect: async () => [rawPaper()],
+      },
+      {
+        laneId: "openalex:one",
+        sourceId: "openalex",
+        discoveryFamily: "bibliographic",
+        collect: async () => [providerPaper],
+      },
+    ] satisfies readonly DiscoverySourceAdapter[];
+    const collector = new ResearchCollector({
+      discoveryAdapters: adapters,
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates.map(({ sourceId }) => sourceId)).toEqual([
+      "arxiv",
+      "openalex",
+    ]);
+  });
+
   it("sorts each paper lane before applying the 100-candidate cap", async () => {
     const olderPapers = Array.from({ length: 100 }, (_, index) => {
       const paper = rawPaper();

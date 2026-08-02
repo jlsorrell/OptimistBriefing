@@ -408,6 +408,65 @@ describe("deduplicateItems", () => {
 
     expect(deduplicateItems([paper, commentary]).items).toHaveLength(2);
   });
+
+  it("keeps explicitly linked commentary separate from its paper", () => {
+    const paper = normalizeCandidate({
+      ...rawNews({
+        kind: "article",
+        sourceId: "arxiv",
+        sourceRole: "primary",
+        originalUrl: "https://arxiv.org/abs/2608.00001",
+        externalId: "arXiv:2608.00001",
+        externalIds: ["arXiv:2608.00001"],
+      }),
+      kind: "paper",
+      metadata: { discoveryFamily: "arxiv" },
+    });
+    const commentary = normalizeCandidate({
+      ...rawNews({
+        kind: "article",
+        sourceId: "papers-with-code-co",
+        sourceRole: "blog",
+        originalUrl: "https://paperswithcode.co/paper/2608.00001",
+        externalId: "arXiv:2608.00001",
+        externalIds: ["arXiv:2608.00001"],
+        canCorroborateFacts: false,
+      }),
+      kind: "paper",
+      metadata: { discoveryFamily: "commentary" },
+    });
+
+    expect(deduplicateItems([paper, commentary]).items).toHaveLength(2);
+  });
+
+  it("does not merge same-title papers without an author match", () => {
+    const first = normalizeCandidate({
+      ...rawNews({
+        kind: "article",
+        title: "A shared title for distinct papers",
+        sourceId: "first-paper",
+        originalUrl: "https://papers.example.com/first",
+        externalId: "first-paper-id",
+        externalIds: ["first-paper-id"],
+        authors: ["Ada Example"],
+      }),
+      kind: "paper",
+    });
+    const second = normalizeCandidate({
+      ...rawNews({
+        kind: "article",
+        title: "A shared title for distinct papers",
+        sourceId: "second-paper",
+        originalUrl: "https://papers.example.com/second",
+        externalId: "second-paper-id",
+        externalIds: ["second-paper-id"],
+        authors: ["Grace Different"],
+      }),
+      kind: "paper",
+    });
+
+    expect(deduplicateItems([first, second]).items).toHaveLength(2);
+  });
 });
 
 describe("clusterNews", () => {

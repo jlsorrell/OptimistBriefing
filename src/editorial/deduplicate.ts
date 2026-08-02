@@ -12,7 +12,7 @@ import {
   editorialSignalKey,
   editorialSignals,
 } from "./editorial-signals";
-import { normalizeTitleKey } from "./normalize";
+import { normalizeAuthorKey, normalizeTitleKey } from "./normalize";
 
 export type DeduplicationReason =
   | "external_identifier"
@@ -105,10 +105,29 @@ function compatibleNearDuplicateKinds(left: Item, right: Item): boolean {
   );
 }
 
+function normalizedAuthors(item: Item): ReadonlySet<string> {
+  const stored = stringArray(item.metadata.normalizedAuthors);
+  const authors = stored.length > 0
+    ? stored
+    : stringArray(item.metadata.authors).map(normalizeAuthorKey);
+  return new Set(authors.filter((author) => author.length > 0));
+}
+
+function hasAuthorOverlap(left: Item, right: Item): boolean {
+  return intersects(normalizedAuthors(left), normalizedAuthors(right));
+}
+
+function isResearchCommentary(item: Item): boolean {
+  return item.kind === "blog" || item.metadata.discoveryFamily === "commentary";
+}
+
 function duplicateReason(
   left: Item,
   right: Item,
 ): DeduplicationReason | null {
+  if (isResearchCommentary(left) !== isResearchCommentary(right)) {
+    return null;
+  }
   if (intersects(identifiers(left), identifiers(right))) {
     return "external_identifier";
   }
@@ -116,7 +135,10 @@ function duplicateReason(
   if (
     compatibleNearDuplicateKinds(left, right) &&
     compatiblePublicationWindow(left, right) &&
-    titleSimilarity(left.title, right.title) >= 0.82
+    (left.kind === "paper" && right.kind === "paper"
+      ? normalizeTitleKey(left.title) === normalizeTitleKey(right.title) &&
+        hasAuthorOverlap(left, right)
+      : titleSimilarity(left.title, right.title) >= 0.82)
   ) {
     return "near_duplicate_title_time";
   }
@@ -162,7 +184,10 @@ function sourceRefKey(source: SourceRef): string {
   ].join("\u0000");
 }
 
-function mergeGroup(group: readonly Item[]): Item {
+export function mergeItemGroup(group: readonly Item[]): Item {
+  if (group.length === 0) {
+    throw new RangeError("Cannot merge an empty item group.");
+  }
   const winner = group.reduce(preferredItem);
   const sources = new Map<string, SourceRef>();
   for (const item of group) {
@@ -187,6 +212,15 @@ function mergeGroup(group: readonly Item[]): Item {
   ].sort((left, right) => left.localeCompare(right));
   const sectionEligibility = mergedStringMetadata(
     "sectionEligibility",
+  );
+  const authors = mergedStringMetadata("authors");
+  const normalizedAuthorKeys = mergedStringMetadata("normalizedAuthors");
+  const institutions = mergedStringMetadata("institutions");
+  const providerTopics = mergedStringMetadata("providerTopics");
+  const configuredTopics = mergedStringMetadata("configuredTopics");
+  const relatedPaperIds = mergedStringMetadata("relatedPaperIds");
+  const primaryResearchSourceIds = mergedStringMetadata(
+    "primaryResearchSourceIds",
   );
   const signalMap = new Map(
     group
@@ -312,6 +346,13 @@ function mergeGroup(group: readonly Item[]): Item {
       externalIds: mergedExternalIds,
       provenance,
       sectionEligibility,
+      authors,
+      normalizedAuthors: normalizedAuthorKeys,
+      institutions,
+      providerTopics,
+      configuredTopics,
+      relatedPaperIds,
+      primaryResearchSourceIds,
       namedEntities,
       primaryDocumentUrl: primaryDocumentUrls[0] ?? null,
       primaryDocumentUrls,
@@ -387,7 +428,7 @@ export function deduplicateItems(
   const merges: DeduplicationMerge[] = [];
   for (const group of groups.values()) {
     const winner = group.reduce(preferredItem);
-    const merged = mergeGroup(group);
+    const merged = mergeItemGroup(group);
     mergedItems.push(merged);
     let retainedWinner = false;
     for (const item of group) {

@@ -156,6 +156,14 @@ export function normalizeTitleKey(value: string): string {
     .trim();
 }
 
+export function normalizeAuthorKey(value: string): string {
+  return normalizedWhitespace(value)
+    .toLocaleLowerCase("en-US")
+    .replace(/[\p{P}\p{S}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function normalizeCandidate(raw: unknown): Item {
   const input =
     raw !== null && typeof raw === "object"
@@ -338,6 +346,10 @@ export function normalizeCandidate(raw: unknown): Item {
   )}`;
   const sourceUrl = canonicalizeUrl(candidate.originalUrl);
   const createdAt = new Date(candidate.retrievedAt).toISOString();
+  const isCommentary =
+    candidate.kind === "blog" ||
+    candidate.sourceRole === "blog" ||
+    candidate.metadata.discoveryFamily === "commentary";
   const signalPrimaryDocumentUrls = uniqueSorted([
     ...primaryDocumentUrls,
     ...(candidate.kind === "document" ? [canonicalUrl] : []),
@@ -376,6 +388,11 @@ export function normalizeCandidate(raw: unknown): Item {
       normalizedTitle: normalizeTitleKey(title),
       originalUrl: candidate.originalUrl,
       authors: uniqueSorted(candidate.authors.map(normalizedWhitespace)),
+      normalizedAuthors: uniqueSorted(
+        candidate.authors
+          .map(normalizeAuthorKey)
+          .filter((author) => author.length > 0),
+      ),
       institutions: uniqueSorted(
         candidate.institutions.map(normalizedWhitespace),
       ),
@@ -411,6 +428,10 @@ export function normalizeCandidate(raw: unknown): Item {
       relatedPaperIds: uniqueSorted(
         candidate.relatedPaperIds.map(canonicalIdentifier),
       ),
+      primaryResearchSourceIds:
+        candidate.kind === "paper" && !isCommentary
+          ? [candidate.sourceId]
+          : [],
       canCorroborateFacts,
       provenance: [
         {

@@ -161,6 +161,7 @@ function mergePaperIdentities(items: readonly RawItem[]): RawItem[] {
     const identities = new Set(paperIdentities(item));
     const matches = merged.flatMap((candidate, index) =>
       candidate.kind === "paper" &&
+      candidate.sourceId === item.sourceId &&
       paperIdentities(candidate).some((identity) => identities.has(identity))
         ? [index]
         : [],
