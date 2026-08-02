@@ -1344,14 +1344,18 @@ export function createProductionPipelineContext(
           options.providers.assessment,
         );
         if (options.researchRepository !== undefined) {
-          await options.researchRepository.putCachedResearchAssessment(
-            canonicalId,
-            evidenceFingerprint,
-            assessment,
-            new Date(
-              Date.parse(options.now()) + 7 * 24 * 60 * 60 * 1_000,
-            ).toISOString(),
-          );
+          try {
+            await options.researchRepository.putCachedResearchAssessment(
+              canonicalId,
+              evidenceFingerprint,
+              assessment,
+              new Date(
+                Date.parse(options.now()) + 7 * 24 * 60 * 60 * 1_000,
+              ).toISOString(),
+            );
+          } catch {
+            // Assessment cache availability must not discard paid results.
+          }
         }
         assessed.push(withWorkflowPayload(item, { assessment }));
       }

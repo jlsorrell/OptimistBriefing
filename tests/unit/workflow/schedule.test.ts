@@ -310,6 +310,35 @@ describe("shouldRunAt", () => {
     ]);
   });
 
+  it("keeps a successful paid assessment when the optional cache write fails", async () => {
+    const provider = new RecordingProvider();
+    const context = budgetContext(provider, "degraded", {
+      getDiscoveryObservations: async () => [],
+      upsertDiscoveryObservations: async () => {},
+      getCachedResearchAssessment: async () => null,
+      putCachedResearchAssessment: async () => {
+        throw new Error("CACHE_WRITE_UNAVAILABLE");
+      },
+    });
+    const item = cachedItem("cache-write-failure", {
+      kind: "paper",
+      section: "research",
+    });
+
+    const assessed = await context.assess([item]);
+
+    expect(assessed).toHaveLength(1);
+    expect(WorkflowItemPayloadSchema.parse(
+      assessed[0]?.metadata.workflow,
+    ).assessment).toMatchObject({
+      technicalQuality: 0.9,
+      novelty: 0.8,
+    });
+    expect(provider.generateRequests.filter(({ schemaName }) =>
+      schemaName === "research_assessment"
+    )).toHaveLength(1);
+  });
+
   it("assigns research tiers from ranked shortlist roles, not input order", async () => {
     const context = budgetContext(new RecordingProvider(), "degraded");
     const shortlisted = await context.shortlist([

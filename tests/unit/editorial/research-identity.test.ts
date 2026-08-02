@@ -275,6 +275,33 @@ describe("consolidateResearchCandidates", () => {
     });
   });
 
+  it("represents every explicit non-commentary research item in papers", () => {
+    const officialWithoutPaperLink = normalized("official-lab", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "A new interpretability method from the lab",
+      originalUrl: "https://official.example.org/research/new-method",
+      externalId: "https://official.example.org/research/new-method",
+      externalIds: ["https://official.example.org/research/new-method"],
+      metadata: { discoveryFamily: "official-publication" },
+    });
+
+    const consolidated = consolidateResearchCandidates([
+      officialWithoutPaperLink,
+    ]);
+
+    expect(consolidated.papers).toEqual([
+      expect.objectContaining({
+        id: officialWithoutPaperLink.id,
+        kind: "blog",
+        metadata: expect.objectContaining({
+          discoveryFamily: "official-publication",
+        }),
+      }),
+    ]);
+    expect(consolidated.standaloneCommentary).toEqual([]);
+  });
+
   it("does not fall through conflicting arXiv identities to lower-priority matches", () => {
     const first = normalized("first", {
       externalId: "arXiv:2608.00011",

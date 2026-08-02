@@ -355,9 +355,7 @@ export function consolidateResearchCandidates(
   const input = candidates
     .map((candidate) => ItemSchema.parse(candidate))
     .sort((left, right) => stableItemKey(left).localeCompare(stableItemKey(right)));
-  const paperCandidates = input.filter(
-    (candidate) => candidate.kind === "paper" && !isCommentary(candidate),
-  );
+  const paperCandidates = input.filter((candidate) => !isCommentary(candidate));
   const commentaryCandidates = input.filter(isCommentary);
   const parent = paperCandidates.map((_, index) => index);
   const pairReasons = new Map<string, ResearchIdentityMergeReason>();
