@@ -424,6 +424,53 @@ describe("consolidateResearchCandidates", () => {
     expect(consolidated.merges).toHaveLength(0);
   });
 
+  it("rejects a transitive lower-priority bridge between conflicting arXiv identities", () => {
+    const first = normalized("first-bridge", {
+      externalId: "arXiv:2608.00101",
+      externalIds: [
+        "arXiv:2608.00101",
+        "DOI:10.1000/transitive-bridge",
+      ],
+      originalUrl: "https://first.example.org/transitive-bridge",
+    });
+    const middle = normalized("middle-bridge", {
+      externalId: "DOI:10.1000/transitive-bridge",
+      externalIds: [
+        "DOI:10.1000/transitive-bridge",
+        "OpenAlex:W-TRANSITIVE-BRIDGE",
+      ],
+      originalUrl: "https://middle.example.org/transitive-bridge",
+    });
+    const last = normalized("last-bridge", {
+      externalId: "arXiv:2608.00102",
+      externalIds: [
+        "arXiv:2608.00102",
+        "OpenAlex:W-TRANSITIVE-BRIDGE",
+      ],
+      originalUrl: "https://last.example.org/transitive-bridge",
+    });
+
+    const consolidated = consolidateResearchCandidates([
+      first,
+      middle,
+      last,
+    ]);
+
+    expect(consolidated.papers).toHaveLength(2);
+    expect(consolidated.papers.map(canonicalResearchIdentity).sort()).toEqual([
+      "arxiv:2608.00101",
+      "arxiv:2608.00102",
+    ]);
+    expect(consolidated.papers.every((paper) => {
+      const externalIds = paper.metadata.externalIds;
+      return !Array.isArray(externalIds) ||
+        !(
+          externalIds.includes("arXiv:2608.00101") &&
+          externalIds.includes("arXiv:2608.00102")
+        );
+    })).toBe(true);
+  });
+
   it("attaches title-and-author commentary and retains substantive unlinked posts", () => {
     const paper = normalized("arxiv", {
       externalId: "arXiv:2608.00002",

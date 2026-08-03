@@ -90,8 +90,13 @@ const ResearchAssessmentCacheMutationSchema = z.object({
   canonicalId: z.string().min(1),
   evidenceFingerprint: z.string().min(1),
   assessment: StrictResearchAssessmentSchema,
+  topicalFit: z.number().finite().min(0).max(1).optional(),
   createdAt: DateTimeSchema,
   expiresAt: DateTimeSchema,
+}).strict();
+const ResearchAssessmentCacheEnvelopeSchema = z.object({
+  assessment: StrictResearchAssessmentSchema,
+  topicalFit: z.number().finite().min(0).max(1),
 }).strict();
 const DISCOVERY_OBSERVATION_LOOKUP_CHUNK_SIZE = 50;
 const ModelUsageRecordSchema = z.object({
@@ -266,6 +271,24 @@ function parsedJson(text: string, context: string): unknown {
       cause: error,
     });
   }
+}
+
+function cachedResearchAssessmentValue(
+  text: string,
+): { assessment: ResearchAssessment; topicalFit: number | null } {
+  const value = parsedJson(text, "Invalid cached research assessment");
+  const envelope = ResearchAssessmentCacheEnvelopeSchema.safeParse(value);
+  if (envelope.success) {
+    return envelope.data;
+  }
+  return {
+    assessment: validated(
+      StrictResearchAssessmentSchema,
+      value,
+      "Invalid cached research assessment",
+    ),
+    topicalFit: null,
+  };
 }
 
 function stringArray(value: unknown): string[] {
@@ -755,11 +778,33 @@ export class D1BriefingRepository implements BriefingRepository {
     if (row === null) {
       return null;
     }
-    return validated(
-      StrictResearchAssessmentSchema,
-      parsedJson(row.assessment_json, "Invalid cached research assessment"),
-      "Invalid cached research assessment",
+    return cachedResearchAssessmentValue(row.assessment_json).assessment;
+  }
+
+  async getCachedResearchTopicalFit(
+    canonicalId: string,
+    evidenceFingerprint: string,
+    now: string,
+  ): Promise<number | null> {
+    const valid = validated(
+      ResearchAssessmentCacheLookupSchema,
+      { canonicalId, evidenceFingerprint, now },
+      "Invalid research assessment cache lookup",
     );
+    const row = await this.db.prepare(
+      `SELECT assessment_json
+       FROM research_assessment_cache
+       WHERE canonical_id = ?
+         AND evidence_fingerprint = ?
+         AND expires_at > ?`,
+    ).bind(
+      valid.canonicalId,
+      valid.evidenceFingerprint,
+      valid.now,
+    ).first<ResearchAssessmentCacheRow>();
+    return row === null
+      ? null
+      : cachedResearchAssessmentValue(row.assessment_json).topicalFit;
   }
 
   async putCachedResearchAssessment(
@@ -767,11 +812,8 @@ export class D1BriefingRepository implements BriefingRepository {
     evidenceFingerprint: string,
     assessment: ResearchAssessment,
     expiresAt: string,
+    topicalFit?: number,
   ): Promise<void> {
-    serializeJsonMutation(
-      assessment,
-      "Invalid research assessment cache mutation",
-    );
     const createdAt = new Date().toISOString();
     const valid = validated(
       ResearchAssessmentCacheMutationSchema,
@@ -779,9 +821,20 @@ export class D1BriefingRepository implements BriefingRepository {
         canonicalId,
         evidenceFingerprint,
         assessment,
+        ...(topicalFit === undefined ? {} : { topicalFit }),
         createdAt,
         expiresAt,
       },
+      "Invalid research assessment cache mutation",
+    );
+    const cachedValue = valid.topicalFit === undefined
+      ? valid.assessment
+      : {
+          assessment: valid.assessment,
+          topicalFit: valid.topicalFit,
+        };
+    const cachedJson = serializeJsonMutation(
+      cachedValue,
       "Invalid research assessment cache mutation",
     );
     await this.db.prepare(
@@ -796,7 +849,7 @@ export class D1BriefingRepository implements BriefingRepository {
     ).bind(
       valid.canonicalId,
       valid.evidenceFingerprint,
-      JSON.stringify(valid.assessment),
+      cachedJson,
       valid.createdAt,
       valid.expiresAt,
     ).run();

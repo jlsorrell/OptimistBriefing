@@ -294,6 +294,67 @@ describe("classifyDiscoveryWindow", () => {
     expect(researchFingerprints(first)).toEqual(researchFingerprints(second));
   });
 
+  it("keeps evidence fingerprints stable across commentary retrieval timestamps", () => {
+    const first = researchItem("commentary-timestamp");
+    first.metadata.attachedCommentary = [{
+      sourceId: "alignment-forum",
+      role: "blog",
+      title: "A careful interpretation",
+      url: "https://www.alignmentforum.org/posts/example/interpretation",
+      retrievedAt: "2026-08-01T08:00:00.000Z",
+      observedAt: "2026-08-01T08:01:00.000Z",
+      accessLevel: "full_text",
+      excerpt: "The commentary critiques the result's external validity.",
+      relatedPaperIds: ["arXiv:2608.00001"],
+    }];
+    const timestampOnly = structuredClone(first);
+    timestampOnly.metadata.attachedCommentary = [{
+      ...(timestampOnly.metadata.attachedCommentary as Array<
+        Record<string, unknown>
+      >)[0],
+      retrievedAt: "2026-08-02T11:00:00.000Z",
+      observedAt: "2026-08-02T11:01:00.000Z",
+      lastSeenAt: "2026-08-02T11:02:00.000Z",
+    }];
+
+    expect(researchFingerprints(timestampOnly)).toEqual(
+      researchFingerprints(first),
+    );
+  });
+
+  it("changes evidence fingerprints for commentary content and implementation evidence", () => {
+    const first = researchItem("commentary-evidence");
+    first.metadata.attachedCommentary = [{
+      sourceId: "alignment-forum",
+      role: "blog",
+      title: "A careful interpretation",
+      url: "https://www.alignmentforum.org/posts/example/interpretation",
+      retrievedAt: "2026-08-01T08:00:00.000Z",
+      accessLevel: "full_text",
+      excerpt: "The commentary critiques the result's external validity.",
+      relatedPaperIds: ["arXiv:2608.00001"],
+    }];
+    const changedContent = structuredClone(first);
+    changedContent.metadata.attachedCommentary = [{
+      ...(changedContent.metadata.attachedCommentary as Array<
+        Record<string, unknown>
+      >)[0],
+      excerpt: "The commentary now reports an independent replication.",
+    }];
+    const implementationLocated = structuredClone(first);
+    implementationLocated.metadata.attachedCommentary = [{
+      ...(implementationLocated.metadata.attachedCommentary as Array<
+        Record<string, unknown>
+      >)[0],
+      implementationAvailable: true,
+    }];
+
+    expect(researchFingerprints(changedContent).evidenceFingerprint)
+      .not.toBe(researchFingerprints(first).evidenceFingerprint);
+    expect(researchFingerprints(implementationLocated).evidenceFingerprint)
+      .not.toBe(researchFingerprints(first).evidenceFingerprint);
+  });
+
   it("invalidates the assessment-cache fingerprint when paper content changes", () => {
     const first = researchItem("content-cache");
     const revised = researchItem("content-cache", {

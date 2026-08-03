@@ -139,6 +139,46 @@ function researchPacket(commentaryClaim: string): SourcePacket {
   } as SourcePacket;
 }
 
+function mixedAuthorityPacket(
+  primaryEvidence: string,
+  commentaryEvidence: string,
+): SourcePacket {
+  const sharedEvidence = "The sources discuss a measured result.";
+  return {
+    itemKind: "paper",
+    sources: [
+      {
+        sourceId: "source-1",
+        sourceName: "arXiv",
+        evidenceKind: "primary-research",
+        role: "primary",
+        title: "A measured research result",
+        url: "https://arxiv.org/abs/2608.00001",
+        retrievedAt: "2026-08-02T09:00:00.000Z",
+        accessLevel: "abstract",
+        excerpts: [{
+          number: 1,
+          text: `${GROUNDED_TEXT} ${sharedEvidence} ${primaryEvidence}`,
+        }],
+      },
+      {
+        sourceId: "commentary-1",
+        sourceName: "Alignment Forum",
+        evidenceKind: "commentary",
+        role: "blog",
+        title: "A review of the measured result",
+        url: "https://www.alignmentforum.org/posts/measured-result",
+        retrievedAt: "2026-08-02T09:00:00.000Z",
+        accessLevel: "secondary",
+        excerpts: [{
+          number: 1,
+          text: `${sharedEvidence} ${commentaryEvidence}`,
+        }],
+      },
+    ],
+  } as SourcePacket;
+}
+
 function researchItemWithAuthority(
   metadata: Record<string, unknown>,
 ): Item {
@@ -229,6 +269,64 @@ describe("validateSummary", () => {
     );
 
     expect(result.errors).toContain(
+      "PRIMARY_RESEARCH_SOURCE_REQUIRED:0",
+    );
+  });
+
+  it("rejects mixed citations when only commentary supports an unattributed result claim", () => {
+    const claim = "The paper improves performance by ninety percent.";
+    const result = validateSummary(
+      summaryFixture({
+        accessLevel: "abstract",
+        claims: [{
+          text: claim,
+          sourceIds: ["source-1", "commentary-1"],
+          evidenceExcerpt: "The sources discuss a measured result.",
+        }],
+      }),
+      mixedAuthorityPacket("", claim),
+    );
+
+    expect(result.errors).toContain(
+      "PRIMARY_RESEARCH_SOURCE_REQUIRED:0",
+    );
+  });
+
+  it("accepts mixed citations when primary research supports the result claim", () => {
+    const claim = "The paper improves performance by ninety percent.";
+    const result = validateSummary(
+      summaryFixture({
+        accessLevel: "abstract",
+        claims: [{
+          text: claim,
+          sourceIds: ["source-1", "commentary-1"],
+          evidenceExcerpt: "The sources discuss a measured result.",
+        }],
+      }),
+      mixedAuthorityPacket(claim, ""),
+    );
+
+    expect(result.errors).not.toContain(
+      "PRIMARY_RESEARCH_SOURCE_REQUIRED:0",
+    );
+  });
+
+  it("accepts mixed citations when commentary support has exact attribution", () => {
+    const claim =
+      "Alignment Forum notes that the paper's assumptions are fragile.";
+    const result = validateSummary(
+      summaryFixture({
+        accessLevel: "abstract",
+        claims: [{
+          text: claim,
+          sourceIds: ["source-1", "commentary-1"],
+          evidenceExcerpt: "The sources discuss a measured result.",
+        }],
+      }),
+      mixedAuthorityPacket("", claim),
+    );
+
+    expect(result.errors).not.toContain(
       "PRIMARY_RESEARCH_SOURCE_REQUIRED:0",
     );
   });

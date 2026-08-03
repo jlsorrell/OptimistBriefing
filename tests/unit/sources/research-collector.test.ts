@@ -15,7 +15,10 @@ import {
   normalizeArxivIdentifier,
   normalizeDoi,
 } from "../../../src/sources/identifiers";
-import { OpenAlexAdapter } from "../../../src/sources/openalex";
+import {
+  OpenAlexAdapter,
+  OpenAlexDiscoveryAdapter,
+} from "../../../src/sources/openalex";
 import { PaperContentRetriever } from "../../../src/sources/paper-content";
 import {
   createPaperDiscoveryAdapters,
@@ -258,6 +261,43 @@ describe("ResearchCollector", () => {
     expect(result.candidates.map(({ sourceId }) => sourceId)).toEqual([
       "arxiv",
       "openalex",
+    ]);
+  });
+
+  it("does not same-source merge a DOI bridge with conflicting arXiv identities", async () => {
+    const first = {
+      ...rawPaper("openalex"),
+      originalUrl: "https://openalex.org/W-CONFLICT-A",
+      externalId: "arXiv:2607.00101",
+      externalIds: [
+        "arXiv:2607.00101",
+        "DOI:10.1000/same-source-bridge",
+      ],
+    };
+    const second = {
+      ...rawPaper("openalex"),
+      originalUrl: "https://openalex.org/W-CONFLICT-B",
+      externalId: "arXiv:2607.00102",
+      externalIds: [
+        "arXiv:2607.00102",
+        "DOI:10.1000/same-source-bridge",
+      ],
+    };
+    const collector = new ResearchCollector({
+      discoveryAdapters: [{
+        sourceId: "openalex",
+        collect: async () => [first, second],
+      }],
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates).toHaveLength(2);
+    expect(result.candidates.map(({ externalId }) => externalId).sort()).toEqual([
+      "arXiv:2607.00101",
+      "arXiv:2607.00102",
     ]);
   });
 
@@ -740,7 +780,7 @@ describe("bibliographic discovery", () => {
     expect(institutionUrls.every(
       (url) => url.searchParams.get("select") === "id,display_name",
     )).toBe(true);
-    expect(workUrls).toHaveLength(4);
+    expect(workUrls).toHaveLength(7);
     expect(workUrls.every(
       (url) => url.searchParams.get("per-page") === "100",
     )).toBe(true);
@@ -757,8 +797,102 @@ describe("bibliographic discovery", () => {
     );
     expect(institutionWorkUrl?.searchParams.has("search")).toBe(false);
     expect(workUrls.filter((url) => url.searchParams.has("search"))).toHaveLength(
-      3,
+      6,
     );
+    const updatedWorkUrls = workUrls.filter((url) =>
+      url.searchParams.get("filter")?.includes("updated_date:>")
+    );
+    expect(updatedWorkUrls).toHaveLength(3);
+    expect(updatedWorkUrls.every((url) =>
+      url.searchParams.get("sort") === "updated_date:desc"
+    )).toBe(true);
+  });
+
+  it("discovers older OpenAlex works updated inside the reconsideration window", async () => {
+    const updatedWork = {
+      id: "https://openalex.org/W260800777",
+      doi: "https://doi.org/10.1000/updated-example",
+      title: "Updated interpretability evidence for oversight",
+      publication_date: "2026-06-01",
+      updated_date: "2026-07-28T06:00:00.000Z",
+      cited_by_count: 7,
+      ids: {
+        openalex: "https://openalex.org/W260800777",
+        doi: "https://doi.org/10.1000/updated-example",
+        arxiv: "https://arxiv.org/abs/2606.00777v2",
+      },
+      authorships: [{
+        author: {
+          id: "https://openalex.org/A260800777",
+          display_name: "Ada Updated",
+        },
+        institutions: [],
+      }],
+      topics: [{ display_name: "AI interpretability", score: 0.95 }],
+      abstract_inverted_index: {
+        Updated: [0],
+        evidence: [1],
+        improves: [2],
+        oversight: [3],
+      },
+      primary_location: {
+        landing_page_url: "https://doi.org/10.1000/updated-example",
+        source: { display_name: "Updated Fixture Proceedings" },
+      },
+    };
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/institutions") {
+        return Response.json({ results: [] });
+      }
+      if (url.pathname === "/works") {
+        const filter = url.searchParams.get("filter") ?? "";
+        return Response.json({
+          results: filter.includes("updated_date:>") ? [updatedWork] : [],
+        });
+      }
+      throw new Error(`Unexpected OpenAlex URL: ${url}`);
+    });
+    const collector = new ResearchCollector({
+      discoveryAdapters: createPaperDiscoveryAdapters(
+        new SourceHttpClient({
+          fetch,
+          now: () => new Date("2026-07-29T08:30:00.000Z"),
+        }),
+        [openAlexSource],
+      ),
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect({
+      from: "2026-07-22T12:00:00.000Z",
+      to: "2026-07-29T12:00:00.000Z",
+    });
+
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]).toMatchObject({
+      externalId: "arXiv:2606.00777",
+      publishedAt: "2026-06-01T00:00:00.000Z",
+      metadata: expect.objectContaining({
+        updatedAt: "2026-07-28T06:00:00.000Z",
+        discoveryLaneIds: expect.arrayContaining([
+          "openalex:updated:alignment-interpretability",
+        ]),
+      }),
+    });
+    const updatedUrls = fetch.mock.calls
+      .map(([input]) => new URL(String(input)))
+      .filter((url) =>
+        url.pathname === "/works" &&
+        url.searchParams.get("filter")?.includes("updated_date:>")
+      );
+    expect(updatedUrls).toHaveLength(3);
+    expect(updatedUrls.every((url) =>
+      !url.searchParams.get("filter")?.includes("from_publication_date") &&
+      url.searchParams.get("sort") === "updated_date:desc" &&
+      url.searchParams.get("per-page") === "100"
+    )).toBe(true);
   });
 
   it("keeps arXiv papers when bibliographic discovery returns malformed data", async () => {
@@ -786,6 +920,80 @@ describe("bibliographic discovery", () => {
       kind: "parse",
     });
     expect(JSON.stringify(result)).not.toContain("unexpected");
+  });
+
+  it.each([
+    ["a huge sparse position", { HOSTILE_POSITION: [999_999] }],
+    [
+      "too many distinct words",
+      Object.fromEntries(
+        Array.from({ length: 2_001 }, (_, index) => [
+          `HOSTILE_WORD_${index}`,
+          [0],
+        ]),
+      ),
+    ],
+    [
+      "too many positions for one word",
+      { HOSTILE_REPETITION: Array.from({ length: 129 }, (_, index) => index) },
+    ],
+    [
+      "an oversized reconstructed output",
+      Object.fromEntries(
+        Array.from({ length: 22 }, (_, index) => [
+          `HOSTILE_OUTPUT_${index}_${"x".repeat(178)}`,
+          [index],
+        ]),
+      ),
+    ],
+  ])("fails open on an OpenAlex abstract index with %s", async (
+    _case,
+    abstractInvertedIndex,
+  ) => {
+    const hostileWork = {
+      id: "https://openalex.org/W260899999",
+      doi: null,
+      title: "Hostile abstract index",
+      publication_date: "2026-07-29",
+      updated_date: "2026-07-29T08:00:00.000Z",
+      cited_by_count: 0,
+      ids: { openalex: "https://openalex.org/W260899999" },
+      authorships: [],
+      topics: [],
+      abstract_inverted_index: abstractInvertedIndex,
+      primary_location: null,
+    };
+    const fetch = vi.fn(async () => Response.json({ results: [hostileWork] }));
+    const http = new SourceHttpClient({
+      fetch,
+      now: () => new Date("2026-07-29T08:30:00.000Z"),
+    });
+    const collector = new ResearchCollector({
+      discoveryAdapters: [
+        {
+          sourceId: "arxiv",
+          collect: async () => [rawPaper()],
+        },
+        new OpenAlexDiscoveryAdapter(http, openAlexSource, {
+          laneId: "openalex:hostile-index",
+          mode: "text",
+          query: "interpretability",
+        }),
+      ],
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates.map(({ externalId }) => externalId)).toEqual([
+      "arXiv:2607.00001",
+    ]);
+    expect(result.failures).toContainEqual({
+      sourceId: "openalex",
+      kind: "parse",
+    });
+    expect(JSON.stringify(result)).not.toContain("HOSTILE_");
   });
 });
 
@@ -992,6 +1200,7 @@ describe("SourceHttpClient", () => {
       sourceId: "arxiv",
       status: null,
       retryable: true,
+      failureKind: "timeout",
     });
     await vi.advanceTimersByTimeAsync(DEFAULT_REQUEST_TIMEOUT_MS);
 

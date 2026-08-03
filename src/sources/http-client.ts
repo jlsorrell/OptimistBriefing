@@ -55,7 +55,7 @@ export type SourceHttpResponse = {
   finalUrl: string;
 };
 
-export type SourceFetchFailureKind = "policy" | "transport";
+export type SourceFetchFailureKind = "policy" | "transport" | "timeout";
 
 export class SourceFetchError extends Error {
   readonly sourceId: string;
@@ -380,8 +380,12 @@ export class SourceHttpClient {
           sourceId: source.id,
           status: null,
           retryable: true,
-          failureKind: "transport",
-          reason: "network error or timeout",
+          failureKind: abortController.signal.aborted
+            ? "timeout"
+            : "transport",
+          reason: abortController.signal.aborted
+            ? "request timed out"
+            : "network error",
         });
       }
 
@@ -440,8 +444,12 @@ export class SourceHttpClient {
           sourceId: source.id,
           status: response.status,
           retryable: true,
-          failureKind: "transport",
-          reason: "network error or timeout while reading response",
+          failureKind: abortController.signal.aborted
+            ? "timeout"
+            : "transport",
+          reason: abortController.signal.aborted
+            ? "request timed out while reading response"
+            : "network error while reading response",
         });
       } finally {
         clearTimeout(timeout);

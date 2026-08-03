@@ -14,6 +14,7 @@ import type {
 } from "../../../src/contracts/editorial";
 import {
   PIPELINE_STEPS,
+  MAX_D1_CHECKPOINT_EVENT_BYTES,
   runEditorialPipeline,
   type PipelineContext,
   type PipelineRun,
@@ -36,13 +37,17 @@ import {
 } from "../../../src/db/repository";
 import { D1BriefingRepository } from "../../../src/db/d1-repository";
 import { FakeModelProvider } from "../../../src/models/fake-provider";
+import { OpenAIModelProvider } from "../../../src/models/openai-provider";
 import { clusterNews } from "../../../src/editorial/cluster";
+import { canonicalResearchIdentity } from "../../../src/editorial/research-identity";
+import { researchFingerprints } from "../../../src/editorial/research-triage";
 import { composeEdition } from "../../../src/workflow/compose-edition";
 import type {
   GenerateObjectRequest,
   ModelProvider,
 } from "../../../src/models/provider";
 import type {
+  DiscoveryObservation,
   RawNewsCandidate,
   RawResearchCandidate,
 } from "../../../src/sources/types";
@@ -1222,6 +1227,7 @@ describe("manual editorial run", () => {
 
   it("updates real-lane diagnostics through assessment and applies research context scoring", async () => {
     const diagnosticWrites: Array<readonly unknown[]> = [];
+    const observationWrites: Array<readonly DiscoveryObservation[]> = [];
     const initialDiagnostics = [
       {
         laneId: "arxiv:one",
@@ -1256,7 +1262,11 @@ describe("manual editorial run", () => {
     ];
     const repository = {
       getDiscoveryObservations: async () => [],
-      upsertDiscoveryObservations: async () => undefined,
+      upsertDiscoveryObservations: async (
+        observations: readonly DiscoveryObservation[],
+      ) => {
+        observationWrites.push(structuredClone(observations));
+      },
       getCachedResearchAssessment: async () => null,
       putCachedResearchAssessment: async () => undefined,
       recordDiscoveryDiagnostics: async (
@@ -1282,6 +1292,16 @@ describe("manual editorial run", () => {
         implementationAvailable: true,
       },
     };
+    const secondCandidate = {
+      ...rawResearchCandidate(
+        "2607.54321",
+        "A second interpretability paper for oversight",
+      ),
+      metadata: {
+        discoveryFamily: "arxiv",
+        discoveryLaneIds: ["arxiv:one"],
+      },
+    };
     const commentary = {
       ...rawResearchCandidate(),
       kind: "blog" as const,
@@ -1294,7 +1314,7 @@ describe("manual editorial run", () => {
       accessLevel: "metadata" as const,
       abstract: null,
       content: null,
-      relatedPaperIds: [candidate.externalId],
+      relatedPaperIds: [candidate.externalId, secondCandidate.externalId],
       preferredInstitutionMatches: [],
       citationCount: null,
       influentialCitationCount: null,
@@ -1316,13 +1336,14 @@ describe("manual editorial run", () => {
             [1, 0],
             [1, 0],
             [1, 0],
+            [1, 0],
           ]],
         }),
         assessment: new FakeModelProvider({
-          generatedObjects: [assessment],
+          generatedObjects: [assessment, assessment],
         }),
       },
-      collectCandidates: async () => [candidate, commentary],
+      collectCandidates: async () => [candidate, secondCandidate, commentary],
       loadDiscoveryDiagnostics: () => initialDiagnostics,
       researchRepository: repository,
     });
@@ -1337,21 +1358,21 @@ describe("manual editorial run", () => {
     expect(diagnosticWrites).toEqual([
       initialDiagnostics,
       [
-        { ...initialDiagnostics[0], deduplicated: 1 },
+        { ...initialDiagnostics[0], deduplicated: 2 },
         initialDiagnostics[1],
         { ...initialDiagnostics[2], deduplicated: 1 },
       ],
       [
-        { ...initialDiagnostics[0], deduplicated: 1, triaged: 1 },
+        { ...initialDiagnostics[0], deduplicated: 2, triaged: 2 },
         initialDiagnostics[1],
         { ...initialDiagnostics[2], deduplicated: 1, triaged: 1 },
       ],
       [
         {
           ...initialDiagnostics[0],
-          deduplicated: 1,
-          triaged: 1,
-          assessed: 1,
+          deduplicated: 2,
+          triaged: 2,
+          assessed: 2,
         },
         initialDiagnostics[1],
         {
@@ -1362,6 +1383,14 @@ describe("manual editorial run", () => {
         },
       ],
     ]);
+    expect(observationWrites.flat().filter(({ sourceId }) =>
+      sourceId === "papers-with-code-co"
+    ).every(({ discoveryFamily }) => discoveryFamily === "commentary")).toBe(
+      true,
+    );
+    expect(observationWrites.flat().filter(({ sourceId }) =>
+      sourceId === "arxiv"
+    ).every(({ discoveryFamily }) => discoveryFamily === "arxiv")).toBe(true);
     expect(
       (scored[0]?.metadata.workflow as {
         researchScore?: { selectionReasons: string[] };
@@ -1700,6 +1729,135 @@ describe("manual editorial run", () => {
     expect(JSON.stringify(clustered)).not.toContain('"embedding"');
     expect(JSON.stringify(shortlisted)).not.toContain('"embedding"');
   });
+
+  it("keeps every 500-item worst-case D1 checkpoint below the encoded row limit", async () => {
+    const families = [
+      "arxiv",
+      "bibliographic",
+      "official-publication",
+      "commentary",
+    ] as const;
+    const candidates = Array.from({ length: 500 }, (_, index) => {
+      const identifier = `2608.${String(index).padStart(5, "0")}`;
+      const evidenceMarker = `SELECTED_EVIDENCE_${String(index).padStart(3, "0")}`;
+      return {
+        ...rawResearchCandidate(
+          identifier,
+          `Mechanistic interpretability candidate ${index}`,
+        ),
+        sourceId: `research-source-${index}`,
+        sourceName: `Research Source ${index}`,
+        originalUrl: `https://publisher-${index}.example/papers/${identifier}`,
+        abstract: `${evidenceMarker} ${"é".repeat(3_000)}`,
+        metadata: {
+          discoveryFamily: families[index % families.length],
+          discoveryLaneIds: [`lane-${index}`],
+        },
+      };
+    });
+    const assessment = {
+      technicalQuality: 0.9,
+      novelty: 0.8,
+      strengths: ["The supplied evidence describes a concrete method."],
+      limitations: ["Only the supplied evidence was assessed."],
+      rationale: "The bounded evidence supports the assessment.",
+      accessLevel: "abstract" as const,
+    };
+    const summaryProvider: ModelProvider = {
+      embed: async (texts) => texts.map(() => [1, 0]),
+      generateObject: async (input) => {
+        throw new Error(`Unexpected summary generation: ${input.schemaName}`);
+      },
+    };
+    const assessmentProvider: ModelProvider = {
+      embed: async () => {
+        throw new Error("Unexpected assessment embedding.");
+      },
+      generateObject: async (input) => {
+        expect(input.schemaName).toBe("research_assessment");
+        expect(input.sourcePacket).toContain("SELECTED_EVIDENCE_");
+        return assessment;
+      },
+    };
+    const store = createD1PipelineStore(env.DB);
+    const context = createProductionPipelineContext({
+      editionDate: "2033-02-05",
+      runId: "run-worst-case-checkpoint-bytes",
+      store,
+      now: () => now,
+      providers: {
+        summary: summaryProvider,
+        assessment: assessmentProvider,
+      },
+      collectCandidates: async () => candidates,
+    });
+    context.synthesize = async () => [];
+    context.validate = async () => [];
+
+    await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+      status: "failed",
+    });
+
+    const rows = await env.DB.prepare(
+      `SELECT event_json
+       FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'`,
+    ).bind(context.runId).all<{ event_json: string }>();
+    const encodedLimit = 2 * 1_024 * 1_024;
+    const checkpointSteps = new Set<string>();
+    let postChunkMaximumBytes = 0;
+    for (const { event_json: eventJson } of rows.results) {
+      const parsed = JSON.parse(eventJson) as { step?: string };
+      if (parsed.step !== undefined) checkpointSteps.add(parsed.step);
+      const rowBytes = new TextEncoder().encode(eventJson).byteLength;
+      postChunkMaximumBytes = Math.max(postChunkMaximumBytes, rowBytes);
+      expect(rowBytes).toBeLessThan(
+        encodedLimit,
+      );
+    }
+    expect(checkpointSteps).toEqual(new Set(PIPELINE_STEPS));
+
+    let preChunkMaximumBytes = 0;
+    for (const step of PIPELINE_STEPS) {
+      const artifact = await store.readArtifact(context.runId, step);
+      preChunkMaximumBytes = Math.max(
+        preChunkMaximumBytes,
+        new TextEncoder().encode(JSON.stringify({ step, artifact })).byteLength,
+      );
+    }
+    expect(preChunkMaximumBytes).toBeGreaterThan(encodedLimit);
+    expect(postChunkMaximumBytes).toBeLessThanOrEqual(
+      MAX_D1_CHECKPOINT_EVENT_BYTES,
+    );
+
+    const collected = await store.readArtifact(context.runId, "collect");
+    const prefilted = await store.readArtifact(context.runId, "prefilter");
+    expect(collected?.output).toHaveLength(500);
+    expect(prefilted?.output).toHaveLength(24);
+    expect((prefilted?.output as Item[]).every((item) =>
+      item.normalizedText.includes("SELECTED_EVIDENCE_")
+    )).toBe(true);
+    expect((prefilted?.output as Item[]).every((item) => {
+      const rawResearch = (item.metadata.workflow as {
+        rawResearch?: { abstract?: unknown; content?: unknown };
+      }).rawResearch;
+      return rawResearch?.abstract === null && rawResearch.content === null;
+    })).toBe(true);
+    for (const step of [
+      "enrich",
+      "prefilter",
+      "assess",
+      "score",
+      "cluster",
+      "shortlist",
+    ] as const) {
+      const artifact = await store.readArtifact(context.runId, step);
+      const research = (artifact?.output as Item[]).filter((item) =>
+        item.kind === "paper" || item.kind === "blog"
+      );
+      expect(JSON.stringify(research)).not.toContain('"embedding"');
+    }
+  }, 30_000);
 
   it("rejects a persisted research embedding in the enrich checkpoint", async () => {
     const context = createProductionPipelineContext({
@@ -2224,7 +2382,8 @@ describe("manual editorial run", () => {
     const hardEnriched = await hard.enrich(hardNormalized);
     const hardPrefiltered = await hard.prefilter(hardEnriched);
     const hardAssessed = await hard.assess(hardPrefiltered);
-    expect(hardPrefiltered).toHaveLength(4);
+    expect(hardEnriched).toHaveLength(0);
+    expect(hardPrefiltered).toHaveLength(0);
     expect(hardAssessed).toHaveLength(0);
     expect(hardAssessment.generateRequests).toHaveLength(0);
 
@@ -2265,6 +2424,89 @@ describe("manual editorial run", () => {
     ]);
     expect(summary.generateRequests.map(({ maxOutputTokens }) => maxOutputTokens))
       .toEqual([900, 900, 900, 120]);
+  });
+
+  it("reuses cached hard-stop research with a denied real model provider and zero model calls", async () => {
+    const candidate = rawResearchCandidate(
+      "2607.29999",
+      "Cached interpretability evidence for oversight",
+      50,
+    );
+    const assessment = {
+      technicalQuality: 0.9,
+      novelty: 0.8,
+      strengths: ["The abstract describes a concrete method."],
+      limitations: ["Only abstract evidence was supplied."],
+      rationale: "The available abstract supports a strong assessment.",
+      accessLevel: "abstract" as const,
+    };
+    const repository = new D1BriefingRepository(env.DB);
+    const seed = createProductionPipelineContext({
+      editionDate: "2033-03-04",
+      runId: "hard-budget-cache-seed",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [candidate],
+    });
+    const [normalized] = await seed.normalize(await seed.collect());
+    expect(normalized).toBeDefined();
+    await repository.putCachedResearchAssessment(
+      canonicalResearchIdentity(normalized!),
+      researchFingerprints(normalized!).evidenceFingerprint,
+      assessment,
+      "2034-01-01T00:00:00.000Z",
+      0.95,
+    );
+
+    const authorize = vi.fn(async () => null);
+    const transport = vi.fn(async () => {
+      throw new Error("Model transport must not run at hard stop.");
+    });
+    const provider = new OpenAIModelProvider({
+      apiKey: "test-key",
+      generationModel: "test-generation",
+      embeddingModel: "test-embedding",
+      authorize,
+      fetch: transport as typeof fetch,
+    });
+    const embed = vi.spyOn(provider, "embed");
+    const generateObject = vi.spyOn(provider, "generateObject");
+    const hard = createProductionPipelineContext({
+      editionDate: "2033-03-04",
+      runId: "hard-budget-cached",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: { summary: provider, assessment: provider },
+      collectCandidates: async () => [candidate],
+      researchRepository: repository,
+      budgetPolicy: {
+        state: "hard_stop",
+        radarSummaryTokens: 0,
+        featuredSummaryTokens: 900,
+      },
+    });
+
+    const hardNormalized = await hard.normalize(await hard.collect());
+    const hardEnriched = await hard.enrich(hardNormalized);
+    const hardPrefiltered = await hard.prefilter(hardEnriched);
+    const hardAssessed = await hard.assess(hardPrefiltered);
+
+    expect(hardEnriched).toHaveLength(1);
+    expect((hardEnriched[0]!.metadata.workflow as { topicalFit?: number })
+      .topicalFit).toBe(0.95);
+    expect(hardAssessed).toHaveLength(1);
+    expect((hardAssessed[0]!.metadata.workflow as {
+      assessment?: unknown;
+    }).assessment).toEqual(assessment);
+    expect(embed).not.toHaveBeenCalled();
+    expect(generateObject).not.toHaveBeenCalled();
+    expect(authorize).not.toHaveBeenCalled();
+    expect(transport).not.toHaveBeenCalled();
+    expect(provider.usage).toEqual([]);
   });
 
   it("keeps higher-ranked technology and AI policy in the authoritative morning brief and excludes research radar", async () => {
@@ -2640,6 +2882,181 @@ describe("manual editorial run", () => {
       expect(JSON.stringify(edition?.metadata)).not.toContain(
         "secret failed-feed URL",
       );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("collects the enabled PapersWithCode catalog source through the production context", async () => {
+    await env.DB.prepare(
+      `UPDATE sources
+       SET enabled = CASE WHEN id = 'papers-with-code-co' THEN 1 ELSE 0 END`,
+    ).run();
+    const catalogSource = await new D1BriefingRepository(env.DB)
+      .listSources()
+      .then((sources) => sources.find(({ id }) => id === "papers-with-code-co"));
+    expect(catalogSource).toMatchObject({
+      id: "papers-with-code-co",
+      role: "analysis",
+      discoveryMechanism: "page",
+    });
+
+    const publishedDate = new Date(Date.now() - 24 * 60 * 60 * 1_000)
+      .toISOString()
+      .slice(0, 10);
+    const sourceFetch = vi.fn(async (input: string | URL | Request) => {
+      expect(String(input)).toBe(
+        "https://paperswithcode.co/?order_by=date_published",
+      );
+      return new Response(
+        `<!doctype html><html><body><section><h2>Relevant papers</h2>
+          <article>
+            <a href="/paper/2608.01234">Production PapersWithCode result</a>
+            <time datetime="${publishedDate}">${publishedDate}</time>
+            <a href="https://github.com/example/production-result">Code</a>
+          </article>
+        </section></body></html>`,
+        { headers: { "content-type": "text/html" } },
+      );
+    });
+    vi.stubGlobal("fetch", sourceFetch);
+    try {
+      const runId = "run-production-papers-with-code";
+      const editionDate = "2033-02-07";
+      const createdAt = new Date().toISOString();
+      const store = createD1PipelineStore(env.DB);
+      await store.createRun({
+        id: runId,
+        editionDate,
+        status: "running",
+        currentStep: "collect",
+        retryable: false,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt,
+        updatedAt: createdAt,
+      });
+      const context = createD1ProductionPipelineContext(
+        store,
+        editionDate,
+        runId,
+        {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+      );
+
+      const collected = await context.collect();
+
+      expect(sourceFetch).toHaveBeenCalledOnce();
+      expect(collected).toEqual([
+        expect.objectContaining({
+          kind: "publication",
+          sourceId: "papers-with-code-co",
+          externalId: "arXiv:2608.01234",
+          discoveryFamily: "commentary",
+          metadata: expect.objectContaining({
+            implementationAvailable: true,
+            discoveryLaneIds: ["papers-with-code-co:page"],
+          }),
+        }),
+      ]);
+      await expect(store.repository.getWorkflowRunDetail(runId)).resolves
+        .toMatchObject({
+          discoveryDiagnostics: [{
+            laneId: "papers-with-code-co:page",
+            sourceId: "papers-with-code-co",
+            discoveryFamily: "commentary",
+            discovered: 1,
+            outcome: "success",
+          }],
+        });
+      expect((await store.repository.listSources()).find(
+        ({ id }) => id === "papers-with-code-co",
+      )).toMatchObject({
+        healthStatus: "healthy",
+        lastSuccessAt: expect.any(String),
+      });
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uses a 36-hour production window for news and seven days for research publications", async () => {
+    const enabledSources = ["alignment-forum", "reuters"];
+    await env.DB.prepare(
+      `UPDATE sources
+       SET enabled = CASE
+         WHEN id IN (${enabledSources.map(() => "?").join(", ")}) THEN 1
+         ELSE 0
+       END`,
+    ).bind(...enabledSources).run();
+    const publishedAt = new Date(Date.now() - 4 * 24 * 60 * 60 * 1_000)
+      .toUTCString();
+    const feed = (title: string, link: string, guid: string) =>
+      `<?xml version="1.0"?><rss><channel><item>
+        <title>${title}</title><link>${link}</link><guid>${guid}</guid>
+        <pubDate>${publishedAt}</pubDate>
+        <description>Linked evidence at https://arxiv.org/abs/2608.04567.</description>
+      </item></channel></rss>`;
+    const sourceFetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://www.reutersagency.com/feed/") {
+        return new Response(feed(
+          "Unchanged four-day-old ordinary news",
+          "https://www.reuters.com/world/old-news",
+          "old-news",
+        ), { headers: { "content-type": "application/rss+xml" } });
+      }
+      if (
+        url ===
+          "https://www.alignmentforum.org/feed.xml?view=frontpage"
+      ) {
+        return new Response(feed(
+          "Four-day-old research commentary",
+          "https://www.alignmentforum.org/posts/example/commentary",
+          "research-commentary",
+        ), { headers: { "content-type": "application/rss+xml" } });
+      }
+      throw new Error(`Unexpected production-context URL: ${url}`);
+    });
+    vi.stubGlobal("fetch", sourceFetch);
+    try {
+      const runId = "run-production-window-split";
+      const editionDate = "2033-02-06";
+      const createdAt = new Date().toISOString();
+      const store = createD1PipelineStore(env.DB);
+      await store.createRun({
+        id: runId,
+        editionDate,
+        status: "running",
+        currentStep: "collect",
+        retryable: false,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt,
+        updatedAt: createdAt,
+      });
+      const context = createD1ProductionPipelineContext(
+        store,
+        editionDate,
+        runId,
+        {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+      );
+
+      const collected = await context.collect();
+
+      expect(sourceFetch).toHaveBeenCalledTimes(2);
+      expect(collected.flatMap((candidate) =>
+        "sourceId" in candidate ? [candidate.sourceId] : []
+      )).toEqual(["alignment-forum"]);
+      expect(collected[0]).toMatchObject({
+        kind: "publication",
+        relatedPaperIds: ["arXiv:2608.04567"],
+      });
     } finally {
       vi.unstubAllGlobals();
     }

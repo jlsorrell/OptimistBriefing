@@ -26,6 +26,11 @@ import {
 
 const PAPER_LANE_LIMIT = 100;
 const DISCOVERY_DIAGNOSTIC_LIMIT = 64;
+const RECOGNIZED_PROVIDER_NAMES = new Set([
+  "openalex",
+  "papers-with-code",
+  "semanticscholar",
+]);
 
 const INSTITUTION_ALIASES = new Map<string, string>([
   ["stanford", "Stanford"],
@@ -128,6 +133,64 @@ function paperIdentities(item: RawItem): string[] {
   );
 }
 
+type RawDurableIdentities = {
+  arxiv: ReadonlySet<string>;
+  doi: ReadonlySet<string>;
+  provider: ReadonlySet<string>;
+};
+
+function rawProviderIdentity(value: string): string | null {
+  const separator = value.indexOf(":");
+  if (separator <= 0 || separator === value.length - 1) return null;
+  const provider = value.slice(0, separator).toLocaleLowerCase("en-US");
+  if (!RECOGNIZED_PROVIDER_NAMES.has(provider)) return null;
+  const identifier = value.slice(separator + 1).trim();
+  return identifier.length === 0 ? null : `${provider}:${identifier}`;
+}
+
+function rawDurableIdentities(item: RawItem): RawDurableIdentities {
+  const arxiv = new Set<string>();
+  const doi = new Set<string>();
+  const provider = new Set<string>();
+  for (const value of [item.externalId, ...item.externalIds]) {
+    const normalizedArxiv = normalizeArxivIdentifier(value);
+    if (normalizedArxiv !== null) {
+      arxiv.add(normalizedArxiv);
+      continue;
+    }
+    const normalizedDoi = normalizeDoi(value);
+    if (normalizedDoi !== null) {
+      doi.add(`DOI:${normalizedDoi}`);
+      continue;
+    }
+    const normalizedProvider = rawProviderIdentity(value);
+    if (normalizedProvider !== null) provider.add(normalizedProvider);
+  }
+  return { arxiv, doi, provider };
+}
+
+function identitySetsIntersect(
+  left: ReadonlySet<string>,
+  right: ReadonlySet<string>,
+): boolean {
+  for (const value of left) {
+    if (right.has(value)) return true;
+  }
+  return false;
+}
+
+function samePaperIdentity(left: RawItem, right: RawItem): boolean {
+  const leftIds = rawDurableIdentities(left);
+  const rightIds = rawDurableIdentities(right);
+  if (identitySetsIntersect(leftIds.arxiv, rightIds.arxiv)) return true;
+  if (leftIds.arxiv.size > 0 && rightIds.arxiv.size > 0) return false;
+  if (identitySetsIntersect(leftIds.doi, rightIds.doi)) return true;
+  if (leftIds.doi.size > 0 && rightIds.doi.size > 0) return false;
+  if (identitySetsIntersect(leftIds.provider, rightIds.provider)) return true;
+  if (leftIds.provider.size > 0 && rightIds.provider.size > 0) return false;
+  return left.externalId === right.externalId;
+}
+
 function mergeRawItems(primary: RawItem, secondary: RawItem): RawItem {
   const citationCounts = [
     metadataCount(primary.metadata, "citationCount"),
@@ -178,11 +241,10 @@ function mergeRawItems(primary: RawItem, secondary: RawItem): RawItem {
 function mergePaperIdentities(items: readonly RawItem[]): RawItem[] {
   const merged: RawItem[] = [];
   for (const item of items) {
-    const identities = new Set(paperIdentities(item));
     const matches = merged.flatMap((candidate, index) =>
       candidate.kind === "paper" &&
       candidate.sourceId === item.sourceId &&
-      paperIdentities(candidate).some((identity) => identities.has(identity))
+      samePaperIdentity(candidate, item)
         ? [index]
         : [],
     );
@@ -193,9 +255,11 @@ function mergePaperIdentities(items: readonly RawItem[]): RawItem[] {
     const primaryIndex = matches[0] ?? 0;
     let representative = mergeRawItems(merged[primaryIndex] as RawItem, item);
     for (const index of matches.slice(1).reverse()) {
+      const candidate = merged[index] as RawItem;
+      if (!samePaperIdentity(representative, candidate)) continue;
       representative = mergeRawItems(
         representative,
-        merged[index] as RawItem,
+        candidate,
       );
       merged.splice(index, 1);
     }

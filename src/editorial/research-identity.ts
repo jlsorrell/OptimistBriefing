@@ -122,6 +122,33 @@ function intersects(
   return false;
 }
 
+function durableIdentityConflict(
+  left: DurableIdentities,
+  right: DurableIdentities,
+): boolean {
+  if (left.arxiv.size > 0 && right.arxiv.size > 0) {
+    return !intersects(left.arxiv, right.arxiv);
+  }
+  if (left.doi.size > 0 && right.doi.size > 0) {
+    return !intersects(left.doi, right.doi);
+  }
+  if (left.provider.size > 0 && right.provider.size > 0) {
+    return !intersects(left.provider, right.provider);
+  }
+  return false;
+}
+
+function mergeDurableIdentities(
+  left: DurableIdentities,
+  right: DurableIdentities,
+): DurableIdentities {
+  return {
+    arxiv: new Set([...left.arxiv, ...right.arxiv]),
+    doi: new Set([...left.doi, ...right.doi]),
+    provider: new Set([...left.provider, ...right.provider]),
+  };
+}
+
 function normalizedAuthors(item: Item): ReadonlySet<string> {
   const stored = stringArray(item.metadata.normalizedAuthors);
   const values = stored.length > 0
@@ -313,6 +340,10 @@ function attachCommentary(paper: Item, commentary: Item): Item {
     ...stringArray(paper.metadata.discoveryLaneIds),
     ...stringArray(commentary.metadata.discoveryLaneIds),
   ])].sort((left, right) => left.localeCompare(right)).slice(0, 64);
+  const discoveryLineage = [...new Set([
+    ...stringArray(paper.metadata.discoveryLineage),
+    ...stringArray(commentary.metadata.discoveryLineage),
+  ])].sort((left, right) => left.localeCompare(right)).slice(0, 1_024);
   const commentaryMetadata = new Map<string, AttachedResearchCommentary>();
   for (const entry of [
     ...existingAttachedCommentary(paper.metadata.attachedCommentary),
@@ -335,6 +366,7 @@ function attachCommentary(paper: Item, commentary: Item): Item {
     metadata: {
       ...paper.metadata,
       discoveryLaneIds,
+      discoveryLineage,
       attachedCommentary: [...commentaryMetadata.values()].sort((left, right) =>
         attachedCommentaryKey(left).localeCompare(attachedCommentaryKey(right)),
       ),
@@ -379,6 +411,7 @@ export function consolidateResearchCandidates(
   const paperCandidates = input.filter((candidate) => !isCommentary(candidate));
   const commentaryCandidates = input.filter(isCommentary);
   const parent = paperCandidates.map((_, index) => index);
+  const componentIdentities = paperCandidates.map(itemDurableIdentities);
   const pairReasons = new Map<string, ResearchIdentityMergeReason>();
   for (let left = 0; left < paperCandidates.length; left += 1) {
     for (let right = left + 1; right < paperCandidates.length; right += 1) {
@@ -387,7 +420,23 @@ export function consolidateResearchCandidates(
       if (leftItem === undefined || rightItem === undefined) continue;
       const reason = researchMatchReason(leftItem, rightItem);
       if (reason === null) continue;
-      union(parent, left, right);
+      const leftRoot = find(parent, left);
+      const rightRoot = find(parent, right);
+      if (leftRoot !== rightRoot) {
+        const leftIdentities = componentIdentities[leftRoot];
+        const rightIdentities = componentIdentities[rightRoot];
+        if (
+          leftIdentities === undefined ||
+          rightIdentities === undefined ||
+          durableIdentityConflict(leftIdentities, rightIdentities)
+        ) continue;
+        const mergedIdentities = mergeDurableIdentities(
+          leftIdentities,
+          rightIdentities,
+        );
+        union(parent, leftRoot, rightRoot);
+        componentIdentities[find(parent, leftRoot)] = mergedIdentities;
+      }
       pairReasons.set(`${left}:${right}`, reason);
     }
   }

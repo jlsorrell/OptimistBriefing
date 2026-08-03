@@ -4,6 +4,7 @@ import { SourceRecordSchema, type SourceRecord } from "../db/repository";
 import { settleCollectionBatch } from "./collection-settlement";
 import { SourceHttpClient } from "./http-client";
 import { type OutboundUrlPolicy } from "./outbound-url";
+import { PapersWithCodeAdapter } from "./papers-with-code";
 import { PublicationPageAdapter } from "./publication-page";
 import { mapRssCollectionBatch, RssAdapter } from "./rss";
 import {
@@ -59,7 +60,9 @@ type PublicationSourceAdapter = {
 };
 
 function publicationFamily(source: SourceRecord): DiscoveryFamily {
-  return source.id === "alignment-forum" || source.id === "lesswrong-curated"
+  return source.id === "alignment-forum" ||
+      source.id === "lesswrong-curated" ||
+      source.id === "papers-with-code-co"
     ? "commentary"
     : "official-publication";
 }
@@ -208,11 +211,22 @@ export function createPublicationCollectorFromCatalog(options: {
   const pageAdapters: PublicationSourceAdapter[] = [];
   const sourceOrder: string[] = [];
   for (const input of options.sources) {
-    if (input.enabled === false || input.role !== "blog" || !input.sectionEligibility.some((section) => ELIGIBLE_SECTIONS.has(section))) continue;
+    if (
+      input.enabled === false ||
+      !input.sectionEligibility.some((section) =>
+        ELIGIBLE_SECTIONS.has(section)
+      )
+    ) continue;
+    const papersWithCode = input.id === "papers-with-code-co";
+    if (!papersWithCode && input.role !== "blog") continue;
     sourceOrder.push(input.id);
     try {
       const source = SourceRecordSchema.parse(input);
       const collectionSource = ResearchSourceRecordSchema.parse(source);
+      if (papersWithCode) {
+        pageAdapters.push(new PapersWithCodeAdapter(options.http, collectionSource));
+        continue;
+      }
       const urlPolicy = CatalogPolicySchema.parse(source.restrictions.urlPolicy) as OutboundUrlPolicy;
       if (source.discoveryMechanism === "rss") {
         const feedUrl = z.string().min(1).parse(source.restrictions.feedUrl);

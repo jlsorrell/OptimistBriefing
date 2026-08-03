@@ -353,6 +353,8 @@ const ArtifactAttemptsSchema = z.number().int().positive();
 const ArtifactDurationSchema = z.number().finite().nonnegative();
 const ArtifactItemCountSchema = z.number().int().nonnegative();
 const ArtifactCostSchema = z.number().finite().nonnegative();
+export const MAX_D1_CHECKPOINT_EVENT_BYTES = 1_500_000;
+const MAX_CHECKPOINT_CHUNKS = 1_000;
 const ARTIFACT_KEYS = new Set([
   "output",
   "attempts",
@@ -382,6 +384,130 @@ function parseCheckpointArtifact(
     durationMs: ArtifactDurationSchema.parse(record.durationMs),
     itemCount: ArtifactItemCountSchema.parse(record.itemCount),
     estimatedCostUsd: ArtifactCostSchema.parse(record.estimatedCostUsd),
+  };
+}
+
+function encodedBytes(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function checkpointEventJson(
+  step: (typeof PIPELINE_STEPS)[number],
+  checkpointId: string,
+  chunkIndex: number,
+  chunkCount: number,
+  artifact: CheckpointArtifact<unknown>,
+  output: unknown,
+): string {
+  return JSON.stringify({
+    step,
+    checkpointId,
+    chunkIndex,
+    chunkCount,
+    artifact: { ...artifact, output },
+  });
+}
+
+function serializedCheckpointEvents(
+  step: (typeof PIPELINE_STEPS)[number],
+  artifact: CheckpointArtifact<unknown>,
+  checkpointId: string,
+): string[] {
+  if (!Array.isArray(artifact.output)) {
+    const event = checkpointEventJson(
+      step,
+      checkpointId,
+      0,
+      1,
+      artifact,
+      artifact.output,
+    );
+    if (encodedBytes(event) > MAX_D1_CHECKPOINT_EVENT_BYTES) {
+      throw new Error(`CHECKPOINT_VALUE_TOO_LARGE:${step}`);
+    }
+    return [event];
+  }
+
+  const chunks: unknown[][] = [];
+  let current: unknown[] = [];
+  for (const entry of artifact.output) {
+    const candidate = [...current, entry];
+    const candidateEvent = checkpointEventJson(
+      step,
+      checkpointId,
+      MAX_CHECKPOINT_CHUNKS - 1,
+      MAX_CHECKPOINT_CHUNKS,
+      artifact,
+      candidate,
+    );
+    if (
+      current.length > 0 &&
+      encodedBytes(candidateEvent) > MAX_D1_CHECKPOINT_EVENT_BYTES
+    ) {
+      chunks.push(current);
+      current = [entry];
+    } else {
+      current = candidate;
+    }
+    const singleEntryEvent = checkpointEventJson(
+      step,
+      checkpointId,
+      MAX_CHECKPOINT_CHUNKS - 1,
+      MAX_CHECKPOINT_CHUNKS,
+      artifact,
+      current,
+    );
+    if (encodedBytes(singleEntryEvent) > MAX_D1_CHECKPOINT_EVENT_BYTES) {
+      throw new Error(`CHECKPOINT_ITEM_TOO_LARGE:${step}`);
+    }
+  }
+  if (current.length > 0 || chunks.length === 0) chunks.push(current);
+  if (chunks.length > MAX_CHECKPOINT_CHUNKS) {
+    throw new Error(`CHECKPOINT_CHUNK_LIMIT_EXCEEDED:${step}`);
+  }
+  return chunks.map((chunk, chunkIndex) => {
+    const event = checkpointEventJson(
+      step,
+      checkpointId,
+      chunkIndex,
+      chunks.length,
+      artifact,
+      chunk,
+    );
+    if (encodedBytes(event) > MAX_D1_CHECKPOINT_EVENT_BYTES) {
+      throw new Error(`CHECKPOINT_VALUE_TOO_LARGE:${step}`);
+    }
+    return event;
+  });
+}
+
+type CheckpointChunkRecord = {
+  checkpointId: string;
+  chunkIndex: number;
+  chunkCount: number;
+  artifact: unknown;
+};
+
+function checkpointChunkRecord(
+  value: Record<string, unknown>,
+): CheckpointChunkRecord | null {
+  if (
+    typeof value.checkpointId !== "string" ||
+    value.checkpointId.length === 0 ||
+    typeof value.chunkIndex !== "number" ||
+    !Number.isInteger(value.chunkIndex) ||
+    value.chunkIndex < 0 ||
+    typeof value.chunkCount !== "number" ||
+    !Number.isInteger(value.chunkCount) ||
+    value.chunkCount < 1 ||
+    value.chunkCount > MAX_CHECKPOINT_CHUNKS ||
+    value.chunkIndex >= value.chunkCount
+  ) return null;
+  return {
+    checkpointId: value.checkpointId,
+    chunkIndex: value.chunkIndex,
+    chunkCount: value.chunkCount,
+    artifact: value.artifact,
   };
 }
 
@@ -530,13 +656,26 @@ export class D1PipelineStore implements PipelineStore {
     artifact: CheckpointArtifact,
   ): Promise<void> {
     const validArtifact = parseCheckpointArtifact(step, artifact);
-    await this.db.prepare(
-      `INSERT INTO audit_events (id, run_id, event_type, event_json, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
-    ).bind(
-      crypto.randomUUID(), runId, "workflow_checkpoint",
-      JSON.stringify({ step, artifact: validArtifact }), new Date().toISOString(),
-    ).run();
+    const checkpointId = crypto.randomUUID();
+    const events = serializedCheckpointEvents(
+      step,
+      validArtifact,
+      checkpointId,
+    );
+    const createdAt = new Date().toISOString();
+    await this.db.batch(events.map((eventJson, chunkIndex) =>
+      this.db.prepare(
+        `INSERT INTO audit_events (
+          id, run_id, event_type, event_json, created_at
+        ) VALUES (?, ?, ?, ?, ?)`,
+      ).bind(
+        `${checkpointId}:${chunkIndex}`,
+        runId,
+        "workflow_checkpoint",
+        eventJson,
+        createdAt,
+      )
+    ));
   }
 
   async beginAttempt(runId: string, step: (typeof PIPELINE_STEPS)[number]): Promise<number> {
@@ -575,18 +714,76 @@ export class D1PipelineStore implements PipelineStore {
   ): Promise<CheckpointArtifact<unknown> | null> {
     const records = await this.db.prepare(
       `SELECT event_json FROM audit_events
-       WHERE run_id = ? AND event_type = ? ORDER BY created_at DESC`,
+       WHERE run_id = ? AND event_type = ?
+       ORDER BY created_at DESC, id DESC`,
     ).bind(runId, "workflow_checkpoint").all<{ event_json: string }>();
+    const groups = new Map<string, {
+      chunkCount: number;
+      chunks: Map<number, unknown>;
+    }>();
     for (const record of records.results) {
-      let parsed: { step?: unknown; artifact?: unknown };
+      let parsed: Record<string, unknown>;
       try {
-        parsed = JSON.parse(record.event_json) as { step?: unknown; artifact?: unknown };
+        const value = JSON.parse(record.event_json) as unknown;
+        if (value === null || typeof value !== "object" || Array.isArray(value)) {
+          throw new TypeError("Checkpoint event must be an object.");
+        }
+        parsed = value as Record<string, unknown>;
       } catch (error) {
         throw new Error("INVALID_CHECKPOINT_RECORD", { cause: error });
       }
       if (parsed.step !== step) continue;
+      const chunk = checkpointChunkRecord(parsed);
+      if (chunk !== null) {
+        const group = groups.get(chunk.checkpointId) ?? {
+          chunkCount: chunk.chunkCount,
+          chunks: new Map<number, unknown>(),
+        };
+        if (
+          group.chunkCount !== chunk.chunkCount ||
+          group.chunks.has(chunk.chunkIndex)
+        ) {
+          throw new Error(`INVALID_CHECKPOINT_CHUNKS:${step}`);
+        }
+        group.chunks.set(chunk.chunkIndex, chunk.artifact);
+        groups.set(chunk.checkpointId, group);
+        continue;
+      }
       try {
         return parseCheckpointArtifact(step, parsed.artifact);
+      } catch (error) {
+        throw new Error(`INVALID_CHECKPOINT_ARTIFACT:${step}`, {
+          cause: error,
+        });
+      }
+    }
+    for (const group of groups.values()) {
+      if (group.chunks.size !== group.chunkCount) {
+        throw new Error(`INCOMPLETE_CHECKPOINT_CHUNKS:${step}`);
+      }
+      const artifacts = Array.from(
+        { length: group.chunkCount },
+        (_, chunkIndex) => {
+          const chunk = group.chunks.get(chunkIndex);
+          if (chunk === undefined) {
+            throw new Error(`INCOMPLETE_CHECKPOINT_CHUNKS:${step}`);
+          }
+          return parseCheckpointArtifact(step, chunk);
+        },
+      );
+      const first = artifacts[0];
+      if (first === undefined) {
+        throw new Error(`INCOMPLETE_CHECKPOINT_CHUNKS:${step}`);
+      }
+      if (artifacts.length === 1 && !Array.isArray(first.output)) return first;
+      if (artifacts.some(({ output }) => !Array.isArray(output))) {
+        throw new Error(`INVALID_CHECKPOINT_CHUNKS:${step}`);
+      }
+      try {
+        return parseCheckpointArtifact(step, {
+          ...first,
+          output: artifacts.flatMap(({ output }) => output as unknown[]),
+        });
       } catch (error) {
         throw new Error(`INVALID_CHECKPOINT_ARTIFACT:${step}`, {
           cause: error,
@@ -695,6 +892,7 @@ export type ProductionPipelineContextOptions = {
     | "getDiscoveryObservations"
     | "upsertDiscoveryObservations"
     | "getCachedResearchAssessment"
+    | "getCachedResearchTopicalFit"
     | "putCachedResearchAssessment"
   > & Partial<Pick<BriefingRepository, "recordDiscoveryDiagnostics">>;
 };
@@ -839,11 +1037,71 @@ function normalizedCandidate(candidate: CollectedCandidate): Item | null {
     ? routePublication(publication.data)
     : candidate;
   if (routed === null) return null;
+  if (!isRawCollectedCandidate(routed)) return null;
   const research = RawResearchCandidateSchema.safeParse(routed);
-  return withWorkflowPayload(
-    normalizeCandidate(routed),
-    research.success ? { rawResearch: research.data } : {},
+  const normalized = normalizeCandidate(routed);
+  const directFamily = DiscoveryFamilySchema.safeParse(
+    routed.metadata.discoveryFamily,
   );
+  const discoveryFamily: DiscoveryFamily = directFamily.success
+    ? directFamily.data
+    : routed.sourceId === "arxiv"
+      ? "arxiv"
+      : routed.sourceRole === "blog" || routed.kind === "blog"
+        ? "commentary"
+        : routed.sourceId === "openalex" ||
+            routed.sourceId === "semantic-scholar"
+          ? "bibliographic"
+          : "official-publication";
+  const discoveryLineage = itemStringArray(
+    routed.metadata.discoveryLaneIds,
+  ).slice(0, 64).map((laneId) => JSON.stringify([
+    laneId,
+    routed.sourceId,
+    discoveryFamily,
+    normalized.id,
+  ]));
+  const normalizedWithLineage = ItemSchema.parse({
+    ...normalized,
+    metadata: {
+      ...normalized.metadata,
+      discoveryLineage,
+    },
+  });
+  return withWorkflowPayload(
+    normalizedWithLineage,
+    research.success
+      ? {
+          rawResearch: RawResearchCandidateSchema.parse({
+            ...research.data,
+            abstract: null,
+            content: null,
+          }),
+        }
+      : {},
+  );
+}
+
+function assessmentCandidate(
+  item: Item,
+  compact: RawResearchCandidate,
+): RawResearchCandidate {
+  const evidence = item.normalizedText.trim();
+  switch (compact.accessLevel) {
+    case "full_text":
+    case "secondary":
+      return RawResearchCandidateSchema.parse({
+        ...compact,
+        content: evidence.slice(0, 100_000) || null,
+      });
+    case "abstract":
+      return RawResearchCandidateSchema.parse({
+        ...compact,
+        abstract: evidence.slice(0, 4_000) || null,
+      });
+    case "metadata":
+      return compact;
+  }
 }
 
 function cosineSimilarity(
@@ -1088,6 +1346,89 @@ function itemStringArray(value: unknown): string[] {
     : [];
 }
 
+const DiscoveryLineageSchema = z.tuple([
+  z.string().min(1).max(200),
+  z.string().min(1).max(2_048),
+  DiscoveryFamilySchema,
+  z.string().min(1).max(2_048),
+]);
+
+type DiscoveryLineage = z.infer<typeof DiscoveryLineageSchema>;
+
+function itemDiscoveryLineage(item: Item): DiscoveryLineage[] {
+  return itemStringArray(item.metadata.discoveryLineage)
+    .slice(0, 1_024)
+    .flatMap((encoded): DiscoveryLineage[] => {
+      try {
+        const parsed = DiscoveryLineageSchema.safeParse(JSON.parse(encoded));
+        return parsed.success ? [parsed.data] : [];
+      } catch {
+        return [];
+      }
+    });
+}
+
+function legacyCommentaryLineageKeys(
+  item: Item,
+  sourceId: string,
+): string[] {
+  const attached = Array.isArray(item.metadata.attachedCommentary)
+    ? item.metadata.attachedCommentary
+    : [];
+  const attachedKeys = attached.flatMap((value): string[] => {
+    if (value === null || typeof value !== "object") return [];
+    const commentary = value as Record<string, unknown>;
+    return commentary.sourceId === sourceId &&
+        typeof commentary.url === "string" &&
+        typeof commentary.title === "string" &&
+        typeof commentary.retrievedAt === "string"
+      ? [JSON.stringify([
+          sourceId,
+          commentary.url,
+          commentary.title,
+          commentary.retrievedAt,
+        ])]
+      : [];
+  });
+  if (attachedKeys.length > 0) return attachedKeys;
+  return item.sourceRefs
+    .filter((source) => source.id === sourceId && source.role === "blog")
+    .map((source) => JSON.stringify([
+      source.id,
+      source.url,
+      item.title,
+      source.retrievedAt,
+    ]));
+}
+
+function diagnosticLineageKeys(
+  item: Item,
+  diagnostic: DiscoveryLaneDiagnostic,
+): string[] {
+  const lineage = itemDiscoveryLineage(item).filter(
+    ([laneId, sourceId, family]) =>
+      laneId === diagnostic.laneId &&
+      sourceId === diagnostic.sourceId &&
+      family === diagnostic.discoveryFamily,
+  );
+  if (lineage.length > 0) {
+    return lineage.map(([, , , upstreamItemId]) =>
+      `${diagnostic.laneId}\u0000${upstreamItemId}`
+    );
+  }
+  if (!discoveryLaneIds(item).includes(diagnostic.laneId)) return [];
+  if (diagnostic.discoveryFamily === "commentary") {
+    const commentaryKeys = legacyCommentaryLineageKeys(
+      item,
+      diagnostic.sourceId,
+    );
+    if (commentaryKeys.length > 0) return commentaryKeys;
+  }
+  return [
+    `${diagnostic.laneId}\u0000${canonicalResearchIdentity(item)}`,
+  ];
+}
+
 function itemDiscoveryFamily(item: Item): DiscoveryFamily {
   const direct = DiscoveryFamilySchema.safeParse(item.metadata.discoveryFamily);
   if (direct.success) return direct.data;
@@ -1098,6 +1439,23 @@ function itemDiscoveryFamily(item: Item): DiscoveryFamily {
   }
   if (item.kind === "blog") return "commentary";
   return "official-publication";
+}
+
+function sourceDiscoveryFamily(item: Item, sourceId: string): DiscoveryFamily {
+  const lineageFamilies = [...new Set(
+    itemDiscoveryLineage(item)
+      .filter(([, lineageSourceId]) => lineageSourceId === sourceId)
+      .map(([, , family]) => family),
+  )];
+  if (lineageFamilies.length === 1) return lineageFamilies[0]!;
+  if (legacyCommentaryLineageKeys(item, sourceId).length > 0) {
+    return "commentary";
+  }
+  if (sourceId === "arxiv") return "arxiv";
+  if (sourceId === "semantic-scholar" || sourceId === "openalex") {
+    return "bibliographic";
+  }
+  return lineageFamilies.sort()[0] ?? itemDiscoveryFamily(item);
 }
 
 function researchObservation(
@@ -1113,7 +1471,7 @@ function researchObservation(
     runId,
     canonicalId: canonicalResearchIdentity(item),
     sourceId,
-    discoveryFamily: itemDiscoveryFamily(item),
+    discoveryFamily: sourceDiscoveryFamily(item, sourceId),
     windowKind,
     publishedAt: item.publishedAt,
     retrievedAt,
@@ -1163,16 +1521,24 @@ export function createProductionPipelineContext(
         discoveryDiagnosticsLoaded = true;
       }
       if (field !== undefined) {
-        discoveryDiagnostics = discoveryDiagnostics.map((diagnostic) => ({
-          ...diagnostic,
-          [field]: items.filter(
-            (item) =>
-              isResearchItem(item) &&
-              discoveryLaneIds(item).includes(diagnostic.laneId) &&
-              (field !== "assessed" ||
-                workflowPayload(item).assessment !== undefined),
-          ).length,
-        }));
+        discoveryDiagnostics = discoveryDiagnostics.map((diagnostic) => {
+          const distinctLineage = new Set(items.flatMap((item) =>
+            isResearchItem(item) &&
+                (field !== "assessed" ||
+                  workflowPayload(item).assessment !== undefined)
+              ? diagnosticLineageKeys(item, diagnostic)
+              : []
+          ));
+          const precedingCount = field === "deduplicated"
+            ? diagnostic.discovered
+            : field === "triaged"
+              ? diagnostic.deduplicated
+              : diagnostic.triaged;
+          return DiscoveryLaneDiagnosticSchema.parse({
+            ...diagnostic,
+            [field]: Math.min(precedingCount, distinctLineage.size),
+          });
+        });
       }
       await options.researchRepository.recordDiscoveryDiagnostics(
         options.runId,
@@ -1277,6 +1643,31 @@ export function createProductionPipelineContext(
       : { persistItems: options.persistItems }),
     enrich: async (items) => {
       if (items.length === 0) return [];
+      if (options.budgetPolicy?.state === "hard_stop") {
+        const getCachedTopicalFit = options.researchRepository
+          ?.getCachedResearchTopicalFit;
+        if (getCachedTopicalFit === undefined) return [];
+        const cachedResearch: Item[] = [];
+        for (const candidate of items) {
+          const item = WorkflowItemSchema.parse(candidate);
+          if (!isResearchItem(item)) continue;
+          let topicalFit: number | null = null;
+          try {
+            topicalFit = await getCachedTopicalFit.call(
+              options.researchRepository,
+              canonicalResearchIdentity(item),
+              researchFingerprints(item).evidenceFingerprint,
+              options.now(),
+            );
+          } catch {
+            topicalFit = null;
+          }
+          if (topicalFit !== null) {
+            cachedResearch.push(withWorkflowPayload(item, { topicalFit }));
+          }
+        }
+        return cachedResearch;
+      }
       const profileTexts = profileEmbeddingTexts();
       const embeddingInputs = [
         ...items.map(itemEmbeddingText),
@@ -1392,6 +1783,25 @@ export function createProductionPipelineContext(
           }
         }
         if (cachedAssessment !== null) {
+          const topicalFit = workflowPayload(item).topicalFit;
+          if (
+            topicalFit !== undefined &&
+            options.researchRepository !== undefined
+          ) {
+            try {
+              await options.researchRepository.putCachedResearchAssessment(
+                canonicalId,
+                evidenceFingerprint,
+                cachedAssessment,
+                new Date(
+                  Date.parse(options.now()) + 7 * 24 * 60 * 60 * 1_000,
+                ).toISOString(),
+                topicalFit,
+              );
+            } catch {
+              // Legacy cache migration is opportunistic.
+            }
+          }
           assessed.push(withWorkflowPayload(item, {
             assessment: cachedAssessment,
           }));
@@ -1400,7 +1810,7 @@ export function createProductionPipelineContext(
         if (uncachedCalls >= maximumUncached) continue;
         uncachedCalls += 1;
         const assessment = await assessResearch(
-          rawResearch,
+          assessmentCandidate(item, rawResearch),
           options.providers.assessment,
         );
         if (options.researchRepository !== undefined) {
@@ -1412,6 +1822,7 @@ export function createProductionPipelineContext(
               new Date(
                 Date.parse(options.now()) + 7 * 24 * 60 * 60 * 1_000,
               ).toISOString(),
+              workflowPayload(item).topicalFit,
             );
           } catch {
             // Assessment cache availability must not discard paid results.
@@ -1730,13 +2141,16 @@ export function createD1ProductionPipelineContext(
         preferredLabs: READER_PROFILE.preferredLabs,
       });
       const to = now();
-      const from = new Date(
+      const reconsiderationFrom = new Date(
         Date.parse(to) - 7 * 24 * 60 * 60 * 1_000,
       ).toISOString();
+      const freshFrom = new Date(
+        Date.parse(to) - 36 * 60 * 60 * 1_000,
+      ).toISOString();
       const [news, research, publications] = await Promise.all([
-        newsCollector.collect({ from, to }),
-        researchCollector.collect({ from, to }),
-        publicationCollector.collect({ from, to }),
+        newsCollector.collect({ from: freshFrom, to }),
+        researchCollector.collect({ from: reconsiderationFrom, to }),
+        publicationCollector.collect({ from: reconsiderationFrom, to }),
       ]);
       discoveryDiagnostics.splice(
         0,

@@ -223,6 +223,29 @@ describe("D1BriefingRepository", () => {
       "evidence:v1",
       "2026-11-01T00:00:00.000Z",
     )).resolves.toBeNull();
+    await expect(repo.getCachedResearchTopicalFit(
+      "arxiv:2608.00001",
+      "evidence:v1",
+      "2026-08-02T09:00:00.000Z",
+    )).resolves.toBeNull();
+
+    await repo.putCachedResearchAssessment(
+      "arxiv:2608.00002",
+      "evidence:v2",
+      assessment,
+      "2026-11-01T00:00:00.000Z",
+      0.91,
+    );
+    await expect(repo.getCachedResearchAssessment(
+      "arxiv:2608.00002",
+      "evidence:v2",
+      "2026-08-02T09:00:00.000Z",
+    )).resolves.toEqual(assessment);
+    await expect(repo.getCachedResearchTopicalFit(
+      "arxiv:2608.00002",
+      "evidence:v2",
+      "2026-08-02T09:00:00.000Z",
+    )).resolves.toBe(0.91);
   });
 
   it("rejects invalid discovery and assessment mutations before writing", async () => {

@@ -48,6 +48,27 @@ describe("settleSourceCollections", () => {
     expect(JSON.stringify(result)).not.toContain("private upstream detail");
   });
 
+  it("preserves a tagged request timeout", async () => {
+    const result = await settleSourceCollections([{
+      sourceId: "openalex",
+      collect: async () => {
+        throw new SourceFetchError({
+          sourceId: "openalex",
+          status: null,
+          retryable: true,
+          failureKind: "timeout",
+          reason: "private timeout detail",
+        });
+      },
+    }]);
+
+    expect(result).toEqual({
+      values: [],
+      failures: [{ sourceId: "openalex", kind: "timeout" }],
+    });
+    expect(JSON.stringify(result)).not.toContain("private timeout detail");
+  });
+
   it("preserves the source collection receiver when invoking collect", async () => {
     const operation = {
       sourceId: "bound-source",

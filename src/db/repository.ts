@@ -592,10 +592,17 @@ export const WorkflowRunDetailSchema = WorkflowRunSchema.extend({
   }).strict()),
   sourceFailures: z.array(z.string().min(1)),
   discoveryDiagnostics: z.array(
-    DiscoveryLaneDiagnosticSchema.extend({
-      laneId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/),
-      sourceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/),
-    }).strict(),
+    DiscoveryLaneDiagnosticSchema.superRefine((diagnostic, context) => {
+      for (const field of ["laneId", "sourceId"] as const) {
+        if (!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/.test(diagnostic[field])) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: "Diagnostic identifiers must use the public ID format.",
+            path: [field],
+          });
+        }
+      }
+    }),
   ).max(64),
   rejectedSummaryReasons: z.array(z.string().min(1)),
   publishedAt: z.string().datetime().nullable(),
@@ -619,11 +626,17 @@ export interface BriefingRepository {
     evidenceFingerprint: string,
     now: string,
   ): Promise<ResearchAssessment | null>;
+  getCachedResearchTopicalFit?(
+    canonicalId: string,
+    evidenceFingerprint: string,
+    now: string,
+  ): Promise<number | null>;
   putCachedResearchAssessment(
     canonicalId: string,
     evidenceFingerprint: string,
     assessment: ResearchAssessment,
     expiresAt: string,
+    topicalFit?: number,
   ): Promise<void>;
   upsertItems(items: readonly Item[]): Promise<void>;
   saveScores(scores: readonly ItemScore[]): Promise<void>;

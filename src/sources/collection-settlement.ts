@@ -24,7 +24,8 @@ function collectionFailureKind(error: unknown): CollectionFailureKind {
   }
   if (error instanceof UnsafeOutboundUrlError) return "policy";
   if (!(error instanceof SourceFetchError)) return "unknown";
-  return error.failureKind === "policy" ? "policy" : "fetch";
+  if (error.failureKind === "policy") return "policy";
+  return error.failureKind === "timeout" ? "timeout" : "fetch";
 }
 
 export function boundedSourceFailureLabels(

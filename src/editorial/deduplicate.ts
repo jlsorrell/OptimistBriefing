@@ -228,6 +228,10 @@ export function mergeItemGroup(group: readonly Item[]): Item {
     0,
     64,
   );
+  const discoveryLineage = mergedStringMetadata("discoveryLineage").slice(
+    0,
+    1_024,
+  );
   const signalMap = new Map(
     group
       .flatMap(editorialSignals)
@@ -360,6 +364,7 @@ export function mergeItemGroup(group: readonly Item[]): Item {
       relatedPaperIds,
       primaryResearchSourceIds,
       discoveryLaneIds,
+      discoveryLineage,
       namedEntities,
       primaryDocumentUrl: primaryDocumentUrls[0] ?? null,
       primaryDocumentUrls,

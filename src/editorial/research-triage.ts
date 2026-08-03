@@ -152,6 +152,33 @@ function stableEvidenceValue(value: unknown): unknown {
   return value;
 }
 
+function stableCommentaryEvidence(value: unknown): unknown[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry): unknown[] => {
+    if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+      return [];
+    }
+    const commentary = entry as Record<string, unknown>;
+    return [{
+      sourceId:
+        typeof commentary.sourceId === "string"
+          ? commentary.sourceId
+          : null,
+      role: commentary.role === "blog" ? "blog" : null,
+      title: typeof commentary.title === "string" ? commentary.title : null,
+      url: typeof commentary.url === "string" ? commentary.url : null,
+      accessLevel:
+        typeof commentary.accessLevel === "string"
+          ? commentary.accessLevel
+          : null,
+      excerpt:
+        typeof commentary.excerpt === "string" ? commentary.excerpt : null,
+      relatedPaperIds: stringArray(commentary.relatedPaperIds),
+      implementationAvailable: commentary.implementationAvailable === true,
+    }];
+  });
+}
+
 export type ResearchFingerprints = {
   contentFingerprint: string;
   evidenceFingerprint: string;
@@ -200,7 +227,9 @@ export function researchFingerprints(input: Item): ResearchFingerprints {
     citationCount: raw?.citationCount ?? null,
     influentialCitationCount: raw?.influentialCitationCount ?? null,
     implementationAvailable: item.metadata.implementationAvailable === true,
-    attachedCommentary: item.metadata.attachedCommentary ?? [],
+    attachedCommentary: stableCommentaryEvidence(
+      item.metadata.attachedCommentary,
+    ),
   }));
   return {
     contentFingerprint,

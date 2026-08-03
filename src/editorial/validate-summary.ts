@@ -559,6 +559,27 @@ function extractivelySupports(
   );
 }
 
+function assertionSupportingSources(
+  assertion: string,
+  evidenceExcerpt: string,
+  evidenceSources: readonly PacketSource[],
+): readonly PacketSource[] {
+  const normalizedAssertion = normalizedText(assertion);
+  const normalizedEvidence = normalizedText(evidenceExcerpt);
+  if (
+    normalizedAssertion.length === 0 ||
+    normalizedEvidence.length === 0
+  ) return [];
+  if (normalizedEvidence.includes(normalizedAssertion)) {
+    return evidenceSources;
+  }
+  return evidenceSources.filter((source) =>
+    [source.title, ...source.excerpts.map((excerpt) => excerpt.text)]
+      .map(normalizedText)
+      .some((sourceText) => sourceText.includes(normalizedAssertion))
+  );
+}
+
 const COMMENTARY_ATTRIBUTION_VERB =
   /\b(?:argues|notes|suggests|critiques|interprets)\b/u;
 
@@ -658,8 +679,15 @@ export function validateSummary(
     }
     if (
       (packet.itemKind === "paper" || packet.itemKind === "blog") &&
-      citedSources.length > 0 &&
-      !hasResearchClaimAuthority(claim.text, citedSources)
+      evidenceSources.length > 0 &&
+      !hasResearchClaimAuthority(
+        claim.text,
+        assertionSupportingSources(
+          claim.text,
+          claim.evidenceExcerpt,
+          evidenceSources,
+        ),
+      )
     ) {
       errors.push(`PRIMARY_RESEARCH_SOURCE_REQUIRED:${claimIndex}`);
     }

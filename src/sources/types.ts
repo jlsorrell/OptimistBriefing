@@ -7,6 +7,44 @@ import {
   SourceRefSchema,
 } from "../contracts/editorial";
 
+export const MAX_PROVIDER_TITLE_CHARACTERS = 500;
+export const MAX_PROVIDER_EVIDENCE_CHARACTERS = 4_000;
+export const MAX_PROVIDER_CONTENT_CHARACTERS = 100_000;
+export const MAX_PROVIDER_ARRAY_ITEMS = 64;
+export const MAX_PROVIDER_METADATA_BYTES = 64 * 1_024;
+
+const ProviderIdSchema = z.string().min(1).max(2_048);
+const ProviderNameSchema = z.string().min(1).max(500);
+const ProviderTitleSchema = z
+  .string()
+  .min(1)
+  .max(MAX_PROVIDER_TITLE_CHARACTERS);
+const ProviderUrlSchema = z.string().max(2_048).url();
+const ProviderEvidenceSchema = z
+  .string()
+  .min(1)
+  .max(MAX_PROVIDER_EVIDENCE_CHARACTERS);
+const ProviderMetadataSchema = z.record(z.string().max(200), z.unknown())
+  .superRefine((metadata, context) => {
+    let encodedBytes: number;
+    try {
+      encodedBytes = new TextEncoder().encode(JSON.stringify(metadata))
+        .byteLength;
+    } catch {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provider metadata must be JSON serializable.",
+      });
+      return;
+    }
+    if (encodedBytes > MAX_PROVIDER_METADATA_BYTES) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Provider metadata exceeds the encoded-byte limit.",
+      });
+    }
+  });
+
 export const CollectionWindowSchema = z
   .object({
     from: z.string().datetime(),
@@ -61,30 +99,32 @@ export const ResearchSourceRecordSchema = z.object({
 
 export const RawItemSchema = z.object({
   kind: ItemKindSchema,
-  sourceId: z.string().min(1),
-  sourceName: z.string().min(1),
+  sourceId: ProviderIdSchema,
+  sourceName: ProviderNameSchema,
   sourceRole: SourceRefSchema.shape.role,
-  title: z.string().min(1),
-  originalUrl: z.string().url(),
-  externalId: z.string().min(1),
-  externalIds: z.array(z.string().min(1)).min(1),
+  title: ProviderTitleSchema,
+  originalUrl: ProviderUrlSchema,
+  externalId: ProviderIdSchema,
+  externalIds: z.array(ProviderIdSchema).min(1).max(32),
   publishedAt: z.string().datetime().nullable(),
   retrievedAt: z.string().datetime(),
   accessLevel: AccessLevelSchema,
-  authors: z.array(z.string().min(1)),
-  institutions: z.array(z.string().min(1)),
-  abstract: z.string().min(1).nullable(),
-  content: z.string().min(1).nullable(),
-  relatedPaperIds: z.array(z.string().min(1)),
-  metadata: z.record(z.string(), z.unknown()),
+  authors: z.array(ProviderNameSchema).max(MAX_PROVIDER_ARRAY_ITEMS),
+  institutions: z.array(ProviderNameSchema).max(MAX_PROVIDER_ARRAY_ITEMS),
+  abstract: ProviderEvidenceSchema.nullable(),
+  content: z.string().min(1).max(MAX_PROVIDER_CONTENT_CHARACTERS).nullable(),
+  relatedPaperIds: z.array(ProviderIdSchema).max(32),
+  metadata: ProviderMetadataSchema,
 });
 
 export const RawResearchCandidateSchema = RawItemSchema.extend({
   kind: z.enum(["paper", "blog"]),
-  preferredInstitutionMatches: z.array(z.string().min(1)),
+  preferredInstitutionMatches: z.array(ProviderNameSchema).max(
+    MAX_PROVIDER_ARRAY_ITEMS,
+  ),
   citationCount: z.number().int().nonnegative().nullable(),
   influentialCitationCount: z.number().int().nonnegative().nullable(),
-  topics: z.array(z.string().min(1)),
+  topics: z.array(ProviderNameSchema).max(MAX_PROVIDER_ARRAY_ITEMS),
 });
 
 export const RawPublicationCandidateSchema = RawItemSchema
@@ -93,22 +133,22 @@ export const RawPublicationCandidateSchema = RawItemSchema
     kind: z.literal("publication"),
     sectionEligibility: z.array(EditionSectionSchema).min(1),
     discoveryFamily: DiscoveryFamilySchema,
-    relatedPaperIds: z.array(z.string().min(1)).max(16),
+    relatedPaperIds: z.array(ProviderIdSchema).max(16),
   });
 
 export const DiscoveryObservationSchema = z
   .object({
-    runId: z.string().min(1),
-    canonicalId: z.string().min(1),
-    sourceId: z.string().min(1),
+    runId: ProviderIdSchema,
+    canonicalId: ProviderIdSchema,
+    sourceId: ProviderIdSchema,
     discoveryFamily: DiscoveryFamilySchema,
     windowKind: DiscoveryWindowKindSchema,
     publishedAt: z.string().datetime().nullable(),
     retrievedAt: z.string().datetime(),
     observedAt: z.string().datetime(),
-    contentFingerprint: z.string().min(1),
-    evidenceFingerprint: z.string().min(1),
-    joinedExternalIds: z.array(z.string().min(1)).max(32),
+    contentFingerprint: z.string().min(1).max(200),
+    evidenceFingerprint: z.string().min(1).max(200),
+    joinedExternalIds: z.array(ProviderIdSchema).max(32),
     route: z.enum(["research", "technology", "ai_policy", "excluded"]),
     expiresAt: z.string().datetime(),
   })
@@ -116,8 +156,8 @@ export const DiscoveryObservationSchema = z
 
 export const DiscoveryLaneDiagnosticSchema = z
   .object({
-    laneId: z.string().min(1),
-    sourceId: z.string().min(1),
+    laneId: z.string().min(1).max(200),
+    sourceId: ProviderIdSchema,
     discoveryFamily: DiscoveryFamilySchema,
     discovered: z.number().int().nonnegative().max(10_000),
     deduplicated: z.number().int().nonnegative().max(10_000),
@@ -125,12 +165,28 @@ export const DiscoveryLaneDiagnosticSchema = z
     assessed: z.number().int().nonnegative().max(10_000),
     outcome: z.enum(["success", "fetch", "parse", "policy", "timeout", "unknown"]),
   })
-  .strict();
+  .strict()
+  .superRefine((diagnostic, context) => {
+    const stages = [
+      ["deduplicated", diagnostic.deduplicated, diagnostic.discovered],
+      ["triaged", diagnostic.triaged, diagnostic.deduplicated],
+      ["assessed", diagnostic.assessed, diagnostic.triaged],
+    ] as const;
+    for (const [field, count, previous] of stages) {
+      if (count > previous) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: `${field} cannot exceed the preceding funnel stage.`,
+          path: [field],
+        });
+      }
+    }
+  });
 
 export const NewsMaterialFactSchema = z.object({
   kind: z.enum(["status", "number", "date", "amount"]),
-  key: z.string().min(1),
-  value: z.string().min(1),
+  key: ProviderNameSchema,
+  value: ProviderEvidenceSchema,
 });
 
 export const CanonicalEventDomainSchema = z.enum([
@@ -141,9 +197,9 @@ export const CanonicalEventDomainSchema = z.enum([
 ]);
 
 export const CanonicalEventInstanceSchema = z.object({
-  subject: z.string().min(1),
+  subject: ProviderNameSchema,
   domain: CanonicalEventDomainSchema,
-  object: z.string().min(1),
+  object: ProviderNameSchema,
 });
 
 export const ScopedNewsMaterialFactSchema =
@@ -173,14 +229,20 @@ export const RawNewsCandidateSchema = RawItemSchema.extend({
   kind: z.enum(["article", "document", "forecast"]),
   canCorroborateFacts: z.boolean(),
   sectionEligibility: z.array(EditionSectionSchema).default([]),
-  namedEntities: z.array(z.string().min(1)).default([]),
-  primaryDocumentUrl: z.string().url().nullable().default(null),
-  primaryDocumentUrls: z.array(z.string().url()).default([]),
-  eventFamilies: z.array(z.string().min(1)).default([]),
-  materialFacts: z.array(NewsMaterialFactSchema).default([]),
-  eventInstances: z.array(CanonicalEventInstanceSchema).optional(),
+  namedEntities: z.array(ProviderNameSchema).max(MAX_PROVIDER_ARRAY_ITEMS)
+    .default([]),
+  primaryDocumentUrl: ProviderUrlSchema.nullable().default(null),
+  primaryDocumentUrls: z.array(ProviderUrlSchema).max(16).default([]),
+  eventFamilies: z.array(ProviderNameSchema).max(MAX_PROVIDER_ARRAY_ITEMS)
+    .default([]),
+  materialFacts: z.array(NewsMaterialFactSchema).max(MAX_PROVIDER_ARRAY_ITEMS)
+    .default([]),
+  eventInstances: z.array(CanonicalEventInstanceSchema).max(
+    MAX_PROVIDER_ARRAY_ITEMS,
+  ).optional(),
   scopedMaterialFacts: z
     .array(ScopedNewsMaterialFactSchema)
+    .max(MAX_PROVIDER_ARRAY_ITEMS)
     .optional(),
 }).superRefine((candidate, context) => {
   if (

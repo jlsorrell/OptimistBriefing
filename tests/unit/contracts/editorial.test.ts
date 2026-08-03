@@ -133,6 +133,29 @@ describe("research discovery source contracts", () => {
     });
   });
 
+  it("rejects unbounded provider strings, arrays, and metadata", () => {
+    expect(RawPublicationCandidateSchema.safeParse({
+      ...publication,
+      title: "t".repeat(501),
+    }).success).toBe(false);
+    expect(RawPublicationCandidateSchema.safeParse({
+      ...publication,
+      externalIds: Array.from({ length: 33 }, (_, index) => `id-${index}`),
+    }).success).toBe(false);
+    expect(RawPublicationCandidateSchema.safeParse({
+      ...publication,
+      relatedPaperIds: ["r".repeat(2_049)],
+    }).success).toBe(false);
+    expect(RawPublicationCandidateSchema.safeParse({
+      ...publication,
+      abstract: "a".repeat(4_001),
+    }).success).toBe(false);
+    expect(RawPublicationCandidateSchema.safeParse({
+      ...publication,
+      metadata: { oversized: "m".repeat(65_536) },
+    }).success).toBe(false);
+  });
+
   it("rejects an unknown discovery family", () => {
     expect(
       RawPublicationCandidateSchema.safeParse({
@@ -167,6 +190,19 @@ describe("research discovery source contracts", () => {
         outcome: "success",
       }).success,
     ).toBe(false);
+  });
+
+  it("rejects diagnostics that violate funnel ordering", () => {
+    expect(DiscoveryLaneDiagnosticSchema.safeParse({
+      laneId: "papers-with-code-co:page",
+      sourceId: "papers-with-code-co",
+      discoveryFamily: "commentary",
+      discovered: 1,
+      deduplicated: 2,
+      triaged: 2,
+      assessed: 2,
+      outcome: "success",
+    }).success).toBe(false);
   });
 
   it("rejects observations with non-ISO timestamps", () => {
