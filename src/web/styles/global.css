@@ -514,6 +514,48 @@ a {
   cursor: pointer;
 }
 
+.canary-control {
+  display: grid;
+  gap: 0.75rem;
+  margin: 1rem 0 1.5rem;
+  padding: 1rem;
+  border: 1px solid var(--sage);
+  background: var(--paper);
+}
+
+.canary-control h2,
+.canary-control p {
+  margin: 0;
+}
+
+.canary-control form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.75rem;
+}
+
+.canary-control label {
+  display: grid;
+  gap: 0.35rem;
+  font-weight: 700;
+}
+
+.canary-control input {
+  min-height: 44px;
+  padding: 0.55rem 0.7rem;
+  color: var(--ink);
+  background: #fff;
+  border: 1px solid var(--sage-dark);
+  border-radius: 3px;
+  font: inherit;
+}
+
+.canary-control button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
 .state-page > p > a {
   display: inline-flex;
   align-items: center;
