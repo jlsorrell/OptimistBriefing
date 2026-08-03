@@ -26,6 +26,6 @@ describe("deployment configuration", () => {
     const workerCompatibilityDate = compatibilityDateMatches[0]?.[1];
     expect(workerCompatibilityDate).toBe(wrangler.compatibility_date);
     expect(workerCompatibilityDate).toBe("2026-07-29");
-    expect(wrangler.limits?.cpu_ms).toBe(5_000);
+    expect(wrangler.limits?.cpu_ms).toBe(30_000);
   });
 });

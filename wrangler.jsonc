@@ -3,7 +3,7 @@
   "main": "src/worker.ts",
   "compatibility_date": "2026-07-29",
   "limits": {
-    "cpu_ms": 5000
+    "cpu_ms": 30000
   },
   "assets": {
     "directory": "./dist",
