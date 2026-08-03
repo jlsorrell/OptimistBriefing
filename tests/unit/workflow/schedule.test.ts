@@ -342,6 +342,62 @@ describe("shouldRunAt", () => {
     )).toHaveLength(1);
   });
 
+  it("drops an access-overclaiming assessment without discarding valid research", async () => {
+    let assessmentCalls = 0;
+    const provider: ModelProvider = {
+      embed: async () => {
+        throw new Error("Embedding is not used by this regression.");
+      },
+      generateObject: async (input) => {
+        if (input.schemaName !== "research_assessment") {
+          throw new Error("Only assessment is used by this regression.");
+        }
+        assessmentCalls += 1;
+        return {
+          technicalQuality: 0.9,
+          novelty: 0.8,
+          strengths: ["Supported evidence."],
+          limitations: ["Supported evidence."],
+          rationale: "Supported evidence.",
+          accessLevel: assessmentCalls === 1 ? "full_text" : "abstract",
+        };
+      },
+    };
+    const context = budgetContext(provider, "degraded");
+    const overclaiming = cachedItem("overclaiming", {
+      kind: "paper",
+      section: "research",
+    });
+    const valid = cachedItem("valid-after-overclaim", {
+      kind: "paper",
+      section: "research",
+    });
+
+    const assessed = await context.assess([overclaiming, valid]);
+
+    expect(assessed.map(({ id }) => id)).toEqual(["valid-after-overclaim"]);
+    expect(assessmentCalls).toBe(2);
+  });
+
+  it("keeps provider failures retryable during research assessment", async () => {
+    const provider: ModelProvider = {
+      embed: async () => {
+        throw new Error("Embedding is not used by this regression.");
+      },
+      generateObject: async () => {
+        throw new Error("ASSESSMENT_PROVIDER_UNAVAILABLE");
+      },
+    };
+    const context = budgetContext(provider, "degraded");
+
+    await expect(context.assess([
+      cachedItem("provider-failure", {
+        kind: "paper",
+        section: "research",
+      }),
+    ])).rejects.toThrow("ASSESSMENT_PROVIDER_UNAVAILABLE");
+  });
+
   it("assigns research tiers from ranked shortlist roles, not input order", async () => {
     const context = budgetContext(new RecordingProvider(), "degraded");
     const shortlisted = await context.shortlist([

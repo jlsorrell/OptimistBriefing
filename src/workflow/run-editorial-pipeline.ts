@@ -1809,10 +1809,19 @@ export function createProductionPipelineContext(
         }
         if (uncachedCalls >= maximumUncached) continue;
         uncachedCalls += 1;
-        const assessment = await assessResearch(
-          assessmentCandidate(item, rawResearch),
-          options.providers.assessment,
-        );
+        let assessment: ResearchAssessment;
+        try {
+          assessment = await assessResearch(
+            assessmentCandidate(item, rawResearch),
+            options.providers.assessment,
+          );
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            error.message === "ACCESS_LEVEL_OVERCLAIM"
+          ) continue;
+          throw error;
+        }
         if (options.researchRepository !== undefined) {
           try {
             await options.researchRepository.putCachedResearchAssessment(
