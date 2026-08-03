@@ -11,6 +11,7 @@ import type {
 import {
   createBudgetedPipelineRuntimeFactory,
   createD1ModelBudgetCallbacks,
+  createD1TerminalReservationCleanup,
   runCheckpointWithWorkflowStep,
   RunParamsSchema,
   ScheduledModelConfigSchema,
@@ -826,6 +827,143 @@ describe("durable workflow checkpoint execution", () => {
       model: "paid-model",
       maximumBillableUnits: 600,
     })).resolves.not.toBeNull();
+  });
+
+  it("cleans terminal reservations after exhausted synthesis failure", async () => {
+    const context = resumableContext("publish");
+    const cleanup = vi.fn(async () => undefined);
+    context.cleanupTerminalReservations = cleanup;
+    context.synthesize = async () => {
+      throw new Error("Worker exceeded memory limit.");
+    };
+    context.checkpointExecutor = async (_step, execute) => execute();
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "Worker exceeded memory limit.",
+    );
+    expect(cleanup).toHaveBeenCalledOnce();
+    expect(cleanup).toHaveBeenCalledWith("Worker exceeded memory limit.");
+  });
+
+  it("does not mask the pipeline error when terminal cleanup fails", async () => {
+    const context = resumableContext("publish");
+    context.cleanupTerminalReservations = async () => {
+      throw new Error("MODEL_BUDGET_CLEANUP_FAILED");
+    };
+    context.synthesize = async () => {
+      throw new Error("ORIGINAL_SYNTHESIS_FAILURE");
+    };
+    context.checkpointExecutor = async (_step, execute) => execute();
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "ORIGINAL_SYNTHESIS_FAILURE",
+    );
+  });
+
+  it("does not clean reservations when a temporary step retry succeeds", async () => {
+    const context = resumableContext("publish");
+    const cleanup = vi.fn(async () => undefined);
+    context.cleanupTerminalReservations = cleanup;
+    let attempts = 0;
+    const synthesize = context.synthesize;
+    context.synthesize = async (items) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("TEMPORARY_SYNTHESIS_FAILURE");
+      return synthesize(items);
+    };
+    context.checkpointExecutor = async (_step, execute) => {
+      try {
+        return await execute();
+      } catch {
+        return execute();
+      }
+    };
+
+    await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+      runId: context.runId,
+    });
+    expect(cleanup).not.toHaveBeenCalled();
+  });
+
+  it("releases and audits terminal D1 reservations", async () => {
+    const releaseRunModelBudget = vi.fn(async () => ({
+      releasedReservations: 3,
+      releasedMaximumCostMicrousd: 300_750,
+    }));
+    const recordTerminalModelBudgetCleanup = vi.fn(async () => undefined);
+    const cleanup = createD1TerminalReservationCleanup(
+      { releaseRunModelBudget, recordTerminalModelBudgetCleanup },
+      {
+        runId: "terminal-cleanup-run",
+        clock: () => new Date("2036-02-10T09:05:00.000Z"),
+      },
+    );
+
+    await cleanup("Worker exceeded memory limit.");
+
+    expect(releaseRunModelBudget).toHaveBeenCalledWith({
+      runId: "terminal-cleanup-run",
+      releasedAt: "2036-02-10T09:05:00.000Z",
+    });
+    expect(recordTerminalModelBudgetCleanup).toHaveBeenCalledWith({
+      runId: "terminal-cleanup-run",
+      failureCode: "WORKER_MEMORY_LIMIT",
+      outcome: "released",
+      occurredAt: "2036-02-10T09:05:00.000Z",
+      releasedReservations: 3,
+      releasedMaximumCostMicrousd: 300_750,
+    });
+  });
+
+  it("records only a generic diagnostic when terminal release fails", async () => {
+    const releaseError = new Error("private repository details");
+    const privatePipelineError =
+      "Bearer secret-token; provider body; request req-123; reservation reservation-456; SELECT * FROM items";
+    const releaseRunModelBudget = vi.fn(async () => {
+      throw releaseError;
+    });
+    const recordTerminalModelBudgetCleanup = vi.fn(async () => undefined);
+    const cleanup = createD1TerminalReservationCleanup(
+      { releaseRunModelBudget, recordTerminalModelBudgetCleanup },
+      {
+        runId: "terminal-cleanup-run",
+        clock: () => new Date("2036-02-10T09:05:00.000Z"),
+      },
+    );
+
+    await expect(cleanup(privatePipelineError)).rejects.toBe(releaseError);
+    expect(recordTerminalModelBudgetCleanup).toHaveBeenCalledWith({
+      runId: "terminal-cleanup-run",
+      failureCode: "PIPELINE_TERMINAL_FAILURE",
+      outcome: "failed",
+      occurredAt: "2036-02-10T09:05:00.000Z",
+      releasedReservations: 0,
+      releasedMaximumCostMicrousd: 0,
+    });
+    expect(JSON.stringify(recordTerminalModelBudgetCleanup.mock.calls))
+      .not.toContain("private repository details");
+    expect(JSON.stringify(recordTerminalModelBudgetCleanup.mock.calls))
+      .not.toContain(privatePipelineError);
+  });
+
+  it("treats a success-audit write failure as best effort", async () => {
+    const releaseRunModelBudget = vi.fn(async () => ({
+      releasedReservations: 1,
+      releasedMaximumCostMicrousd: 99_450,
+    }));
+    const recordTerminalModelBudgetCleanup = vi.fn(async () => {
+      throw new Error("AUDIT_WRITE_FAILED");
+    });
+    const cleanup = createD1TerminalReservationCleanup(
+      { releaseRunModelBudget, recordTerminalModelBudgetCleanup },
+      {
+        runId: "terminal-cleanup-run",
+        clock: () => new Date("2036-02-10T09:05:00.000Z"),
+      },
+    );
+
+    await expect(cleanup("PIPELINE_FAILED")).resolves.toBeUndefined();
+    expect(recordTerminalModelBudgetCleanup).toHaveBeenCalledOnce();
   });
 
   it("persists a live budget rejection as retryable and rethrows it", async () => {

@@ -180,6 +180,7 @@ export type PipelineContext = {
   loadSourceFailures?: () => Promise<readonly string[]>;
   checkpointExecutor?: PipelineCheckpointExecutor;
   budgetPolicy?: BudgetPolicy;
+  cleanupTerminalReservations?: (failureCode: string) => Promise<void>;
 };
 
 export type CompositionResult = {

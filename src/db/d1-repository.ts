@@ -53,7 +53,10 @@ import {
   type ReaderPreferences,
   type ReconcileModelBudgetInput,
   type ReleaseModelBudgetInput,
+  type ReleasedRunModelBudget,
+  type ReleaseRunModelBudgetInput,
   type ReserveModelBudgetInput,
+  type TerminalModelBudgetCleanupAuditInput,
   type ModelUsageRecord,
   type SourceRecord,
   type UpdateSourceInput,
@@ -130,6 +133,24 @@ const ReleaseModelBudgetInputSchema = z.object({
   runId: z.string().min(1).max(200),
   releasedAt: z.string().datetime(),
 }).strict();
+const ReleaseRunModelBudgetInputSchema = z.object({
+  runId: z.string().min(1).max(200),
+  releasedAt: z.string().datetime(),
+}).strict();
+const ReleasedRunModelBudgetSchema = z.object({
+  releasedReservations: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  releasedMaximumCostMicrousd: BudgetMicrousdSchema,
+}).strict();
+const TerminalModelBudgetCleanupAuditInputSchema =
+  ReleasedRunModelBudgetSchema.extend({
+    runId: z.string().min(1).max(200),
+    failureCode: z.enum([
+      "WORKER_MEMORY_LIMIT",
+      "PIPELINE_TERMINAL_FAILURE",
+    ]),
+    outcome: z.enum(["released", "failed"]),
+    occurredAt: z.string().datetime(),
+  }).strict();
 const EditionDateSchema = EditionSchema.shape.editionDate;
 const NonemptyIdSchema = z.string().min(1);
 const SourceOutcomeSchema = z.union([
@@ -2574,6 +2595,69 @@ export class D1BriefingRepository implements BriefingRepository {
         "Model budget reservation could not be released",
       );
     }
+  }
+
+  async releaseRunModelBudget(
+    input: ReleaseRunModelBudgetInput,
+  ): Promise<ReleasedRunModelBudget> {
+    const valid = validated(
+      ReleaseRunModelBudgetInputSchema,
+      input,
+      "Invalid run model budget release",
+    );
+    const aggregate = await this.db.prepare(
+      `SELECT COUNT(*) AS releasedReservations,
+              COALESCE(SUM(maximum_cost_microusd), 0)
+                AS releasedMaximumCostMicrousd
+       FROM model_budget_reservations
+       WHERE run_id = ? AND status = 'reserved'`,
+    ).bind(valid.runId).first<ReleasedRunModelBudget>();
+    const result = await this.db.prepare(
+      `UPDATE model_budget_reservations
+       SET status = 'released', updated_at = ?
+       WHERE run_id = ? AND status = 'reserved'`,
+    ).bind(valid.releasedAt, valid.runId).run();
+    const releasedReservations = result.meta.changes ?? 0;
+    return validated(
+      ReleasedRunModelBudgetSchema,
+      {
+        releasedReservations,
+        releasedMaximumCostMicrousd:
+          releasedReservations === 0
+            ? 0
+            : aggregate?.releasedMaximumCostMicrousd ?? 0,
+      },
+      "Invalid released run model budget",
+    );
+  }
+
+  async recordTerminalModelBudgetCleanup(
+    input: TerminalModelBudgetCleanupAuditInput,
+  ): Promise<void> {
+    const valid = validated(
+      TerminalModelBudgetCleanupAuditInputSchema,
+      input,
+      "Invalid terminal model budget cleanup audit",
+    );
+    const expiresAt = new Date(
+      Date.parse(valid.occurredAt) + 30 * 24 * 60 * 60 * 1_000,
+    ).toISOString();
+    await this.db.prepare(
+      `INSERT INTO audit_events (id, run_id, event_type, event_json, created_at, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      crypto.randomUUID(),
+      valid.runId,
+      "model_budget_terminal_cleanup",
+      JSON.stringify({
+        failureCode: valid.failureCode,
+        outcome: valid.outcome,
+        releasedReservations: valid.releasedReservations,
+        releasedMaximumCostMicrousd: valid.releasedMaximumCostMicrousd,
+      }),
+      valid.occurredAt,
+      expiresAt,
+    ).run();
   }
 
   async recordRetentionAudit(now: string, report: RetentionReport): Promise<void> {

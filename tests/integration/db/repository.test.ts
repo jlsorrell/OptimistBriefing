@@ -422,6 +422,104 @@ describe("D1BriefingRepository", () => {
       .toEqual({ total: 100_000 });
   });
 
+  it("releases only one run's reserved model budget idempotently", async () => {
+    const repository = new D1BriefingRepository(env.DB);
+    const createdAt = "2036-02-10T09:00:00.000Z";
+    for (const [runId, date] of [
+      ["terminal-budget-run", "2036-02-10"],
+      ["other-budget-run", "2036-02-11"],
+    ] as const) {
+      await env.DB.prepare(
+        `INSERT INTO workflow_runs (
+          id, edition_date, status, current_step, retryable, attempt_count,
+          failure_code, estimated_cost_usd, created_at, updated_at
+        ) VALUES (?, ?, 'retryable', 'shortlist', 1, 1, ?, 0, ?, ?)`,
+      ).bind(runId, date, "Worker exceeded memory limit.", createdAt, createdAt)
+        .run();
+    }
+    const reservations = [
+      { id: "target-a", runId: "terminal-budget-run", maximum: 99_450, status: "reserved", actual: null },
+      { id: "target-b", runId: "terminal-budget-run", maximum: 101_850, status: "reserved", actual: null },
+      { id: "target-reconciled", runId: "terminal-budget-run", maximum: 80_000, status: "reconciled", actual: 20_000 },
+      { id: "other-reserved", runId: "other-budget-run", maximum: 120_000, status: "reserved", actual: null },
+    ] as const;
+    await env.DB.batch(reservations.map((reservation) => env.DB.prepare(
+      `INSERT INTO model_budget_reservations (
+        id, run_id, month_start, maximum_cost_microusd,
+        actual_cost_microusd, status, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      reservation.id,
+      reservation.runId,
+      "2036-02-01T00:00:00.000Z",
+      reservation.maximum,
+      reservation.actual,
+      reservation.status,
+      createdAt,
+      createdAt,
+    )));
+
+    await expect(repository.releaseRunModelBudget({
+      runId: "terminal-budget-run",
+      releasedAt: "2036-02-10T09:05:00.000Z",
+    })).resolves.toEqual({
+      releasedReservations: 2,
+      releasedMaximumCostMicrousd: 201_300,
+    });
+    await expect(repository.releaseRunModelBudget({
+      runId: "terminal-budget-run",
+      releasedAt: "2036-02-10T09:06:00.000Z",
+    })).resolves.toEqual({
+      releasedReservations: 0,
+      releasedMaximumCostMicrousd: 0,
+    });
+    expect(await env.DB.prepare(
+      `SELECT id, status FROM model_budget_reservations
+       WHERE id IN ('target-a', 'target-b', 'target-reconciled', 'other-reserved')
+       ORDER BY id`,
+    ).all()).toMatchObject({ results: [
+      { id: "other-reserved", status: "reserved" },
+      { id: "target-a", status: "released" },
+      { id: "target-b", status: "released" },
+      { id: "target-reconciled", status: "reconciled" },
+    ] });
+
+    await repository.recordTerminalModelBudgetCleanup({
+      runId: "terminal-budget-run",
+      failureCode: "WORKER_MEMORY_LIMIT",
+      outcome: "released",
+      occurredAt: "2036-02-10T09:06:00.000Z",
+      releasedReservations: 2,
+      releasedMaximumCostMicrousd: 201_300,
+    });
+    const audit = await env.DB.prepare(
+      `SELECT event_json, expires_at FROM audit_events
+       WHERE run_id = ? AND event_type = ?`,
+    ).bind(
+      "terminal-budget-run",
+      "model_budget_terminal_cleanup",
+    ).first<{ event_json: string; expires_at: string }>();
+    expect(audit).not.toBeNull();
+    expect(JSON.parse(audit!.event_json)).toEqual({
+      failureCode: "WORKER_MEMORY_LIMIT",
+      outcome: "released",
+      releasedReservations: 2,
+      releasedMaximumCostMicrousd: 201_300,
+    });
+    expect(audit!.expires_at).toBe("2036-03-11T09:06:00.000Z");
+
+    await expect(repository.recordTerminalModelBudgetCleanup({
+      runId: "terminal-budget-run",
+      failureCode: "PUBLIC_FAILURE_CODE",
+      outcome: "failed",
+      occurredAt: "2036-02-10T09:07:00.000Z",
+      releasedReservations: 0,
+      releasedMaximumCostMicrousd: 0,
+    } as unknown as Parameters<
+      D1BriefingRepository["recordTerminalModelBudgetCleanup"]
+    >[0])).rejects.toThrow("Invalid terminal model budget cleanup audit");
+  });
+
   it("accepts only exact legacy or complete bounded edition metadata", () => {
     expect(EditionMetadataSchema.parse({})).toEqual({
       missingSections: [],

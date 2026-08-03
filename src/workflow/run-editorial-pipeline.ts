@@ -895,6 +895,7 @@ export type ProductionPipelineContextOptions = {
   loadSourceFailures?: PipelineContext["loadSourceFailures"];
   checkpointExecutor?: PipelineContext["checkpointExecutor"];
   budgetPolicy?: BudgetPolicy;
+  cleanupTerminalReservations?: PipelineContext["cleanupTerminalReservations"];
   researchRepository?: Pick<
     BriefingRepository,
     | "getDiscoveryObservations"
@@ -1561,6 +1562,9 @@ export function createProductionPipelineContext(
     runId: options.runId,
     store: options.store,
     now: options.now,
+    ...(options.cleanupTerminalReservations === undefined
+      ? {}
+      : { cleanupTerminalReservations: options.cleanupTerminalReservations }),
     collect: async () => {
       const collected = z.array(CollectedCandidateSchema).parse(
         (await options.collectCandidates()).map((candidate) =>
@@ -2101,7 +2105,10 @@ export function createD1ProductionPipelineContext(
   providers: PipelineProviders,
   options: Pick<
     ProductionPipelineContextOptions,
-    "checkpointExecutor" | "budgetPolicy" | "preferences"
+    | "checkpointExecutor"
+    | "budgetPolicy"
+    | "preferences"
+    | "cleanupTerminalReservations"
   > = {},
 ): PipelineContext {
   const now = () => new Date().toISOString();
@@ -2548,6 +2555,12 @@ export async function runEditorialPipeline(
       failureCode,
       updatedAt: context.now(),
     });
+    try {
+      await context.cleanupTerminalReservations?.(failureCode);
+    } catch {
+      // The original pipeline error remains authoritative. The production
+      // callback records a bounded cleanup-failure diagnostic when possible.
+    }
     throw error;
   }
 }

@@ -3,6 +3,7 @@ import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { z } from "zod";
 import { D1BriefingRepository } from "../db/d1-repository";
+import type { ReleasedRunModelBudget } from "../db/repository";
 import { CostLedger } from "../models/cost-ledger";
 import { OpenAIModelProvider } from "../models/openai-provider";
 import type { OpenAIModelProviderOptions } from "../models/openai-provider";
@@ -20,7 +21,7 @@ import {
   runEditorialPipeline,
   type PipelineRuntimeFactory,
 } from "./run-editorial-pipeline";
-import type { PipelineStep } from "./types";
+import type { PipelineContext, PipelineStep } from "./types";
 
 export const RunParamsSchema = z.object({
   editionDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
@@ -167,6 +168,54 @@ export function createD1ModelBudgetCallbacks(
   };
 }
 
+export function createD1TerminalReservationCleanup(
+  repository: Pick<
+    D1BriefingRepository,
+    "releaseRunModelBudget" | "recordTerminalModelBudgetCleanup"
+  >,
+  options: { runId: string; clock: () => Date },
+): NonNullable<PipelineContext["cleanupTerminalReservations"]> {
+  return async (failureCode) => {
+    const occurredAt = options.clock().toISOString();
+    const auditFailureCode = failureCode === "Worker exceeded memory limit."
+      ? "WORKER_MEMORY_LIMIT" as const
+      : "PIPELINE_TERMINAL_FAILURE" as const;
+    let released: ReleasedRunModelBudget;
+    try {
+      released = await repository.releaseRunModelBudget({
+        runId: options.runId,
+        releasedAt: occurredAt,
+      });
+    } catch (error) {
+      try {
+        await repository.recordTerminalModelBudgetCleanup({
+          runId: options.runId,
+          failureCode: auditFailureCode,
+          outcome: "failed",
+          occurredAt,
+          releasedReservations: 0,
+          releasedMaximumCostMicrousd: 0,
+        });
+      } catch {
+        // Preserve the original cleanup error for the pipeline's bounded catch.
+      }
+      throw error;
+    }
+    try {
+      await repository.recordTerminalModelBudgetCleanup({
+        runId: options.runId,
+        failureCode: auditFailureCode,
+        outcome: "released",
+        occurredAt,
+        ...released,
+      });
+    } catch {
+      // Reservation release succeeded. Its success audit is best effort and
+      // must not be mislabeled as a failed release.
+    }
+  };
+}
+
 export function createBudgetedPipelineRuntimeFactory(
   env: Pick<
     Env,
@@ -272,6 +321,10 @@ export class DailyBriefingWorkflow extends WorkflowEntrypoint<Env, RunParams> {
       runtime.providers,
       {
         preferences,
+        cleanupTerminalReservations: createD1TerminalReservationCleanup(
+          repository,
+          { runId, clock: () => new Date() },
+        ),
         ...(runtime.budgetPolicy === undefined
           ? {}
           : { budgetPolicy: runtime.budgetPolicy }),

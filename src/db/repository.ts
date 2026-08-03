@@ -202,6 +202,23 @@ export type ReleaseModelBudgetInput = {
   releasedAt: string;
 };
 
+export type ReleaseRunModelBudgetInput = {
+  runId: string;
+  releasedAt: string;
+};
+
+export type ReleasedRunModelBudget = {
+  releasedReservations: number;
+  releasedMaximumCostMicrousd: number;
+};
+
+export type TerminalModelBudgetCleanupAuditInput = ReleasedRunModelBudget & {
+  runId: string;
+  failureCode: "WORKER_MEMORY_LIMIT" | "PIPELINE_TERMINAL_FAILURE";
+  outcome: "released" | "failed";
+  occurredAt: string;
+};
+
 export class RepositoryValidationError extends Error {
   readonly code = "REPOSITORY_VALIDATION_FAILED";
 
@@ -695,6 +712,12 @@ export interface BriefingRepository {
   ): Promise<BudgetReservation | null>;
   reconcileModelBudget(input: ReconcileModelBudgetInput): Promise<void>;
   releaseModelBudget(input: ReleaseModelBudgetInput): Promise<void>;
+  releaseRunModelBudget(
+    input: ReleaseRunModelBudgetInput,
+  ): Promise<ReleasedRunModelBudget>;
+  recordTerminalModelBudgetCleanup(
+    input: TerminalModelBudgetCleanupAuditInput,
+  ): Promise<void>;
   recordRetentionAudit(now: string, report: RetentionReport): Promise<void>;
   pruneExpiredData(now: string): Promise<RetentionReport>;
 }
