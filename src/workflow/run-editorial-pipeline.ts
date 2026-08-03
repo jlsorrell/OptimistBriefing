@@ -66,10 +66,12 @@ import {
   RawPublicationCandidateSchema,
   RawResearchCandidateSchema,
   DiscoveryFamilySchema,
+  DiscoveryLaneDiagnosticSchema,
   type RawNewsCandidate,
   type RawPublicationCandidate,
   type RawResearchCandidate,
   type DiscoveryFamily,
+  type DiscoveryLaneDiagnostic,
   type DiscoveryObservation,
   type ResearchSourceInput,
 } from "../sources/types";
@@ -680,6 +682,9 @@ export type ProductionPipelineContextOptions = {
   preferences?: ReaderPreferences;
   providers: PipelineProviders;
   collectCandidates: () => Promise<readonly CollectedCandidate[]>;
+  loadDiscoveryDiagnostics?: () =>
+    | readonly DiscoveryLaneDiagnostic[]
+    | Promise<readonly DiscoveryLaneDiagnostic[]>;
   persistItems?: (items: readonly Item[]) => Promise<void>;
   sourceFailures?: readonly string[];
   loadSourceFailures?: PipelineContext["loadSourceFailures"];
@@ -691,7 +696,7 @@ export type ProductionPipelineContextOptions = {
     | "upsertDiscoveryObservations"
     | "getCachedResearchAssessment"
     | "putCachedResearchAssessment"
-  >;
+  > & Partial<Pick<BriefingRepository, "recordDiscoveryDiagnostics">>;
 };
 
 function defaultReaderPreferences(): ReaderPreferences {
@@ -1123,25 +1128,72 @@ function researchObservation(
   };
 }
 
+const DiscoveryDiagnosticsArraySchema = z.array(
+  DiscoveryLaneDiagnosticSchema,
+).max(64);
+
+function discoveryLaneIds(candidate: CollectedCandidate | Item): string[] {
+  return itemStringArray(candidate.metadata.discoveryLaneIds).slice(0, 64);
+}
+
 export function createProductionPipelineContext(
   options: ProductionPipelineContextOptions,
 ): PipelineContext {
   const preferences = parsedPreferences(options.preferences);
   const effectiveWeights = effectivePreferenceWeights(preferences);
   const configuredBudgets = preferredSectionBudgets(preferences);
+  let discoveryDiagnostics: DiscoveryLaneDiagnostic[] = [];
+  let discoveryDiagnosticsLoaded = false;
+  const recordDiscoveryDiagnostics = async (
+    field?: "deduplicated" | "triaged" | "assessed",
+    items: readonly Item[] = [],
+  ): Promise<void> => {
+    if (
+      options.researchRepository === undefined ||
+      options.researchRepository.recordDiscoveryDiagnostics === undefined ||
+      options.loadDiscoveryDiagnostics === undefined
+    ) {
+      return;
+    }
+    if (field === undefined || !discoveryDiagnosticsLoaded) {
+      discoveryDiagnostics = DiscoveryDiagnosticsArraySchema.parse(
+        await options.loadDiscoveryDiagnostics(),
+      );
+      discoveryDiagnosticsLoaded = true;
+    }
+    if (field !== undefined) {
+      discoveryDiagnostics = discoveryDiagnostics.map((diagnostic) => ({
+        ...diagnostic,
+        [field]: items.filter(
+          (item) =>
+            isResearchItem(item) &&
+            discoveryLaneIds(item).includes(diagnostic.laneId) &&
+            (field !== "assessed" ||
+              workflowPayload(item).assessment !== undefined),
+        ).length,
+      }));
+    }
+    await options.researchRepository.recordDiscoveryDiagnostics(
+      options.runId,
+      discoveryDiagnostics,
+    );
+  };
   return {
     editionDate: options.editionDate,
     runId: options.runId,
     store: options.store,
     now: options.now,
-    collect: async () =>
-      z.array(CollectedCandidateSchema).parse(
+    collect: async () => {
+      const collected = z.array(CollectedCandidateSchema).parse(
         (await options.collectCandidates()).map((candidate) =>
           isRawCollectedCandidate(candidate)
             ? durableCollectedCandidate(candidate)
             : candidate,
         ),
-      ),
+      );
+      await recordDiscoveryDiagnostics();
+      return collected;
+    },
     normalize: async (candidates) => {
       const normalized = candidates.flatMap((candidate) => {
         const routed = normalizedCandidate(candidate);
@@ -1212,7 +1264,9 @@ export function createProductionPipelineContext(
       const news = deduplicateItems(normalized.filter((item) =>
         !isResearchItem(item)
       )).items.map((item) => withWorkflowPayload(item, {}));
-      return [...selectedResearch, ...news];
+      const result = [...selectedResearch, ...news];
+      await recordDiscoveryDiagnostics("deduplicated", result);
+      return result;
     },
     ...(options.persistItems === undefined
       ? {}
@@ -1295,7 +1349,9 @@ export function createProductionPipelineContext(
         minimumTopicalFit:
           READER_PROFILE.researchQualityGates.minimumTopicalFit,
       });
-      return [...triaged.items, ...news];
+      const result = [...triaged.items, ...news];
+      await recordDiscoveryDiagnostics("triaged", result);
+      return result;
     },
     assess: async (items) => {
       const assessed: Item[] = [];
@@ -1359,6 +1415,7 @@ export function createProductionPipelineContext(
         }
         assessed.push(withWorkflowPayload(item, { assessment }));
       }
+      await recordDiscoveryDiagnostics("assessed", assessed);
       return assessed;
     },
     score: async (items) => items.map((candidate) => {
@@ -1385,6 +1442,7 @@ export function createProductionPipelineContext(
           novelty: null,
           seriousAttention: citationSignal,
           assessment,
+          candidate: item,
         });
         return withWorkflowPayload(item, { researchScore });
       }
@@ -1616,6 +1674,7 @@ export function createD1ProductionPipelineContext(
 ): PipelineContext {
   const now = () => new Date().toISOString();
   const sourceFailures: string[] = [];
+  const discoveryDiagnostics: DiscoveryLaneDiagnostic[] = [];
   return createProductionPipelineContext({
     editionDate,
     runId,
@@ -1624,6 +1683,11 @@ export function createD1ProductionPipelineContext(
     providers,
     ...options,
     researchRepository: store.repository,
+    loadDiscoveryDiagnostics: async () =>
+      discoveryDiagnostics.length > 0
+        ? discoveryDiagnostics
+        : (await store.repository.getWorkflowRunDetail(runId))
+            ?.discoveryDiagnostics ?? [],
     sourceFailures,
     loadSourceFailures: () => store.readCollectionSourceFailures(runId),
     persistItems: async (items) => store.repository.upsertItems(items),
@@ -1670,6 +1734,51 @@ export function createD1ProductionPipelineContext(
         researchCollector.collect({ from, to }),
         publicationCollector.collect({ from, to }),
       ]);
+      const publicationSourceIds = [
+        ...new Set([
+          ...publications.candidates.map((candidate) => candidate.sourceId),
+          ...publications.succeededSourceIds,
+          ...publications.failures.map((failure) => failure.sourceId),
+        ]),
+      ].sort((left, right) => left.localeCompare(right));
+      const publicationDiagnostics = publicationSourceIds.map((sourceId) => {
+        const candidate = publications.candidates.find(
+          (entry) => entry.sourceId === sourceId,
+        );
+        const catalogSource = sources.find((entry) => entry.id === sourceId);
+        const failure = publications.failures.find(
+          (entry) => entry.sourceId === sourceId,
+        );
+        return DiscoveryLaneDiagnosticSchema.parse({
+          laneId: sourceId,
+          sourceId,
+          discoveryFamily: candidate?.discoveryFamily ??
+            (catalogSource?.role === "blog"
+              ? "commentary"
+              : "official-publication"),
+          discovered: publications.candidates.filter(
+            (entry) => entry.sourceId === sourceId,
+          ).length,
+          deduplicated: 0,
+          triaged: 0,
+          assessed: 0,
+          outcome: failure?.kind ??
+            (publications.succeededSourceIds.includes(sourceId)
+              ? "success"
+              : "unknown"),
+        });
+      });
+      discoveryDiagnostics.splice(
+        0,
+        discoveryDiagnostics.length,
+        ...DiscoveryDiagnosticsArraySchema.parse([
+          ...(research.discoveryDiagnostics ?? []),
+          ...publicationDiagnostics,
+        ].sort((left, right) => left.laneId.localeCompare(right.laneId)).slice(
+          0,
+          64,
+        )),
+      );
       const succeededSourceIds = new Set([
         ...news.succeededSourceIds,
         ...research.succeededSourceIds,
@@ -1715,7 +1824,13 @@ export function createD1ProductionPipelineContext(
           RawNewsCandidateSchema.parse(candidate),
         ),
         ...publications.candidates.map((candidate) =>
-          RawPublicationCandidateSchema.parse(candidate),
+          RawPublicationCandidateSchema.parse({
+            ...candidate,
+            metadata: {
+              ...candidate.metadata,
+              discoveryLaneIds: [candidate.sourceId],
+            },
+          }),
         ),
       ];
     },

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import type { Item } from "../../../src/contracts/editorial";
 import {
   scoreNews,
   type NewsEvidenceSource,
@@ -20,6 +21,32 @@ function researchScoreFixture(
     novelty: 0.5,
     seriousAttention: 0.5,
     ...overrides,
+  };
+}
+
+function researchItemFixture(
+  metadata: Record<string, unknown> = {},
+): Item {
+  return {
+    id: "paper-1",
+    kind: "paper",
+    canonicalUrl: "https://arxiv.org/abs/2608.00001",
+    title: "Debate as a mechanism for scalable oversight",
+    publishedAt: "2026-08-01T12:00:00.000Z",
+    sourceRefs: [{
+      id: "arxiv",
+      name: "arXiv",
+      url: "https://arxiv.org/abs/2608.00001",
+      role: "primary",
+      retrievedAt: "2026-08-02T09:00:00.000Z",
+    }],
+    accessLevel: "abstract",
+    primaryTopic: "scalable oversight",
+    tags: ["research"],
+    normalizedText: "The paper establishes a bounded oversight result.",
+    metadata,
+    createdAt: "2026-08-02T09:00:00.000Z",
+    expiresAt: null,
   };
 }
 
@@ -131,6 +158,80 @@ describe("scoreResearch", () => {
     expect(() =>
       scoreResearch(researchScoreFixture({ topicalFit: Number.NaN })),
     ).toThrow();
+  });
+
+  it("raises only serious attention for bounded implementation and commentary context", () => {
+    const base = researchScoreFixture({
+      technicalQuality: null,
+      seriousAttention: null,
+      assessment: {
+        technicalQuality: 0.72,
+        novelty: 0.61,
+        strengths: ["A strength"],
+        limitations: ["A limitation"],
+        rationale: "Assessment rationale.",
+        accessLevel: "abstract",
+      },
+    });
+    const withoutContext = scoreResearch({
+      ...base,
+      candidate: researchItemFixture(),
+    } as ResearchScoreInput & { candidate: Item });
+    const withContext = scoreResearch({
+      ...base,
+      candidate: researchItemFixture({
+        attachedCommentary: [
+          {
+            sourceId: "papers-with-code-co",
+            role: "blog",
+            title: "Implementation and review",
+            url: "https://paperswithcode.co/paper/2608.00001",
+            retrievedAt: "2026-08-02T09:00:00.000Z",
+            accessLevel: "secondary",
+            excerpt: "This review critiques the result and links an implementation.",
+            relatedPaperIds: ["arXiv:2608.00001"],
+            implementationAvailable: true,
+          },
+        ],
+      }),
+    } as ResearchScoreInput & { candidate: Item });
+
+    expect(withContext.technicalQuality).toBe(withoutContext.technicalQuality);
+    expect(withContext.seriousAttention).toBeGreaterThan(
+      withoutContext.seriousAttention,
+    );
+    expect(withContext.seriousAttention).toBeLessThanOrEqual(1);
+    expect(withContext.selectionReasons).toEqual(
+      expect.arrayContaining([
+        "Independent implementation located.",
+        "Substantive expert commentary located.",
+      ]),
+    );
+  });
+
+  it("does not treat votes or comment counts as research quality signals", () => {
+    const base = researchScoreFixture({
+      technicalQuality: null,
+      seriousAttention: null,
+      assessment: {
+        technicalQuality: 0.72,
+        novelty: 0.61,
+        strengths: ["A strength"],
+        limitations: ["A limitation"],
+        rationale: "Assessment rationale.",
+        accessLevel: "abstract",
+      },
+    });
+    const withoutPopularity = scoreResearch({
+      ...base,
+      candidate: researchItemFixture(),
+    } as ResearchScoreInput & { candidate: Item });
+    const withPopularity = scoreResearch({
+      ...base,
+      candidate: researchItemFixture({ voteCount: 50_000, commentCount: 4_000 }),
+    } as ResearchScoreInput & { candidate: Item });
+
+    expect(withPopularity).toEqual(withoutPopularity);
   });
 });
 

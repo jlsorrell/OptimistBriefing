@@ -1,8 +1,10 @@
 import { z } from "zod";
 
 import {
+  ItemSchema,
   ItemScoreSchema,
   ResearchAssessmentSchema,
+  type Item,
   type ItemScore,
   type ResearchAssessment,
 } from "../contracts/editorial";
@@ -23,6 +25,7 @@ const ResearchScoreInputSchema = z.object({
   novelty: z.number().finite().nullable(),
   seriousAttention: z.number().finite().nullable(),
   assessment: ResearchAssessmentSchema.nullable().optional(),
+  candidate: ItemSchema.optional(),
 });
 
 export type ResearchScoreInput = {
@@ -33,7 +36,64 @@ export type ResearchScoreInput = {
   novelty: number | null;
   seriousAttention: number | null;
   assessment?: ResearchAssessment | null;
+  candidate?: Item;
 };
+
+export type ResearchContextSignals = {
+  implementationAvailability: boolean;
+  substantiveCommentary: boolean;
+  seriousAttention: number;
+};
+
+const MAX_ATTACHED_COMMENTARY_SIGNALS = 16;
+const CONTEXT_ATTENTION_INCREMENT = 0.15;
+
+function normalizedContextText(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function attachedCommentary(candidate: Item): Record<string, unknown>[] {
+  if (!Array.isArray(candidate.metadata.attachedCommentary)) return [];
+  return candidate.metadata.attachedCommentary
+    .slice(0, MAX_ATTACHED_COMMENTARY_SIGNALS)
+    .filter(
+      (entry): entry is Record<string, unknown> =>
+        entry !== null && typeof entry === "object",
+    );
+}
+
+export function deriveResearchContextSignals(
+  candidate: Item,
+): ResearchContextSignals {
+  const parsed = ItemSchema.parse(candidate);
+  const commentary = attachedCommentary(parsed);
+  const implementationAvailability =
+    parsed.metadata.implementationAvailable === true ||
+    commentary.some((entry) => entry.implementationAvailable === true);
+  const substantiveCommentary = commentary.some((entry) => {
+    if (typeof entry.excerpt !== "string") return false;
+    const excerpt = normalizedContextText(entry.excerpt);
+    if (excerpt.length === 0) return false;
+    const title = typeof entry.title === "string"
+      ? normalizedContextText(entry.title)
+      : "";
+    return entry.accessLevel !== "metadata" || excerpt !== title;
+  });
+  const contextCount = Number(implementationAvailability) +
+    Number(substantiveCommentary);
+  return {
+    implementationAvailability,
+    substantiveCommentary,
+    seriousAttention: Math.min(
+      1,
+      0.5 + contextCount * CONTEXT_ATTENTION_INCREMENT,
+    ),
+  };
+}
 
 function normalized(value: number): number {
   return Math.max(0, Math.min(1, value));
@@ -47,6 +107,13 @@ function reason(label: string, value: number): string {
 
 export function scoreResearch(input: ResearchScoreInput): ItemScore {
   const parsed = ResearchScoreInputSchema.parse(input);
+  const contextSignals = parsed.candidate === undefined
+    ? {
+        implementationAvailability: false,
+        substantiveCommentary: false,
+        seriousAttention: 0.5,
+      }
+    : deriveResearchContextSignals(parsed.candidate);
   const topicalFit = normalized(parsed.topicalFit);
   const technicalQuality = normalized(
     parsed.technicalQuality ??
@@ -57,7 +124,15 @@ export function scoreResearch(input: ResearchScoreInput): ItemScore {
   const novelty = normalized(
     parsed.novelty ?? parsed.assessment?.novelty ?? 0.5,
   );
-  const seriousAttention = normalized(parsed.seriousAttention ?? 0.5);
+  const seriousAttention = normalized(
+    contextSignals.implementationAvailability ||
+        contextSignals.substantiveCommentary
+      ? Math.max(
+          parsed.seriousAttention ?? 0.5,
+          contextSignals.seriousAttention,
+        )
+      : parsed.seriousAttention ?? 0.5,
+  );
   const total = Number(
     (
       topicalFit * RESEARCH_SCORE_WEIGHTS.topicalFit +
@@ -82,6 +157,12 @@ export function scoreResearch(input: ResearchScoreInput): ItemScore {
       reason("research signal", researchSignal),
       reason("novelty", novelty),
       reason("serious attention", seriousAttention),
+      ...(contextSignals.implementationAvailability
+        ? ["Independent implementation located."]
+        : []),
+      ...(contextSignals.substantiveCommentary
+        ? ["Substantive expert commentary located."]
+        : []),
     ],
   });
 }

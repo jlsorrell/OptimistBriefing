@@ -31,6 +31,7 @@ export type AttachedResearchCommentary = {
   accessLevel: AccessLevel;
   excerpt: string;
   relatedPaperIds: string[];
+  implementationAvailable?: true;
 };
 
 export type ResearchIdentityMergeReason =
@@ -258,6 +259,9 @@ function attachedCommentary(
     accessLevel: commentary.accessLevel,
     excerpt,
     relatedPaperIds,
+    ...(commentary.metadata.implementationAvailable === true
+      ? { implementationAvailable: true as const }
+      : {}),
   }));
 }
 
@@ -287,7 +291,19 @@ function existingAttachedCommentary(value: unknown): AttachedResearchCommentary[
         candidate.accessLevel === "secondary" ||
         candidate.accessLevel === "abstract" ||
         candidate.accessLevel === "full_text")
-      ? [candidate as AttachedResearchCommentary]
+      ? [{
+          sourceId: candidate.sourceId,
+          role: "blog",
+          title: candidate.title,
+          url: candidate.url,
+          retrievedAt: candidate.retrievedAt,
+          accessLevel: candidate.accessLevel,
+          excerpt: candidate.excerpt,
+          relatedPaperIds: [...candidate.relatedPaperIds],
+          ...(candidate.implementationAvailable === true
+            ? { implementationAvailable: true as const }
+            : {}),
+        }]
       : [];
   });
 }

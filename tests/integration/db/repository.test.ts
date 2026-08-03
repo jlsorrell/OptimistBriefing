@@ -1430,6 +1430,79 @@ describe("D1BriefingRepository", () => {
     });
   });
 
+  it("upserts bounded sanitized discovery diagnostics into workflow detail", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    await env.DB.prepare(
+      `INSERT INTO workflow_runs (
+        id, edition_date, status, current_step, retryable, attempt_count,
+        failure_code, estimated_cost_usd, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      "run-diagnostics",
+      "2026-07-30",
+      "running",
+      "assess",
+      0,
+      1,
+      null,
+      0,
+      "2026-07-30T09:00:00.000Z",
+      "2026-07-30T09:01:00.000Z",
+    ).run();
+    const diagnostic = {
+      laneId: "arxiv:oversight-governance",
+      sourceId: "arxiv",
+      discoveryFamily: "arxiv" as const,
+      discovered: 3,
+      deduplicated: 2,
+      triaged: 1,
+      assessed: 1,
+      outcome: "success" as const,
+    };
+
+    await repo.recordDiscoveryDiagnostics("run-diagnostics", [diagnostic]);
+    await repo.recordDiscoveryDiagnostics("run-diagnostics", [{
+      ...diagnostic,
+      discovered: 4,
+    }]);
+
+    const events = await env.DB.prepare(
+      `SELECT id, event_type, event_json
+       FROM audit_events
+       WHERE run_id = ? AND event_type = ?`,
+    ).bind("run-diagnostics", "discovery_diagnostics").all<{
+      id: string;
+      event_type: string;
+      event_json: string;
+    }>();
+    expect(events.results).toEqual([{
+      id: "discovery_diagnostics:run-diagnostics",
+      event_type: "discovery_diagnostics",
+      event_json: JSON.stringify([{ ...diagnostic, discovered: 4 }]),
+    }]);
+    expect((await repo.getWorkflowRunDetail("run-diagnostics"))
+      ?.discoveryDiagnostics).toEqual([{ ...diagnostic, discovered: 4 }]);
+
+    await expect(repo.recordDiscoveryDiagnostics(
+      "run-diagnostics",
+      Array.from({ length: 65 }, (_, index) => ({
+        ...diagnostic,
+        laneId: `arxiv:${index}`,
+      })),
+    )).rejects.toBeInstanceOf(RepositoryValidationError);
+    await expect(repo.recordDiscoveryDiagnostics("run-diagnostics", [{
+      ...diagnostic,
+      laneId: "https://provider.example/private?token=do-not-store",
+      outcome: "provider body do-not-store",
+      providerError: "do-not-store",
+    } as never])).rejects.toBeInstanceOf(RepositoryValidationError);
+    expect(JSON.stringify(await env.DB.prepare(
+      "SELECT event_json FROM audit_events WHERE id = ?",
+    ).bind("discovery_diagnostics:run-diagnostics").first())).not.toContain(
+      "do-not-store",
+    );
+  });
+
   it("rejects malformed stored workflow booleans instead of normalizing them", async () => {
     const repo = new D1BriefingRepository(env.DB);
     await env.DB.prepare("PRAGMA ignore_check_constraints = ON").run();

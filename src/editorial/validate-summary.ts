@@ -252,6 +252,12 @@ const SourcePacketExcerptSchema = z
 const SourcePacketSourceSchema = z
   .object({
     sourceId: SafeSourceIdSchema,
+    sourceName: safeSingleLine(200),
+    evidenceKind: z.enum([
+      "primary-research",
+      "commentary",
+      "news-evidence",
+    ]),
     role: SourceRefSchema.shape.role,
     title: safeSingleLine(500),
     url: SafeUrlSchema,
@@ -321,6 +327,8 @@ export function serializeSourcePacket(packet: SourcePacket): string {
     .map((source) =>
       [
         `source_id: ${source.sourceId}`,
+        `source_name: ${source.sourceName}`,
+        `evidence_kind: ${source.evidenceKind}`,
         `role: ${source.role}`,
         `title: ${source.title}`,
         `url: ${source.url}`,
@@ -551,6 +559,37 @@ function extractivelySupports(
   );
 }
 
+const COMMENTARY_ATTRIBUTION_VERB =
+  /\b(?:argues|notes|suggests|critiques|interprets)\b/u;
+
+function commentarySourceIsAttributed(
+  claimText: string,
+  source: PacketSource,
+): boolean {
+  const normalizedClaim = normalizedText(claimText);
+  if (!COMMENTARY_ATTRIBUTION_VERB.test(normalizedClaim)) return false;
+  return [source.sourceName, source.title]
+    .map(normalizedText)
+    .some((name) => name.length > 0 && normalizedClaim.includes(name));
+}
+
+function hasResearchClaimAuthority(
+  claimText: string,
+  citedSources: readonly PacketSource[],
+): boolean {
+  if (
+    citedSources.some((source) => source.evidenceKind === "primary-research")
+  ) {
+    return true;
+  }
+  return citedSources.length > 0 &&
+    citedSources.every(
+      (source) =>
+        source.evidenceKind === "commentary" &&
+        commentarySourceIsAttributed(claimText, source),
+    );
+}
+
 export function validateSummary(
   summary: unknown,
   packet: SourcePacket,
@@ -616,6 +655,13 @@ export function validateSummary(
       )
     ) {
       errors.push(`UNGROUNDED_CLAIM:${claimIndex}`);
+    }
+    if (
+      (packet.itemKind === "paper" || packet.itemKind === "blog") &&
+      citedSources.length > 0 &&
+      !hasResearchClaimAuthority(claim.text, citedSources)
+    ) {
+      errors.push(`PRIMARY_RESEARCH_SOURCE_REQUIRED:${claimIndex}`);
     }
     if (
       (impliesFullTextAccess(claim.text) ||

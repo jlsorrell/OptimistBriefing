@@ -1220,6 +1220,141 @@ describe("manual editorial run", () => {
     );
   });
 
+  it("updates real-lane diagnostics through assessment and applies research context scoring", async () => {
+    const diagnosticWrites: Array<readonly unknown[]> = [];
+    const initialDiagnostics = [
+      {
+        laneId: "arxiv:one",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv" as const,
+        discovered: 2,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "success" as const,
+      },
+      {
+        laneId: "arxiv:zero",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv" as const,
+        discovered: 0,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "success" as const,
+      },
+    ];
+    const repository = {
+      getDiscoveryObservations: async () => [],
+      upsertDiscoveryObservations: async () => undefined,
+      getCachedResearchAssessment: async () => null,
+      putCachedResearchAssessment: async () => undefined,
+      recordDiscoveryDiagnostics: async (
+        _runId: string,
+        diagnostics: readonly unknown[],
+      ) => {
+        diagnosticWrites.push(structuredClone(diagnostics));
+      },
+    };
+    const assessment = {
+      technicalQuality: 0.9,
+      novelty: 0.8,
+      strengths: ["The abstract describes a concrete method."],
+      limitations: ["Only abstract evidence was supplied."],
+      rationale: "The available abstract supports a strong assessment.",
+      accessLevel: "abstract" as const,
+    };
+    const candidate = {
+      ...rawResearchCandidate(),
+      metadata: {
+        discoveryFamily: "arxiv",
+        discoveryLaneIds: ["arxiv:one"],
+        implementationAvailable: true,
+      },
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-20",
+      runId: "run-discovery-diagnostics",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider({
+          embeddingBatches: [[
+            [1, 0],
+            [1, 0],
+            [1, 0],
+            [1, 0],
+          ]],
+        }),
+        assessment: new FakeModelProvider({
+          generatedObjects: [assessment],
+        }),
+      },
+      collectCandidates: async () => [candidate],
+      loadDiscoveryDiagnostics: () => initialDiagnostics,
+      researchRepository: repository,
+    });
+
+    const collected = await context.collect();
+    const normalized = await context.normalize(collected);
+    const enriched = await context.enrich(normalized);
+    const triaged = await context.prefilter(enriched);
+    const assessed = await context.assess(triaged);
+    const scored = await context.score(assessed);
+
+    expect(diagnosticWrites).toEqual([
+      initialDiagnostics,
+      [
+        { ...initialDiagnostics[0], deduplicated: 1 },
+        initialDiagnostics[1],
+      ],
+      [
+        { ...initialDiagnostics[0], deduplicated: 1, triaged: 1 },
+        initialDiagnostics[1],
+      ],
+      [
+        {
+          ...initialDiagnostics[0],
+          deduplicated: 1,
+          triaged: 1,
+          assessed: 1,
+        },
+        initialDiagnostics[1],
+      ],
+    ]);
+    expect(
+      (scored[0]?.metadata.workflow as {
+        researchScore?: { selectionReasons: string[] };
+      }).researchScore?.selectionReasons,
+    ).toContain("Independent implementation located.");
+
+    const resumedWrites: Array<readonly unknown[]> = [];
+    const resumeContext = createProductionPipelineContext({
+      editionDate: "2033-01-20",
+      runId: "run-discovery-diagnostics",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+      loadDiscoveryDiagnostics: async () => initialDiagnostics,
+      researchRepository: {
+        ...repository,
+        recordDiscoveryDiagnostics: async (
+          _runId: string,
+          diagnostics: readonly unknown[],
+        ) => {
+          resumedWrites.push(structuredClone(diagnostics));
+        },
+      },
+    });
+
+    await resumeContext.normalize(collected);
+    expect(resumedWrites).toEqual([diagnosticWrites[1]]);
+  });
+
   it("applies topic and source weights to relevance without disabling candidates", async () => {
     // This fails if ranking ignores either configured weight, or treats zero as
     // source authorization instead of a relevance signal.

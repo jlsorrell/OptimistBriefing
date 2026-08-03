@@ -65,6 +65,11 @@ function assessmentPacket(
     sources: [
       {
         sourceId: candidate.sourceId,
+        sourceName: candidate.sourceName,
+        evidenceKind:
+          candidate.kind === "blog" || candidate.sourceRole === "blog"
+            ? "commentary"
+            : "primary-research",
         role: candidate.sourceRole,
         title: candidate.title,
         url: candidate.originalUrl,

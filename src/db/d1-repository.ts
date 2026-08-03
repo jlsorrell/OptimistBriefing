@@ -30,6 +30,7 @@ import {
 import {
   approvedBaselinePreferences,
   CreateSourceInputSchema,
+  DiscoveryDiagnosticsSchema,
   FeedbackAdjustmentSchema,
   FeedbackInputSchema,
   PreferenceUpdateInputSchema,
@@ -69,6 +70,7 @@ import {
   DiscoveryObservationSchema,
   type CollectionFailureKind,
   type DiscoveryObservation,
+  type DiscoveryLaneDiagnostic,
 } from "../sources/types";
 import { PIPELINE_STEPS } from "../workflow/types";
 
@@ -2023,6 +2025,45 @@ export class D1BriefingRepository implements BriefingRepository {
     return row === null ? null : workflowRunFromRow(row);
   }
 
+  async recordDiscoveryDiagnostics(
+    runId: string,
+    diagnostics: readonly DiscoveryLaneDiagnostic[],
+  ): Promise<void> {
+    const validRunId = validated(
+      NonemptyIdSchema,
+      runId,
+      "Invalid discovery diagnostics run ID",
+    );
+    const validDiagnostics = validated(
+      DiscoveryDiagnosticsSchema,
+      diagnostics,
+      "Invalid discovery diagnostics",
+    );
+    const result = await this.db.prepare(
+      `INSERT INTO audit_events (
+        id, run_id, event_type, event_json, created_at
+      ) SELECT ?, ?, ?, ?, ?
+      WHERE EXISTS (SELECT 1 FROM workflow_runs WHERE id = ?)
+      ON CONFLICT(id) DO UPDATE SET
+        event_json = excluded.event_json,
+        created_at = excluded.created_at
+      WHERE audit_events.run_id = excluded.run_id
+        AND audit_events.event_type = excluded.event_type`,
+    ).bind(
+      `discovery_diagnostics:${validRunId}`,
+      validRunId,
+      "discovery_diagnostics",
+      JSON.stringify(validDiagnostics),
+      new Date().toISOString(),
+      validRunId,
+    ).run();
+    if ((result.meta.changes ?? 0) !== 1) {
+      throw new RepositoryValidationError(
+        "Discovery diagnostics require an existing workflow run",
+      );
+    }
+  }
+
   async getWorkflowRunDetail(
     runId: string,
   ): Promise<WorkflowRunDetail | null> {
@@ -2035,7 +2076,11 @@ export class D1BriefingRepository implements BriefingRepository {
         `SELECT event_type, event_json, created_at
         FROM audit_events
         WHERE run_id = ?
-          AND event_type IN ('workflow_checkpoint', 'workflow_attempt_failed')
+          AND event_type IN (
+            'workflow_checkpoint',
+            'workflow_attempt_failed',
+            'discovery_diagnostics'
+          )
         ORDER BY created_at, id`,
       )
       .bind(run.id)
@@ -2055,11 +2100,19 @@ export class D1BriefingRepository implements BriefingRepository {
       reason: string;
     }> = [];
     const rejectedSummaryReasons: string[] = [];
+    let discoveryDiagnostics: DiscoveryLaneDiagnostic[] = [];
     for (const event of events.results) {
       let parsed: unknown;
       try {
         parsed = JSON.parse(event.event_json);
       } catch {
+        continue;
+      }
+      if (event.event_type === "discovery_diagnostics") {
+        const diagnostics = DiscoveryDiagnosticsSchema.safeParse(parsed);
+        if (diagnostics.success) {
+          discoveryDiagnostics = diagnostics.data;
+        }
         continue;
       }
       if (event.event_type === "workflow_attempt_failed") {
@@ -2152,6 +2205,7 @@ export class D1BriefingRepository implements BriefingRepository {
             publicLabel(failure, "REDACTED_SOURCE"),
           ),
         ),
+        discoveryDiagnostics,
         rejectedSummaryReasons: uniqueStrings(
           rejectedSummaryReasons.map((reason) =>
             publicLabel(reason, "REDACTED_REJECTION"),
@@ -2217,7 +2271,8 @@ export class D1BriefingRepository implements BriefingRepository {
               'workflow_attempt',
               'workflow_attempt_failed',
               'preference_snapshot',
-              'collection_source_failures'
+              'collection_source_failures',
+              'discovery_diagnostics'
             )`,
         )
         .bind(runCutoff),
@@ -2269,7 +2324,8 @@ export class D1BriefingRepository implements BriefingRepository {
               'workflow_attempt',
               'workflow_attempt_failed',
               'preference_snapshot',
-              'collection_source_failures'
+              'collection_source_failures',
+              'discovery_diagnostics'
             )`,
         )
         .bind(runCutoff),

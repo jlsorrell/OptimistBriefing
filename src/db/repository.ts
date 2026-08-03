@@ -22,8 +22,10 @@ import {
 } from "../contracts/editorial";
 import type {
   CollectionFailureKind,
+  DiscoveryLaneDiagnostic,
   DiscoveryObservation,
 } from "../sources/types";
+import { DiscoveryLaneDiagnosticSchema } from "../sources/types";
 import type { BudgetReservation } from "../models/budget-gate";
 
 export type EditionListInput = {
@@ -162,6 +164,7 @@ export type WorkflowRunDetail = WorkflowRun & {
   checkpoints: readonly WorkflowCheckpointStatus[];
   failures: readonly WorkflowFailure[];
   sourceFailures: readonly string[];
+  discoveryDiagnostics: readonly DiscoveryLaneDiagnostic[];
   rejectedSummaryReasons: readonly string[];
   publishedAt: string | null;
   estimatedMonthlyCostUsd: number;
@@ -588,10 +591,19 @@ export const WorkflowRunDetailSchema = WorkflowRunSchema.extend({
     reason: z.string().min(1),
   }).strict()),
   sourceFailures: z.array(z.string().min(1)),
+  discoveryDiagnostics: z.array(
+    DiscoveryLaneDiagnosticSchema.extend({
+      laneId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/),
+      sourceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/),
+    }).strict(),
+  ).max(64),
   rejectedSummaryReasons: z.array(z.string().min(1)),
   publishedAt: z.string().datetime().nullable(),
   estimatedMonthlyCostUsd: z.number().finite().nonnegative(),
 }).strict();
+
+export const DiscoveryDiagnosticsSchema =
+  WorkflowRunDetailSchema.shape.discoveryDiagnostics;
 
 export interface BriefingRepository {
   upsertDiscoveryObservations(
@@ -659,6 +671,10 @@ export interface BriefingRepository {
   listWorkflowRuns(): Promise<readonly WorkflowRun[]>;
   getWorkflowRun(runId: string): Promise<WorkflowRun | null>;
   getWorkflowRunDetail(runId: string): Promise<WorkflowRunDetail | null>;
+  recordDiscoveryDiagnostics(
+    runId: string,
+    diagnostics: readonly DiscoveryLaneDiagnostic[],
+  ): Promise<void>;
   recordModelUsage(runId: string, usage: ModelUsageRecord): Promise<void>;
   listMonthlyModelUsage(monthStart: string): Promise<readonly ModelUsageRecord[]>;
   reserveModelBudget(

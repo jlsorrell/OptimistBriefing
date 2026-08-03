@@ -143,6 +143,32 @@ describe("consolidateResearchCandidates", () => {
       .toHaveLength(2);
   });
 
+  it("preserves contributing discovery lanes through cross-source identity merges", () => {
+    const arxiv = normalized("arxiv", {
+      externalIds: ["arXiv:2608.00001"],
+      metadata: {
+        discoveryFamily: "arxiv",
+        discoveryLaneIds: ["arxiv:oversight-governance"],
+      },
+    });
+    const openAlex = normalized("openalex", {
+      externalId: "OpenAlex:W123",
+      externalIds: ["OpenAlex:W123", "arXiv:2608.00001"],
+      metadata: {
+        discoveryFamily: "bibliographic",
+        discoveryLaneIds: ["openalex:text:oversight"],
+      },
+    });
+
+    expect(
+      consolidateResearchCandidates([openAlex, arxiv]).papers[0]?.metadata
+        .discoveryLaneIds,
+    ).toEqual([
+      "arxiv:oversight-governance",
+      "openalex:text:oversight",
+    ]);
+  });
+
   it("attaches explicit commentary without replacing paper text or access", () => {
     const paper = normalized("arxiv", {
       externalId: "arXiv:2608.00001",
@@ -162,7 +188,11 @@ describe("consolidateResearchCandidates", () => {
       abstract: null,
       content: "This commentary critiques the result and its assumptions.",
       relatedPaperIds: ["https://arxiv.org/abs/2608.00001v2"],
-      metadata: { discoveryFamily: "commentary" },
+      metadata: {
+        discoveryFamily: "commentary",
+        implementationAvailable: true,
+        leaderboardRank: 1,
+      },
     });
 
     const consolidated = consolidateResearchCandidates([commentary, paper]);
@@ -182,9 +212,15 @@ describe("consolidateResearchCandidates", () => {
           accessLevel: "full_text",
           excerpt: "This commentary critiques the result and its assumptions.",
           relatedPaperIds: ["arXiv:2608.00001"],
+          implementationAvailable: true,
         })],
       },
     });
+    expect(consolidated.papers[0]?.metadata.attachedCommentary).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ leaderboardRank: 1 }),
+      ]),
+    );
     expect(consolidated.papers[0]?.sourceRefs).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ id: "arxiv", role: "primary" }),

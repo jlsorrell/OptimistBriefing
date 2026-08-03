@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import type { StructuredSummary } from "../../../src/contracts/editorial";
+import type {
+  Item,
+  StructuredSummary,
+} from "../../../src/contracts/editorial";
 import {
   SourcePacketSchema,
   validateSummary,
   type SourcePacket,
 } from "../../../src/editorial/validate-summary";
+import { sourcePacketForItem } from "../../../src/workflow/source-packet";
 
 const GROUNDED_TEXT = [
   "A measured outcome improved.",
@@ -18,27 +22,42 @@ function sourcePacketFixture(
   overrides: {
     accessLevel?: SourcePacket["sources"][number]["accessLevel"];
     itemKind?: SourcePacket["itemKind"];
-    sources?: SourcePacket["sources"];
+    sources?: Array<
+      Omit<
+        SourcePacket["sources"][number],
+        "sourceName" | "evidenceKind"
+      > & Partial<Pick<
+        SourcePacket["sources"][number],
+        "sourceName" | "evidenceKind"
+      >>
+    >;
   } = {},
 ): SourcePacket {
+  const sources = overrides.sources ?? [
+    {
+      sourceId: "source-1",
+      sourceName: "Example News",
+      evidenceKind: "news-evidence" as const,
+      role: "reporting" as const,
+      title: "A reported development",
+      url: "https://example.com/report",
+      retrievedAt: "2026-07-29T09:00:00.000Z",
+      accessLevel: overrides.accessLevel ?? "full_text",
+      excerpts: [
+        {
+          number: 1,
+          text: GROUNDED_TEXT,
+        },
+      ],
+    },
+  ];
   return {
     itemKind: overrides.itemKind ?? "article",
-    sources: overrides.sources ?? [
-      {
-        sourceId: "source-1",
-        role: "reporting",
-        title: "A reported development",
-        url: "https://example.com/report",
-        retrievedAt: "2026-07-29T09:00:00.000Z",
-        accessLevel: overrides.accessLevel ?? "full_text",
-        excerpts: [
-          {
-            number: 1,
-            text: GROUNDED_TEXT,
-          },
-        ],
-      },
-    ],
+    sources: sources.map((source) => ({
+      ...source,
+      sourceName: source.sourceName ?? source.title,
+      evidenceKind: source.evidenceKind ?? "news-evidence",
+    })),
   };
 }
 
@@ -90,7 +109,104 @@ function summaryFixture(
   };
 }
 
+function researchPacket(commentaryClaim: string): SourcePacket {
+  return {
+    itemKind: "paper",
+    sources: [
+      {
+        sourceId: "source-1",
+        sourceName: "arXiv",
+        evidenceKind: "primary-research",
+        role: "primary",
+        title: "A measured research result",
+        url: "https://arxiv.org/abs/2608.00001",
+        retrievedAt: "2026-08-02T09:00:00.000Z",
+        accessLevel: "abstract",
+        excerpts: [{ number: 1, text: GROUNDED_TEXT }],
+      },
+      {
+        sourceId: "commentary-1",
+        sourceName: "Alignment Forum",
+        evidenceKind: "commentary",
+        role: "blog",
+        title: "A review of the measured result",
+        url: "https://www.alignmentforum.org/posts/measured-result",
+        retrievedAt: "2026-08-02T09:00:00.000Z",
+        accessLevel: "secondary",
+        excerpts: [{ number: 1, text: commentaryClaim }],
+      },
+    ],
+  } as SourcePacket;
+}
+
 describe("validateSummary", () => {
+  it("requires primary research authority for an unattributed paper-result claim", () => {
+    const claim = "The paper reports a twenty percent improvement.";
+    const result = validateSummary(
+      summaryFixture({
+        accessLevel: "secondary",
+        claims: [{
+          text: claim,
+          sourceIds: ["commentary-1"],
+          evidenceExcerpt: claim,
+        }],
+      }),
+      researchPacket(claim),
+    );
+
+    expect(result).toMatchObject({
+      ok: false,
+      errors: expect.arrayContaining([
+        "PRIMARY_RESEARCH_SOURCE_REQUIRED:0",
+      ]),
+    });
+  });
+
+  it.each([
+    "argues",
+    "notes",
+    "suggests",
+    "critiques",
+    "interprets",
+  ])("allows commentary-only attribution using the verb %s", (verb) => {
+    const claim =
+      `Alignment Forum ${verb} that the paper's assumptions are fragile.`;
+    const result = validateSummary(
+      summaryFixture({
+        accessLevel: "secondary",
+        claims: [{
+          text: claim,
+          sourceIds: ["commentary-1"],
+          evidenceExcerpt: claim,
+        }],
+      }),
+      researchPacket(claim),
+    );
+
+    expect(result.ok).toBe(true);
+  });
+
+  it.each([
+    "A review reports that the paper's assumptions are fragile.",
+    "The source critiques the paper's assumptions.",
+  ])("rejects commentary-only prose without exact source attribution: %s", (claim) => {
+    const result = validateSummary(
+      summaryFixture({
+        accessLevel: "secondary",
+        claims: [{
+          text: claim,
+          sourceIds: ["commentary-1"],
+          evidenceExcerpt: claim,
+        }],
+      }),
+      researchPacket(claim),
+    );
+
+    expect(result.errors).toContain(
+      "PRIMARY_RESEARCH_SOURCE_REQUIRED:0",
+    );
+  });
+
   it("rejects a claim whose source is absent from the supplied packet", () => {
     const result = validateSummary(
       summaryFixture({
@@ -809,6 +925,121 @@ describe("validateSummary", () => {
 
 describe("SourcePacketSchema", () => {
   const source = sourcePacketFixture().sources[0]!;
+
+  it("requires a bounded source name and exact evidence kind", () => {
+    const attributed = {
+      ...source,
+      sourceName: "arXiv",
+      evidenceKind: "primary-research",
+    };
+
+    expect(SourcePacketSchema.safeParse({
+      itemKind: "paper",
+      sources: [attributed],
+    }).success).toBe(true);
+    expect(SourcePacketSchema.safeParse({
+      itemKind: "paper",
+      sources: [{ ...attributed, sourceName: undefined }],
+    }).success).toBe(false);
+    expect(SourcePacketSchema.safeParse({
+      itemKind: "paper",
+      sources: [{ ...attributed, evidenceKind: "search-result" }],
+    }).success).toBe(false);
+  });
+
+  it("keeps primary and attached commentary excerpts separately attributed", () => {
+    const item: Item = {
+      id: "paper-1",
+      kind: "paper",
+      canonicalUrl: "https://arxiv.org/abs/2608.00001",
+      title: "A measured research result",
+      publishedAt: "2026-08-01T12:00:00.000Z",
+      sourceRefs: [
+        {
+          id: "arxiv",
+          name: "arXiv",
+          url: "https://arxiv.org/abs/2608.00001",
+          role: "primary",
+          retrievedAt: "2026-08-02T09:00:00.000Z",
+        },
+        {
+          id: "alignment-forum",
+          name: "Alignment Forum",
+          url: "https://www.alignmentforum.org/posts/measured-result",
+          role: "blog",
+          retrievedAt: "2026-08-02T09:00:00.000Z",
+        },
+      ],
+      accessLevel: "abstract",
+      primaryTopic: "oversight",
+      tags: ["research"],
+      normalizedText: "Primary abstract evidence.",
+      metadata: {
+        primaryResearchSourceIds: ["arxiv"],
+        attachedCommentary: [{
+          sourceId: "alignment-forum",
+          role: "blog",
+          title: "A review of the measured result",
+          url: "https://www.alignmentforum.org/posts/measured-result",
+          retrievedAt: "2026-08-02T09:00:00.000Z",
+          accessLevel: "secondary",
+          excerpt: "Alignment Forum critiques an assumption in the result.",
+          relatedPaperIds: ["arXiv:2608.00001"],
+        }],
+      },
+      createdAt: "2026-08-02T09:00:00.000Z",
+      expiresAt: null,
+    };
+
+    expect(sourcePacketForItem(item).sources).toEqual([
+      expect.objectContaining({
+        sourceId: "alignment-forum",
+        sourceName: "Alignment Forum",
+        evidenceKind: "commentary",
+        title: "A review of the measured result",
+        excerpts: [{
+          number: 1,
+          text: "Alignment Forum critiques an assumption in the result.",
+        }],
+      }),
+      expect.objectContaining({
+        sourceId: "arxiv",
+        sourceName: "arXiv",
+        evidenceKind: "primary-research",
+        title: "A measured research result",
+        excerpts: [{ number: 1, text: "Primary abstract evidence." }],
+      }),
+    ]);
+  });
+
+  it("labels existing article packets as news evidence", () => {
+    const item: Item = {
+      id: "article-1",
+      kind: "article",
+      canonicalUrl: "https://example.com/report",
+      title: "A reported development",
+      publishedAt: "2026-08-01T12:00:00.000Z",
+      sourceRefs: [{
+        id: "source-1",
+        name: "Example News",
+        url: "https://example.com/report",
+        role: "reporting",
+        retrievedAt: "2026-08-02T09:00:00.000Z",
+      }],
+      accessLevel: "full_text",
+      primaryTopic: "technology",
+      tags: ["technology"],
+      normalizedText: GROUNDED_TEXT,
+      metadata: {},
+      createdAt: "2026-08-02T09:00:00.000Z",
+      expiresAt: null,
+    };
+
+    expect(sourcePacketForItem(item).sources[0]).toMatchObject({
+      sourceName: "Example News",
+      evidenceKind: "news-evidence",
+    });
+  });
 
   it("rejects duplicate source IDs and excerpt numbers", () => {
     expect(

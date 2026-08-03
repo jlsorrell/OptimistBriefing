@@ -226,6 +226,7 @@ export type CollectionBatch<T> = {
   candidates: readonly T[];
   succeededSourceIds: readonly string[];
   failures: readonly CollectionFailure[];
+  discoveryDiagnostics?: readonly DiscoveryLaneDiagnostic[];
 };
 export type ResearchSourceRecord = z.infer<
   typeof ResearchSourceRecordSchema

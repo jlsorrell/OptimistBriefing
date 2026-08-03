@@ -3,11 +3,15 @@ import {
 } from "./collection-settlement";
 import {
   CollectionWindowSchema,
+  DiscoveryFamilySchema,
+  DiscoveryLaneDiagnosticSchema,
   RawItemSchema,
   RawResearchCandidateSchema,
   type CollectionBatch,
   type CollectionFailure,
   type CollectionWindow,
+  type DiscoveryFamily,
+  type DiscoveryLaneDiagnostic,
   type RawItem,
   type RawResearchCandidate,
   type ResearchEnricher,
@@ -21,6 +25,7 @@ import {
 } from "./identifiers";
 
 const PAPER_LANE_LIMIT = 100;
+const DISCOVERY_DIAGNOSTIC_LIMIT = 64;
 
 const INSTITUTION_ALIASES = new Map<string, string>([
   ["stanford", "Stanford"],
@@ -100,6 +105,14 @@ function adapterLaneId(adapter: SourceAdapter): string {
     : adapter.sourceId;
 }
 
+function adapterDiscoveryFamily(adapter: SourceAdapter): DiscoveryFamily {
+  const configured = "discoveryFamily" in adapter
+    ? DiscoveryFamilySchema.safeParse(adapter.discoveryFamily)
+    : { success: false as const };
+  if (configured.success) return configured.data;
+  return adapter.sourceId === "arxiv" ? "arxiv" : "bibliographic";
+}
+
 function paperIdentities(item: RawItem): string[] {
   if (item.kind !== "paper") return [`external:${item.externalId}`];
   const normalized = item.externalIds.flatMap((externalId) => {
@@ -141,6 +154,13 @@ function mergeRawItems(primary: RawItem, secondary: RawItem): RawItem {
     metadata: {
       ...secondary.metadata,
       ...primary.metadata,
+      discoveryLaneIds: unique([
+        ...metadataStringArray(primary.metadata, "discoveryLaneIds"),
+        ...metadataStringArray(secondary.metadata, "discoveryLaneIds"),
+      ]).sort((left, right) => left.localeCompare(right)).slice(
+        0,
+        DISCOVERY_DIAGNOSTIC_LIMIT,
+      ),
       citationCount:
         citationCounts.length === 0 ? null : Math.max(...citationCounts),
       influentialCitationCount:
@@ -245,21 +265,59 @@ export class ResearchCollector {
     const adapters = [...this.options.discoveryAdapters].sort((left, right) =>
       adapterLaneId(left).localeCompare(adapterLaneId(right)),
     );
-    const discovery = await settleCollectionBatch(
-      adapters.map((adapter) => ({
-        sourceId: adapter.sourceId,
-        collect: async () => {
-          const laneId = adapterLaneId(adapter);
-          return (await adapter.collect(validWindow))
-            .map((item) => ({
-              laneId,
-              item: RawItemSchema.parse(item),
-            }))
+    const discoveryOutcomes = await Promise.all(
+      adapters.map(async (adapter) => {
+        const laneId = adapterLaneId(adapter);
+        const discoveryFamily = adapterDiscoveryFamily(adapter);
+        const batch = await settleCollectionBatch([{
+          sourceId: adapter.sourceId,
+          collect: async () => (await adapter.collect(validWindow))
+            .map((item) => {
+              const parsed = RawItemSchema.parse(item);
+              const itemFamily = DiscoveryFamilySchema.safeParse(
+                parsed.metadata.discoveryFamily,
+              );
+              return {
+                laneId,
+                item: RawItemSchema.parse({
+                  ...parsed,
+                  metadata: {
+                    ...parsed.metadata,
+                    discoveryFamily: itemFamily.success
+                      ? itemFamily.data
+                      : discoveryFamily,
+                    discoveryLaneIds: [laneId],
+                  },
+                }),
+              };
+            })
             .sort(compareDiscovered)
-            .slice(0, PAPER_LANE_LIMIT);
-        },
-      })),
+            .slice(0, PAPER_LANE_LIMIT),
+        }]);
+        const diagnostic = DiscoveryLaneDiagnosticSchema.parse({
+          laneId,
+          sourceId: adapter.sourceId,
+          discoveryFamily,
+          discovered: batch.candidates.length,
+          deduplicated: 0,
+          triaged: 0,
+          assessed: 0,
+          outcome: batch.failures[0]?.kind ?? "success",
+        });
+        return { batch, diagnostic };
+      }),
     );
+    const discovery = {
+      candidates: discoveryOutcomes.flatMap(({ batch }) => batch.candidates),
+      succeededSourceIds: unique(
+        discoveryOutcomes.flatMap(({ batch }) => batch.succeededSourceIds),
+      ),
+      failures: discoveryOutcomes.flatMap(({ batch }) => batch.failures),
+    };
+    const discoveryDiagnostics: DiscoveryLaneDiagnostic[] = discoveryOutcomes
+      .map(({ diagnostic }) => diagnostic)
+      .sort((left, right) => left.laneId.localeCompare(right.laneId))
+      .slice(0, DISCOVERY_DIAGNOSTIC_LIMIT);
     const discovered = mergePaperIdentities(
       discovery.candidates
         .map(({ laneId, item }) => ({
@@ -337,6 +395,11 @@ export class ResearchCollector {
         ),
       });
     });
-    return { candidates, succeededSourceIds, failures };
+    return {
+      candidates,
+      succeededSourceIds: unique(succeededSourceIds),
+      failures,
+      discoveryDiagnostics,
+    };
   }
 }

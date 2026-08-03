@@ -377,6 +377,115 @@ describe("ResearchCollector", () => {
     expect(JSON.stringify(result)).not.toContain("private discovery detail");
   });
 
+  it("reports real same-source lanes including duplicates, zero results, and failures", async () => {
+    const adapters = [
+      {
+        laneId: "arxiv:one",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        collect: async () => [rawPaper()],
+      },
+      {
+        laneId: "arxiv:two",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        collect: async () => [rawPaper()],
+      },
+      {
+        laneId: "arxiv:zero",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        collect: async () => [],
+      },
+      {
+        laneId: "arxiv:failed",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        collect: async () => {
+          throw new Error("private provider body and https://secret.example");
+        },
+      },
+    ] satisfies readonly DiscoverySourceAdapter[];
+    const collector = new ResearchCollector({
+      discoveryAdapters: adapters,
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.succeededSourceIds).toEqual(["arxiv"]);
+    expect(result.discoveryDiagnostics).toEqual([
+      {
+        laneId: "arxiv:failed",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        discovered: 0,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "unknown",
+      },
+      {
+        laneId: "arxiv:one",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        discovered: 1,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "success",
+      },
+      {
+        laneId: "arxiv:two",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        discovered: 1,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "success",
+      },
+      {
+        laneId: "arxiv:zero",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        discovered: 0,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "success",
+      },
+    ]);
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]?.metadata.discoveryLaneIds).toEqual([
+      "arxiv:one",
+      "arxiv:two",
+    ]);
+    expect(JSON.stringify(result.discoveryDiagnostics)).not.toContain(
+      "secret.example",
+    );
+  });
+
+  it("bounds lane diagnostics and contributing lane IDs at sixty-four", async () => {
+    const collector = new ResearchCollector({
+      discoveryAdapters: Array.from({ length: 65 }, (_, index) => ({
+        laneId: `arxiv:${String(index).padStart(2, "0")}`,
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv" as const,
+        collect: async () => [rawPaper()],
+      })),
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.discoveryDiagnostics).toHaveLength(64);
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]?.metadata.discoveryLaneIds).toHaveLength(64);
+  });
+
   it("retains prior candidates when an optional enricher fails", async () => {
     const collector = new ResearchCollector({
       discoveryAdapters: [{

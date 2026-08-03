@@ -20,6 +20,8 @@ const packet: SourcePacket = {
   sources: [
     {
       sourceId: "source-1",
+      sourceName: "Example News",
+      evidenceKind: "news-evidence",
       role: "reporting",
       title: "A measured outcome improved",
       url: "https://example.com/report",

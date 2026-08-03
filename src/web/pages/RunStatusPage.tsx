@@ -71,6 +71,31 @@ export function RunStatusPage() {
               </li>
             ))}
           </ul>
+          <h3>Discovery diagnostics</h3>
+          <table aria-label="Discovery diagnostics">
+            <thead>
+              <tr>
+                <th scope="col">Lane</th>
+                <th scope="col">Discovered</th>
+                <th scope="col">Deduplicated</th>
+                <th scope="col">Triaged</th>
+                <th scope="col">Assessed</th>
+                <th scope="col">Outcome</th>
+              </tr>
+            </thead>
+            <tbody>
+              {detail.discoveryDiagnostics.map((diagnostic) => (
+                <tr key={`${diagnostic.laneId}:${diagnostic.sourceId}`}>
+                  <td>{diagnostic.laneId}</td>
+                  <td>{diagnostic.discovered}</td>
+                  <td>{diagnostic.deduplicated}</td>
+                  <td>{diagnostic.triaged}</td>
+                  <td>{diagnostic.assessed}</td>
+                  <td>{diagnostic.outcome}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
           <h3>Source failures</h3>
           <ul>
             {detail.sourceFailures.map((failure) => (
