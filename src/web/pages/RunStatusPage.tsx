@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 
 import type {
   WorkflowRun,
@@ -36,14 +36,21 @@ export function RunStatusPage() {
   );
   const [starting, setStarting] = useState(false);
   const [startFeedback, setStartFeedback] = useState<StartFeedback>(null);
+  const latestRunRequest = useRef(0);
 
   async function loadRuns(signal?: AbortSignal) {
-    const response = await fetch(
-      "/api/runs",
-      signal === undefined ? {} : { signal },
-    );
-    if (!response.ok) throw new Error("Run list request failed");
-    setRuns(await response.json() as readonly WorkflowRun[]);
+    const request = ++latestRunRequest.current;
+    try {
+      const response = await fetch(
+        "/api/runs",
+        signal === undefined ? {} : { signal },
+      );
+      if (!response.ok) throw new Error("Run list request failed");
+      const loadedRuns = await response.json() as readonly WorkflowRun[];
+      if (request === latestRunRequest.current) setRuns(loadedRuns);
+    } catch (error) {
+      if (request === latestRunRequest.current) throw error;
+    }
   }
 
   async function startCanary(event: FormEvent<HTMLFormElement>) {

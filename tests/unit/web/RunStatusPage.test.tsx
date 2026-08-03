@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -135,6 +136,39 @@ describe("RunStatusPage", () => {
       name: "2026-08-01: pending",
     })).toBeTruthy();
     expect(listRequests).toBe(2);
+  });
+
+  it("keeps the refreshed run list when the initial request resolves late", async () => {
+    const initialList = deferredResponse();
+    const initialRun = workflowRun("existing-run", "2026-08-02", "failed");
+    const startedRun = workflowRun("2026-08-01", "2026-08-01", "pending");
+    let listRequests = 0;
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      if (String(input) === "/api/admin/runs") {
+        return jsonResponse({ runId: "2026-08-01" }, 202);
+      }
+      listRequests += 1;
+      return listRequests === 1
+        ? initialList.promise
+        : jsonResponse([startedRun]);
+    }));
+    render(<RunStatusPage />);
+
+    await submitCanaryDate("2026-08-01");
+    expect(await screen.findByRole("button", {
+      name: "2026-08-01: pending",
+    })).toBeTruthy();
+
+    await act(async () => {
+      initialList.resolve(jsonResponse([initialRun]));
+    });
+
+    expect(screen.getByRole("button", {
+      name: "2026-08-01: pending",
+    })).toBeTruthy();
+    expect(screen.queryByRole("button", {
+      name: "2026-08-02: failed",
+    })).toBeNull();
   });
 
   it("explains when the selected edition date already has a run", async () => {
