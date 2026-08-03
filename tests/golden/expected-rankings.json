@@ -45,6 +45,7 @@
         "linked-alignment-forum-commentary"
       ],
       "expectedPaperCount": 1,
+      "duplicateMutationCaseId": "cross-source-openalex-paper",
       "attachedCommentaryCaseIds": [
         "cross-source-papers-with-code-commentary",
         "linked-alignment-forum-commentary"
@@ -84,5 +85,30 @@
   },
   "expectedDiscoveryWindows": {
     "newly-coded-four-day-old-paper": "reconsideration"
+  },
+  "expectedUnchangedDiscoveryWindows": {
+    "newly-coded-four-day-old-paper": null
+  },
+  "priorDiscoveryObservations": {
+    "newly-coded-four-day-old-paper": [
+      {
+        "runId": "golden-prior-run",
+        "canonicalId": "doi:10.5555/secure-evaluation",
+        "sourceId": "semantic-scholar",
+        "discoveryFamily": "bibliographic",
+        "windowKind": "fresh",
+        "publishedAt": "2026-07-29T12:00:00.000Z",
+        "retrievedAt": "2026-07-29T13:00:00.000Z",
+        "observedAt": "2026-07-29T13:00:00.000Z",
+        "contentFingerprint": "content:secure-evaluation-v1",
+        "evidenceFingerprint": "evidence:secure-evaluation-before-code-v1",
+        "joinedExternalIds": [
+          "DOI:10.5555/secure-evaluation",
+          "SemanticScholar:S2-SECURE-EVALUATION"
+        ],
+        "route": "research",
+        "expiresAt": "2026-08-05T13:00:00.000Z"
+      }
+    ]
   }
 }

@@ -223,9 +223,14 @@ test("renders layered research context and omits empty sections without mutation
   expect(renderedTechnology?.itemId).toBe(technology.itemId);
   expect(renderedPolicy?.itemId).toBe(aiPolicy.itemId);
   expect(renderedTechnology?.itemId).not.toBe(renderedPolicy?.itemId);
-  for (const entry of [technology, aiPolicy]) {
+  for (const [section, entry] of [
+    ["technology", technology],
+    ["ai_policy", aiPolicy],
+  ] as const) {
     await expect(
-      page.locator(".news-card", { hasText: entry.summary.title }),
+      page.locator(`section#${section} .news-card`, {
+        hasText: entry.summary.title,
+      }),
     ).toBeVisible();
   }
   for (const section of editionSections) {

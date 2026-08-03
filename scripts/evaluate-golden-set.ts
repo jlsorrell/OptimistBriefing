@@ -36,7 +36,11 @@ import {
   validateSummary,
 } from "../src/editorial/validate-summary";
 import { FakeModelProvider } from "../src/models/fake-provider";
-import { RawPublicationCandidateSchema } from "../src/sources/types";
+import {
+  DiscoveryObservationSchema,
+  RawPublicationCandidateSchema,
+} from "../src/sources/types";
+import type { DiscoveryObservation } from "../src/sources/types";
 
 type ResearchCase = {
   caseId: string;
@@ -83,6 +87,7 @@ type RankingFixture = {
     memberCaseIds: string[];
     expectedPaperCount: number;
     attachedCommentaryCaseIds: string[];
+    duplicateMutationCaseId: string;
   }>;
   expectedRoutes: Record<
     string,
@@ -96,6 +101,8 @@ type RankingFixture = {
     string,
     "fresh" | "reconsideration" | null
   >;
+  expectedUnchangedDiscoveryWindows: Record<string, null>;
+  priorDiscoveryObservations: Record<string, DiscoveryObservation[]>;
 };
 
 type GroundingCase = {
@@ -396,34 +403,57 @@ const discoveryFamiliesPassed = RESEARCH_DISCOVERY_FAMILIES.every((family) =>
 const routingPassed = publicationRoutes.every(({ caseId: id, route }) =>
   rankingFixture.expectedRoutes[id] === route
 );
-const identityPassed = rankingFixture.expectedIdentityGroups.every(
-  (expectation) => {
-    const matches = consolidated.papers.filter((paper) => {
-      const memberIds = new Set(
+const identityMemberIds = (paper: Item): ReadonlySet<string> =>
+  new Set(
+    paper.sourceRefs.flatMap((source) =>
+      caseBySource.get(`${source.id}\u0000${source.url}`) ?? []
+    ),
+  );
+const identityGroupPassed = (
+  papers: readonly Item[],
+  expectation: RankingFixture["expectedIdentityGroups"][number],
+): boolean => {
+  const matches = papers.filter((paper) => {
+    const memberIds = identityMemberIds(paper);
+    return expectation.memberCaseIds.some((id) => memberIds.has(id));
+  });
+  if (matches.length !== expectation.expectedPaperCount) return false;
+  return matches.every((paper) => {
+    const memberIds = identityMemberIds(paper);
+    if (
+      caseId(paper) !== expectation.canonicalCaseId ||
+      !expectation.memberCaseIds.every((id) => memberIds.has(id))
+    ) {
+      return false;
+    }
+    const commentaryIds = new Set(
+      attachedCommentary(paper).flatMap(({ sourceId }) =>
         paper.sourceRefs.flatMap((source) =>
-          caseBySource.get(`${source.id}\u0000${source.url}`) ?? []
-        ),
-      );
-      return caseId(paper) === expectation.canonicalCaseId &&
-        expectation.memberCaseIds.every((id) => memberIds.has(id));
-    });
-    if (matches.length !== expectation.expectedPaperCount) return false;
-    return matches.every((paper) => {
-      const commentaryIds = new Set(
-        attachedCommentary(paper).flatMap(({ sourceId }) =>
-          paper.sourceRefs.flatMap((source) =>
-            source.id === sourceId
-              ? caseBySource.get(`${source.id}\u0000${source.url}`) ?? []
-              : []
-          )
-        ),
-      );
-      return expectation.attachedCommentaryCaseIds.every((id) =>
-        commentaryIds.has(id)
-      );
-    });
-  },
+          source.id === sourceId
+            ? caseBySource.get(`${source.id}\u0000${source.url}`) ?? []
+            : []
+        )
+      ),
+    );
+    return expectation.attachedCommentaryCaseIds.every((id) =>
+      commentaryIds.has(id)
+    );
+  });
+};
+const identityPassed = rankingFixture.expectedIdentityGroups.every(
+  (expectation) => identityGroupPassed(consolidated.papers, expectation),
 );
+const identityDuplicateMutationPassed =
+  rankingFixture.expectedIdentityGroups.every((expectation) => {
+    const duplicate = normalizedResearch.find(({ caseId: id }) =>
+      id === expectation.duplicateMutationCaseId
+    )?.item;
+    if (duplicate === undefined) return false;
+    return !identityGroupPassed(
+      [...consolidated.papers, duplicate],
+      expectation,
+    );
+  });
 const identityCaseGroups = rankingFixture.expectedIdentityGroups.map(
   ({ canonicalCaseId }) => {
     const paper = consolidated.papers.find((candidate) =>
@@ -483,8 +513,33 @@ const discoveryWindowsPassed = Object.entries(
   const item = research.find(({ caseId: candidateId }) =>
     candidateId === id
   )?.item;
+  const prior = (rankingFixture.priorDiscoveryObservations[id] ?? []).map(
+    (observation) => DiscoveryObservationSchema.parse(observation),
+  );
   return item !== undefined &&
-    classifyDiscoveryWindow(item, [], rankingFixture.evaluationNow) === expected;
+    classifyDiscoveryWindow(item, prior, rankingFixture.evaluationNow) === expected;
+});
+const unchangedDiscoveryWindowsPassed = Object.entries(
+  rankingFixture.expectedUnchangedDiscoveryWindows,
+).every(([id, expected]) => {
+  const item = research.find(({ caseId: candidateId }) =>
+    candidateId === id
+  )?.item;
+  const prior = rankingFixture.priorDiscoveryObservations[id]?.[0];
+  if (item === undefined || prior === undefined) return false;
+  const unchanged = {
+    ...item,
+    metadata: {
+      ...item.metadata,
+      evidenceFingerprint: prior.evidenceFingerprint,
+      implementationAvailable: false,
+    },
+  };
+  return classifyDiscoveryWindow(
+    unchanged,
+    [DiscoveryObservationSchema.parse(prior)],
+    rankingFixture.evaluationNow,
+  ) === expected;
 });
 
 const clusterByCase = new Map<string, string>();
@@ -589,6 +644,11 @@ printMetric(
   identityPassed,
 );
 printMetric(
+  "extra cross-source duplicate rejected",
+  identityDuplicateMutationPassed ? "yes" : "no",
+  identityDuplicateMutationPassed,
+);
+printMetric(
   "official publication routes",
   publicationRoutes.map(({ caseId: id, route }) => `${id}=${route}`).join(","),
   routingPassed,
@@ -612,6 +672,11 @@ printMetric(
   "discovery windows",
   discoveryWindowsPassed ? "matched" : "mismatched",
   discoveryWindowsPassed,
+);
+printMetric(
+  "unchanged old evidence remains excluded",
+  unchangedDiscoveryWindowsPassed ? "yes" : "no",
+  unchangedDiscoveryWindowsPassed,
 );
 printMetric(
   "duplicate-cluster recall",
@@ -640,11 +705,13 @@ if (
   !researchOrderPassed ||
   !discoveryFamiliesPassed ||
   !identityPassed ||
+  !identityDuplicateMutationPassed ||
   !routingPassed ||
   !triagePassed ||
   !qualityGatesPassed ||
   !selectionReasonsPassed ||
   !discoveryWindowsPassed ||
+  !unchangedDiscoveryWindowsPassed ||
   !duplicateRecallPassed ||
   !missingSourcesPassed ||
   !groundingExpectationsPassed ||
