@@ -5,6 +5,58 @@ probe API. Use the authenticated source catalog, run details, Wrangler
 invocation logs, and audited database state. Do not claim that a discovery
 service's HTTP status page proves an individual feed or page works.
 
+## Research discovery lanes
+
+Every research lane belongs to one of four diagnostic families:
+
+- `arxiv`: the three targeted arXiv topic queries;
+- `bibliographic`: Semantic Scholar search/recommendations and OpenAlex topic
+  and institution queries;
+- `official-publication`: cataloged university and laboratory feeds or listing
+  pages; and
+- `commentary`: Alignment Forum, LessWrong Curated, and PapersWithCode.co.
+
+The authenticated source catalog is the operational control plane. `enabled`
+turns collection on or off; `discoveryMechanism` selects API, RSS, or page
+collection; `sectionEligibility` is only a routing ceiling; and
+`bodyRetrieval`, `contentUse`, `paywall`, `canCorroborateFacts`, and the pinned
+host/port/path `urlPolicy` constrain retrieval and evidence use. Do not treat a
+catalog role, institution, publisher, or section eligibility as item-level
+proof of relevance or section placement. Apply source changes through the
+audited source endpoint described below, not by editing remote D1 directly.
+
+## Exact failure and cache semantics
+
+Discovery adapters and optional enrichers settle independently. A failed lane
+contributes zero new candidates. It does not erase candidates from healthy
+lanes, cached unchanged candidates, or valid cached assessments. An unpinned or
+malformed outbound URL is a `policy` failure before fetch. API throttling and
+transient fetch errors use bounded retries and finish with the sanitized
+`fetch`, `parse`, `policy`, `timeout`, or `unknown` outcome. These are fail-open
+collection semantics only: failures never lower topical, technical-quality,
+grounding, coverage, or publication thresholds and never authorize filler.
+
+Each run scans a 36-hour fresh window and a rolling seven-day reconsideration
+window. Work older than 36 hours is reconsidered only when its content or
+evidence fingerprint changes, for example a revision, new code mapping, linked
+commentary, or changed bibliographic evidence. Cache identity is canonical
+paper identity plus the content/evidence fingerprint; a different discovery
+source alone does not invalidate it. Unchanged work reuses stored discovery
+and assessment artifacts. When investigating stale results, compare both
+fingerprints and invalidate only the affected canonical entry; never flush the
+entire cache merely because one lane changed.
+
+Relevance triage admits at most 24 candidates, with at most 12 from one family
+and six from one publisher domain. Deep-assessment calls are capped at 24 in
+normal budget state, four in degraded state, and zero in hard-stop state.
+Hard-stop may reuse a valid cached assessment but must not start a paid call.
+
+For every lane, run detail records `discovered`, `deduplicated`, `triaged`, and
+`assessed` counts plus the sanitized outcome. Counts must be monotone through
+the funnel (`discovered >= deduplicated >= triaged >= assessed`) for that lane.
+If they are not, preserve the run ID and escalate as a diagnostics defect; do
+not infer missing bodies or provider responses from the count mismatch.
+
 ## Triage
 
 1. Open `/run-status` and identify the affected edition/run.
@@ -13,6 +65,12 @@ service's HTTP status page proves an individual feed or page works.
    - `GET /api/runs`
    - `GET /api/runs/<run-id>`
    - `GET /api/sources`
+
+   In run detail, compare every discovery lane's family, outcome, and
+   `discovered`/`deduplicated`/`triaged`/`assessed` counts. A healthy upstream
+   with zero retained candidates is not necessarily a failure; routing,
+   identity consolidation, relevance triage, and quality gates may legitimately
+   remove its candidates.
 
 3. Check the upstream's official status page or API documentation when one
    exists. For RSS/page sources, fetch only the configured URL and check status,

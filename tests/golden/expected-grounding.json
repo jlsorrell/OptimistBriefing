@@ -8,7 +8,9 @@
         "sources": [
           {
             "sourceId": "paper-abstract",
+            "sourceName": "arXiv paper",
             "role": "primary",
+            "evidenceKind": "primary-research",
             "title": "Verifiable ML Inference",
             "url": "https://arxiv.org/abs/2607.10005",
             "retrievedAt": "2026-07-30T04:00:00.000Z",
@@ -67,7 +69,9 @@
         "sources": [
           {
             "sourceId": "reuters-report",
+            "sourceName": "Reuters",
             "role": "reporting",
+            "evidenceKind": "news-evidence",
             "title": "Agency adopts evaluation rules",
             "url": "https://reuters.example/evaluation-rules",
             "retrievedAt": "2026-07-30T04:00:00.000Z",

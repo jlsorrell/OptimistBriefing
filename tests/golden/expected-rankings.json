@@ -1,7 +1,11 @@
 {
+  "version": 2,
+  "evaluationNow": "2026-08-02T12:00:00.000Z",
   "precisionAt": 5,
   "minimumPrecision": 0.8,
   "relevant": [
+    "cross-source-arxiv-paper",
+    "official-lab-technical-result",
     "highly-relevant-strong-paper",
     "strong-unfamiliar-institution-paper",
     "new-paper-no-citations",
@@ -9,14 +13,76 @@
     "solid-scaling-paper"
   ],
   "requiredHighValue": [
+    "cross-source-arxiv-paper",
     "highly-relevant-strong-paper",
     "strong-unfamiliar-institution-paper",
     "new-paper-no-citations",
-    "abstract-only-paper",
-    "solid-scaling-paper"
+    "official-lab-technical-result",
+    "newly-coded-four-day-old-paper"
   ],
   "knownDistractors": [
     "preferred-institution-weak-incremental-paper",
-    "sensational-low-value-research"
-  ]
+    "sensational-low-value-research",
+    "prestigious-irrelevant-paper",
+    "topical-technically-weak-paper",
+    "popular-unsupported-lesswrong-commentary"
+  ],
+  "expectedResearchOrder": [
+    "highly-relevant-strong-paper",
+    "cross-source-arxiv-paper",
+    "official-lab-technical-result",
+    "strong-unfamiliar-institution-paper",
+    "new-paper-no-citations"
+  ],
+  "expectedIdentityGroups": [
+    {
+      "canonicalCaseId": "cross-source-arxiv-paper",
+      "memberCaseIds": [
+        "cross-source-arxiv-paper",
+        "cross-source-semantic-scholar-paper",
+        "cross-source-openalex-paper",
+        "cross-source-papers-with-code-commentary",
+        "linked-alignment-forum-commentary"
+      ],
+      "expectedPaperCount": 1,
+      "attachedCommentaryCaseIds": [
+        "cross-source-papers-with-code-commentary",
+        "linked-alignment-forum-commentary"
+      ]
+    }
+  ],
+  "expectedRoutes": {
+    "official-lab-technical-result": "research",
+    "official-lab-product-release": "technology",
+    "official-lab-policy-announcement": "ai_policy",
+    "noisy-ai-product-headline": "technology"
+  },
+  "expectedTriageAdmissions": [
+    "cross-source-arxiv-paper",
+    "highly-relevant-strong-paper",
+    "strong-unfamiliar-institution-paper",
+    "topical-technically-weak-paper",
+    "official-lab-technical-result",
+    "newly-coded-four-day-old-paper",
+    "popular-unsupported-lesswrong-commentary"
+  ],
+  "expectedTriageExclusions": {
+    "prestigious-irrelevant-paper": "below_topical_fit"
+  },
+  "expectedQualityGateExclusions": {
+    "topical-technically-weak-paper": "below_technical_quality_gate",
+    "popular-unsupported-lesswrong-commentary": "below_technical_quality_gate"
+  },
+  "expectedSelectionReasons": {
+    "cross-source-arxiv-paper": [
+      "Independent implementation located.",
+      "Substantive expert commentary located."
+    ],
+    "newly-coded-four-day-old-paper": [
+      "Independent implementation located."
+    ]
+  },
+  "expectedDiscoveryWindows": {
+    "newly-coded-four-day-old-paper": "reconsideration"
+  }
 }

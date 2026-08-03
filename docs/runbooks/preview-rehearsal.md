@@ -33,12 +33,60 @@ header only when the request origin exactly matches the preview origin;
 requests to source sites, analytics endpoints, redirects, or lookalike hosts
 never receive it. Browser-global `extraHTTPHeaders` are not used.
 
-The desktop, tablet, and mobile projects run with one worker. All 39 tests are
+The desktop, tablet, and mobile projects run with one worker. All 42 tests are
 read-only, traces/screenshots/video are disabled, and nonsecret Playwright
 output stays in the runner's mode-`0700` directory directly under
 `os.tmpdir()`. Identity-bound cleanup removes that exact directory after
 success, failure, or joined signal shutdown. Failed child output is replaced
 with a generic retry message.
+
+## Discovery preview canary
+
+Deployments, migrations, and manual Workflow starts remain separately approved
+operations; this checklist does not authorize them. Before starting an
+approved canary, record the preview Worker version and confirm migrations
+`0007` and `0008` are applied only to the isolated preview D1 database. Never
+read, print, or replace the stored OpenAI secret, and deploy only with
+`--keep-vars`.
+
+For one canary run, retain these bounded operational facts:
+
+- the sanitized outcome for every `arxiv`, `bibliographic`,
+  `official-publication`, and `commentary` lane;
+- discovered, deduplicated, triaged, and assessed candidate counts per lane;
+- the total research assessment count and budget state (normal, degraded, or
+  hard stop), confirming uncached-call caps of 24, 4, or 0 respectively;
+- cluster and shortlist checkpoint byte lengths, and confirmation that neither
+  checkpoint contains embeddings;
+- model cost for the run and the remaining monthly-cap state;
+- edition status, missing sections, source-failure categories, and the explicit
+  quality-floor reason when the run is partial, retryable, or failed; and
+- the content/evidence fingerprint outcome for any candidate reconsidered from
+  the rolling seven-day window rather than the 36-hour fresh window.
+
+Review the canary in this order:
+
+1. Confirm at least two independent research discovery families succeeded
+   before calling the canary representative. This is a canary-evidence rule,
+   not a new edition publication requirement; the existing coverage and
+   quality rules alone decide published, partial, retryable, or failed status.
+2. Confirm a non-arXiv candidate reached relevance triage and no research item
+   reached assessment merely because of arrival order.
+3. Confirm the same paper found through multiple lanes became one paper, while
+   linked commentary and implementation labels remained attached context.
+4. Confirm official-lab technical, product, and policy items retained distinct
+   Research, Technology, and AI Policy routes.
+5. Confirm a sparse or failed lane produced no fabricated empty section and did
+   not lower topical-fit, technical-quality, grounding, or coverage floors.
+6. Confirm unchanged canonical fingerprints reused cached artifacts, while a
+   qualifying new content/evidence fingerprint invalidated only that paper's
+   assessment cache entry.
+
+Run the read-only preview suite only after the approved canary edition is
+available. Its content assertions verify observable commentary and
+implementation labels, distinct official-lab Technology and AI Policy items,
+and omission of empty sections. Golden and unit evaluation—not rendered HTML—
+enforce the score floor and gate exclusions.
 
 ## Secret-free evidence
 
@@ -60,5 +108,5 @@ cookies, browser storage, or test artifacts.
 The harness covers an allowed Google session and a signed-out Access
 challenge. A real login attempt by a nonallowed Google account is unavailable
 and remains unresolved. That missing result continues to block production
-approval even when all 39 preview tests pass; policy inspection or fabricated
+approval even when all 42 preview tests pass; policy inspection or fabricated
 credentials are not a substitute.

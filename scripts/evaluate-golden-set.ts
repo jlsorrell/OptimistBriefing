@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import type { Item } from "../src/contracts/editorial";
+import { READER_PROFILE } from "../src/config/reader-profile";
 import {
   clusterNews,
   type NewsDevelopment,
@@ -12,6 +13,10 @@ import {
 } from "../src/editorial/news-score";
 import { normalizeCandidate } from "../src/editorial/normalize";
 import {
+  consolidateResearchCandidates,
+  type AttachedResearchCommentary,
+} from "../src/editorial/research-identity";
+import {
   scoreResearch,
   type ResearchScoreInput,
 } from "../src/editorial/research-score";
@@ -21,10 +26,17 @@ import {
   type ShortlistPreferences,
 } from "../src/editorial/shortlist";
 import {
+  classifyDiscoveryWindow,
+  RESEARCH_DISCOVERY_FAMILIES,
+  triageResearch,
+} from "../src/editorial/research-triage";
+import { routePublication } from "../src/editorial/route-publication";
+import {
   SourcePacketSchema,
   validateSummary,
 } from "../src/editorial/validate-summary";
 import { FakeModelProvider } from "../src/models/fake-provider";
+import { RawPublicationCandidateSchema } from "../src/sources/types";
 
 type ResearchCase = {
   caseId: string;
@@ -41,6 +53,14 @@ type NewsCase = {
 
 type ResearchFixture = {
   cases: ResearchCase[];
+  discoveryCases: ResearchCase[];
+  publicationCases: PublicationCase[];
+};
+
+type PublicationCase = {
+  caseId: string;
+  raw: unknown;
+  score?: Omit<ResearchScoreInput, "itemId">;
 };
 
 type NewsFixture = {
@@ -50,11 +70,32 @@ type NewsFixture = {
 };
 
 type RankingFixture = {
+  version: number;
+  evaluationNow: string;
   precisionAt: number;
   minimumPrecision: number;
   relevant: string[];
   requiredHighValue: string[];
   knownDistractors: string[];
+  expectedResearchOrder: string[];
+  expectedIdentityGroups: Array<{
+    canonicalCaseId: string;
+    memberCaseIds: string[];
+    expectedPaperCount: number;
+    attachedCommentaryCaseIds: string[];
+  }>;
+  expectedRoutes: Record<
+    string,
+    "research" | "technology" | "ai_policy" | "excluded"
+  >;
+  expectedTriageAdmissions: string[];
+  expectedTriageExclusions: Record<string, string>;
+  expectedQualityGateExclusions: Record<string, string>;
+  expectedSelectionReasons: Record<string, string[]>;
+  expectedDiscoveryWindows: Record<
+    string,
+    "fresh" | "reconsideration" | null
+  >;
 };
 
 type GroundingCase = {
@@ -80,14 +121,9 @@ const budgets: SectionBudgets = {
 };
 
 const preferences: ShortlistPreferences = {
-  researchTopics: [
-    "alignment-interpretability",
-    "oversight-governance",
-    "secure-computation-ml",
-  ],
+  researchTopics: READER_PROFILE.researchTopics.map(({ id }) => id),
   researchQualityGates: {
-    minimumTopicalFit: 0,
-    minimumTechnicalQuality: 0,
+    ...READER_PROFILE.researchQualityGates,
   },
 };
 
@@ -103,6 +139,22 @@ function caseId(item: Item): string {
     throw new TypeError(`Golden item ${item.id} has no caseId.`);
   }
   return value;
+}
+
+function withTopicalFit(item: Item, topicalFit: number): Item {
+  return {
+    ...item,
+    metadata: { ...item.metadata, topicalFit },
+  };
+}
+
+function attachedCommentary(item: Item): AttachedResearchCommentary[] {
+  if (!Array.isArray(item.metadata.attachedCommentary)) return [];
+  return item.metadata.attachedCommentary.filter(
+    (entry): entry is AttachedResearchCommentary =>
+      entry !== null && typeof entry === "object" &&
+      typeof (entry as { sourceId?: unknown }).sourceId === "string",
+  );
 }
 
 function developmentSignal(
@@ -165,13 +217,85 @@ const [researchFixture, newsFixture, rankingFixture, groundingFixture] =
     fixture<GroundingFixture>("expected-grounding.json"),
   ]);
 
-const research = researchFixture.cases.map((candidate) => ({
+const publicationRoutes = researchFixture.publicationCases.map((candidate) => {
+  const routed = routePublication(
+    RawPublicationCandidateSchema.parse(candidate.raw),
+  );
+  const route = routed === null
+    ? "excluded" as const
+    : routed.kind === "paper" || routed.kind === "blog"
+      ? "research" as const
+      : routed.metadata.primarySection === "ai_policy"
+        ? "ai_policy" as const
+        : "technology" as const;
+  return { ...candidate, route, routed };
+});
+const researchInputs = [
+  ...researchFixture.cases,
+  ...researchFixture.discoveryCases,
+  ...publicationRoutes.flatMap((candidate): ResearchCase[] =>
+    candidate.route === "research" &&
+        candidate.routed !== null &&
+        candidate.score !== undefined
+      ? [{
+          caseId: candidate.caseId,
+          raw: candidate.routed,
+          score: candidate.score,
+        }]
+      : []
+  ),
+];
+const normalizedResearch = researchInputs.map((candidate) => ({
   caseId: candidate.caseId,
-  item: normalizeCandidate(candidate.raw),
+  item: withTopicalFit(
+    normalizeCandidate(candidate.raw),
+    candidate.score.topicalFit,
+  ),
   scoreInput: candidate.score,
 }));
-const researchScores = research.map(({ item, scoreInput }) =>
-  scoreResearch({ itemId: item.id, ...scoreInput }),
+const scoreInputByCase = new Map(
+  normalizedResearch.map(({ caseId: id, scoreInput }) => [id, scoreInput]),
+);
+const caseBySource = new Map(
+  normalizedResearch.flatMap(({ caseId: id, item }) =>
+    item.sourceRefs.map((source) => [
+      `${source.id}\u0000${source.url}`,
+      id,
+    ] as const)
+  ),
+);
+const consolidated = consolidateResearchCandidates(
+  normalizedResearch.map(({ item }) => item),
+);
+const research = [
+  ...consolidated.papers,
+  ...consolidated.standaloneCommentary,
+].map((item) => {
+  const id = caseId(item);
+  const scoreInput = scoreInputByCase.get(id);
+  if (scoreInput === undefined) {
+    throw new TypeError(`No research score signal for ${id}.`);
+  }
+  return { caseId: id, item, scoreInput };
+});
+const triage = triageResearch(research.map(({ item }) => item), {
+  maximum: 24,
+  maximumPerFamily: 12,
+  maximumPerPublisherDomain: 6,
+  configuredTopics: preferences.researchTopics,
+  now: rankingFixture.evaluationNow,
+  minimumTopicalFit:
+    READER_PROFILE.researchQualityGates.minimumTopicalFit,
+});
+const triagedIds = new Set(triage.items.map(caseId));
+const triagedResearch = research.filter(({ caseId: id }) =>
+  triagedIds.has(id)
+);
+const researchScores = triagedResearch.map(({ item, scoreInput }) =>
+  scoreResearch({ itemId: item.id, ...scoreInput, candidate: item }),
+);
+const researchItemById = new Map(
+  triagedResearch.map(({ item }) => [item.id, item]),
 );
 
 const news = newsFixture.cases.map((candidate) => ({
@@ -207,15 +331,30 @@ const newsScores: NewsScore[] = developments.map((development) =>
 );
 
 const selected = shortlist(
-  [...research.map(({ item }) => item), ...developments],
+  [...triagedResearch.map(({ item }) => item), ...developments],
   [...researchScores, ...newsScores],
   preferences,
   budgets,
 );
-const productionResearchOrder = [
-  ...selected.researchFeatured,
-  ...selected.researchRadar,
-].map(caseId);
+const scoreByCase = new Map(
+  researchScores.map((score) => {
+    const item = researchItemById.get(score.itemId);
+    if (item === undefined) {
+      throw new TypeError(`No golden research item for score ${score.itemId}.`);
+    }
+    return [caseId(item), score] as const;
+  }),
+);
+const productionResearchOrder = [...scoreByCase.entries()]
+  .filter(([, score]) =>
+    score.topicalFit >= preferences.researchQualityGates.minimumTopicalFit &&
+    score.technicalQuality >=
+      preferences.researchQualityGates.minimumTechnicalQuality
+  )
+  .sort(([leftId, left], [rightId, right]) =>
+    right.total - left.total || leftId.localeCompare(rightId)
+  )
+  .map(([id]) => id);
 const precisionWindow = productionResearchOrder.slice(
   0,
   rankingFixture.precisionAt,
@@ -239,8 +378,114 @@ const distractorPositions = rankingFixture.knownDistractors.map(
 );
 const highValueAboveDistractors =
   highValuePositions.every(Number.isFinite) &&
-  distractorPositions.every(Number.isFinite) &&
   Math.max(...highValuePositions) < Math.min(...distractorPositions);
+
+const researchOrderPassed = rankingFixture.expectedResearchOrder.every(
+  (id, index) => productionResearchOrder[index] === id,
+);
+const discoveryFamilies = new Set(
+  normalizedResearch.flatMap(({ item }) =>
+    typeof item.metadata.discoveryFamily === "string"
+      ? [item.metadata.discoveryFamily]
+      : []
+  ),
+);
+const discoveryFamiliesPassed = RESEARCH_DISCOVERY_FAMILIES.every((family) =>
+  discoveryFamilies.has(family)
+);
+const routingPassed = publicationRoutes.every(({ caseId: id, route }) =>
+  rankingFixture.expectedRoutes[id] === route
+);
+const identityPassed = rankingFixture.expectedIdentityGroups.every(
+  (expectation) => {
+    const matches = consolidated.papers.filter((paper) => {
+      const memberIds = new Set(
+        paper.sourceRefs.flatMap((source) =>
+          caseBySource.get(`${source.id}\u0000${source.url}`) ?? []
+        ),
+      );
+      return caseId(paper) === expectation.canonicalCaseId &&
+        expectation.memberCaseIds.every((id) => memberIds.has(id));
+    });
+    if (matches.length !== expectation.expectedPaperCount) return false;
+    return matches.every((paper) => {
+      const commentaryIds = new Set(
+        attachedCommentary(paper).flatMap(({ sourceId }) =>
+          paper.sourceRefs.flatMap((source) =>
+            source.id === sourceId
+              ? caseBySource.get(`${source.id}\u0000${source.url}`) ?? []
+              : []
+          )
+        ),
+      );
+      return expectation.attachedCommentaryCaseIds.every((id) =>
+        commentaryIds.has(id)
+      );
+    });
+  },
+);
+const identityCaseGroups = rankingFixture.expectedIdentityGroups.map(
+  ({ canonicalCaseId }) => {
+    const paper = consolidated.papers.find((candidate) =>
+      caseId(candidate) === canonicalCaseId
+    );
+    return {
+      paper: canonicalCaseId,
+      members: paper?.sourceRefs.flatMap((source) =>
+        caseBySource.get(`${source.id}\u0000${source.url}`) ?? []
+      ) ?? [],
+      commentary: paper === undefined
+        ? []
+        : attachedCommentary(paper).flatMap(({ sourceId }) =>
+            paper.sourceRefs.flatMap((source) =>
+              source.id === sourceId
+                ? caseBySource.get(`${source.id}\u0000${source.url}`) ?? []
+                : []
+            )
+          ),
+    };
+  },
+);
+const triageExclusions = new Map(
+  triage.exclusions.map(({ itemId, reason }) => {
+    const item = research.find(({ item }) => item.id === itemId)?.item;
+    if (item === undefined) {
+      throw new TypeError(`No golden item for triage exclusion ${itemId}.`);
+    }
+    return [caseId(item), reason] as const;
+  }),
+);
+const triagePassed =
+  rankingFixture.expectedTriageAdmissions.every((id) => triagedIds.has(id)) &&
+  Object.entries(rankingFixture.expectedTriageExclusions).every(
+    ([id, reason]) => triageExclusions.get(id) === reason,
+  );
+const shortlistExclusions = new Map(
+  selected.exclusions.flatMap(({ itemId, reason }) => {
+    const item = researchItemById.get(itemId);
+    return item === undefined ? [] : [[caseId(item), reason] as const];
+  }),
+);
+const qualityGatesPassed = Object.entries(
+  rankingFixture.expectedQualityGateExclusions,
+).every(([id, reason]) => shortlistExclusions.get(id) === reason);
+const selectionReasonsPassed = Object.entries(
+  rankingFixture.expectedSelectionReasons,
+).every(([id, reasons]) => {
+  const score = scoreByCase.get(id);
+  return score !== undefined && reasons.every((reason) =>
+    score.selectionReasons.includes(reason)
+  );
+});
+const discoveryWindowsPassed = Object.entries(
+  rankingFixture.expectedDiscoveryWindows,
+).every(([id, expected]) => {
+  const item = research.find(({ caseId: candidateId }) =>
+    candidateId === id
+  )?.item;
+  return item !== undefined &&
+    classifyDiscoveryWindow(item, [], rankingFixture.evaluationNow) === expected;
+});
 
 const clusterByCase = new Map<string, string>();
 for (const development of developments) {
@@ -309,6 +554,65 @@ printMetric(
   highValueAboveDistractors ? "yes" : "no",
   highValueAboveDistractors,
 );
+for (const id of rankingFixture.expectedResearchOrder) {
+  const score = scoreByCase.get(id);
+  printMetric(
+    `research score ${id}`,
+    score === undefined
+      ? "missing"
+      : [
+          `topicalFit=${score.topicalFit.toFixed(2)}`,
+          `technicalQuality=${score.technicalQuality.toFixed(2)}`,
+          `researchSignal=${score.researchSignal.toFixed(2)}`,
+          `novelty=${score.novelty.toFixed(2)}`,
+          `seriousAttention=${score.seriousAttention.toFixed(2)}`,
+          `total=${score.total.toFixed(4)}`,
+        ].join(" "),
+    score !== undefined,
+  );
+}
+printMetric(
+  "expected research ordering",
+  researchOrderPassed ? "matched" : "mismatched",
+  researchOrderPassed,
+);
+printMetric(
+  "all discovery families represented",
+  RESEARCH_DISCOVERY_FAMILIES.join(","),
+  discoveryFamiliesPassed,
+);
+printMetric(
+  "cross-source research identity joins",
+  identityCaseGroups.map(({ paper, members, commentary }) =>
+    `${paper}=[${members.join("+")}];commentary=[${commentary.join("+")}]`
+  ).join(","),
+  identityPassed,
+);
+printMetric(
+  "official publication routes",
+  publicationRoutes.map(({ caseId: id, route }) => `${id}=${route}`).join(","),
+  routingPassed,
+);
+printMetric(
+  "research triage expectations",
+  triagePassed ? "matched" : "mismatched",
+  triagePassed,
+);
+printMetric(
+  "research quality-gate exclusions",
+  qualityGatesPassed ? "matched" : "mismatched",
+  qualityGatesPassed,
+);
+printMetric(
+  "research selection reasons",
+  selectionReasonsPassed ? "matched" : "mismatched",
+  selectionReasonsPassed,
+);
+printMetric(
+  "discovery windows",
+  discoveryWindowsPassed ? "matched" : "mismatched",
+  discoveryWindowsPassed,
+);
 printMetric(
   "duplicate-cluster recall",
   `${duplicateRecall.toFixed(2)} (minimum 1.00)`,
@@ -333,6 +637,14 @@ printMetric(
 if (
   !precisionPassed ||
   !highValueAboveDistractors ||
+  !researchOrderPassed ||
+  !discoveryFamiliesPassed ||
+  !identityPassed ||
+  !routingPassed ||
+  !triagePassed ||
+  !qualityGatesPassed ||
+  !selectionReasonsPassed ||
+  !discoveryWindowsPassed ||
   !duplicateRecallPassed ||
   !missingSourcesPassed ||
   !groundingExpectationsPassed ||

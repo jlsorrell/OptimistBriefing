@@ -15,7 +15,7 @@
         "retrievedAt": "2026-07-30T04:00:00.000Z",
         "accessLevel": "full_text",
         "authors": ["Ada Researcher"],
-        "institutions": ["Stanford University"],
+        "institutions": ["University of Ljubljana"],
         "abstract": "We trace internal representations and concept evolution throughout alignment training.",
         "content": "We trace internal representations and concept evolution throughout alignment training with causal interventions.",
         "relatedPaperIds": [],
@@ -201,6 +201,411 @@
         "researchSignal": 0.1,
         "novelty": 0.25,
         "seriousAttention": 0.1
+      }
+    },
+    {
+      "caseId": "prestigious-irrelevant-paper",
+      "raw": {
+        "kind": "paper",
+        "sourceId": "arxiv-prestige",
+        "sourceName": "arXiv",
+        "sourceRole": "primary",
+        "title": "Improving Retail Demand Forecasting with Seasonal Features",
+        "originalUrl": "https://arxiv.org/abs/2607.10007",
+        "externalId": "arXiv:2607.10007",
+        "externalIds": ["arXiv:2607.10007"],
+        "publishedAt": "2026-07-30T01:30:00.000Z",
+        "retrievedAt": "2026-07-30T04:00:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["Prestige Researcher"],
+        "institutions": ["MIT"],
+        "abstract": "We improve retail demand forecasting with seasonal sales features.",
+        "content": "The study evaluates retail inventory forecasts and seasonal sales features.",
+        "relatedPaperIds": [],
+        "metadata": { "caseId": "prestigious-irrelevant-paper", "discoveryFamily": "arxiv" }
+      },
+      "score": {
+        "topicalFit": 0.18,
+        "technicalQuality": 0.92,
+        "researchSignal": 0.95,
+        "novelty": 0.74,
+        "seriousAttention": 0.82
+      }
+    },
+    {
+      "caseId": "topical-technically-weak-paper",
+      "raw": {
+        "kind": "paper",
+        "sourceId": "arxiv-topical-weak",
+        "sourceName": "arXiv",
+        "sourceRole": "primary",
+        "title": "An Informal Prompt Test for Scalable Oversight",
+        "originalUrl": "https://arxiv.org/abs/2607.10008",
+        "externalId": "arXiv:2607.10008",
+        "externalIds": ["arXiv:2607.10008"],
+        "publishedAt": "2026-07-30T01:45:00.000Z",
+        "retrievedAt": "2026-07-30T04:00:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["Taylor Topical"],
+        "institutions": ["Harvard University"],
+        "abstract": "We discuss scalable oversight using a small informal prompt test.",
+        "content": "The note reports two hand-selected examples without a method, baseline, or controlled evaluation.",
+        "relatedPaperIds": [],
+        "metadata": { "caseId": "topical-technically-weak-paper", "discoveryFamily": "arxiv" }
+      },
+      "score": {
+        "topicalFit": 0.94,
+        "technicalQuality": 0.28,
+        "researchSignal": 0.86,
+        "novelty": 0.22,
+        "seriousAttention": 0.7
+      }
+    }
+  ],
+  "discoveryCases": [
+    {
+      "caseId": "cross-source-arxiv-paper",
+      "raw": {
+        "kind": "paper",
+        "sourceId": "arxiv",
+        "sourceName": "arXiv",
+        "sourceRole": "primary",
+        "title": "Verified Oversight with Causal Capability Elicitation",
+        "originalUrl": "https://arxiv.org/abs/2607.20001v2",
+        "externalId": "arXiv:2607.20001v2",
+        "externalIds": ["arXiv:2607.20001v2", "DOI:10.5555/verified-oversight"],
+        "publishedAt": "2026-08-01T10:00:00.000Z",
+        "retrievedAt": "2026-08-02T09:00:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["Morgan Verifier"],
+        "institutions": ["University of Tartu"],
+        "abstract": "We present a causal capability-elicitation method for verifiable scalable oversight.",
+        "content": "The paper derives the protocol, tests controlled interventions, and reports limitations across evaluation settings.",
+        "relatedPaperIds": [],
+        "metadata": {
+          "caseId": "cross-source-arxiv-paper",
+          "discoveryFamily": "arxiv",
+          "discoveryLaneIds": ["arxiv:oversight-governance"]
+        }
+      },
+      "score": {
+        "topicalFit": 0.97,
+        "technicalQuality": 0.93,
+        "researchSignal": 0.86,
+        "novelty": 0.91,
+        "seriousAttention": 0.6
+      }
+    },
+    {
+      "caseId": "cross-source-semantic-scholar-paper",
+      "raw": {
+        "kind": "paper",
+        "sourceId": "semantic-scholar",
+        "sourceName": "Semantic Scholar",
+        "sourceRole": "analysis",
+        "title": "Verified Oversight with Causal Capability Elicitation",
+        "originalUrl": "https://www.semanticscholar.org/paper/s2-verified-oversight",
+        "externalId": "SemanticScholar:S2-VERIFIED-OVERSIGHT",
+        "externalIds": ["SemanticScholar:S2-VERIFIED-OVERSIGHT", "arXiv:2607.20001"],
+        "publishedAt": "2026-08-01T10:00:00.000Z",
+        "retrievedAt": "2026-08-02T09:02:00.000Z",
+        "accessLevel": "abstract",
+        "authors": ["Morgan Verifier"],
+        "institutions": ["University of Tartu"],
+        "abstract": "We present a causal capability-elicitation method for verifiable scalable oversight.",
+        "content": null,
+        "relatedPaperIds": [],
+        "metadata": {
+          "caseId": "cross-source-semantic-scholar-paper",
+          "discoveryFamily": "bibliographic",
+          "discoveryLaneIds": ["semantic-scholar:search:oversight"]
+        }
+      },
+      "score": {
+        "topicalFit": 0.97,
+        "technicalQuality": 0.93,
+        "researchSignal": 0.86,
+        "novelty": 0.91,
+        "seriousAttention": 0.6
+      }
+    },
+    {
+      "caseId": "cross-source-openalex-paper",
+      "raw": {
+        "kind": "paper",
+        "sourceId": "openalex",
+        "sourceName": "OpenAlex",
+        "sourceRole": "analysis",
+        "title": "Verified Oversight with Causal Capability Elicitation",
+        "originalUrl": "https://openalex.org/W260720001",
+        "externalId": "OpenAlex:W260720001",
+        "externalIds": ["OpenAlex:W260720001", "DOI:10.5555/verified-oversight", "arXiv:2607.20001"],
+        "publishedAt": "2026-08-01T10:00:00.000Z",
+        "retrievedAt": "2026-08-02T09:04:00.000Z",
+        "accessLevel": "abstract",
+        "authors": ["Morgan Verifier"],
+        "institutions": ["University of Tartu"],
+        "abstract": "We present a causal capability-elicitation method for verifiable scalable oversight.",
+        "content": null,
+        "relatedPaperIds": [],
+        "metadata": {
+          "caseId": "cross-source-openalex-paper",
+          "discoveryFamily": "bibliographic",
+          "discoveryLaneIds": ["openalex:text:oversight"]
+        }
+      },
+      "score": {
+        "topicalFit": 0.97,
+        "technicalQuality": 0.93,
+        "researchSignal": 0.86,
+        "novelty": 0.91,
+        "seriousAttention": 0.6
+      }
+    },
+    {
+      "caseId": "cross-source-papers-with-code-commentary",
+      "raw": {
+        "kind": "blog",
+        "sourceId": "papers-with-code-co",
+        "sourceName": "PapersWithCode.co",
+        "sourceRole": "blog",
+        "title": "Verified Oversight with Causal Capability Elicitation",
+        "originalUrl": "https://paperswithcode.co/paper/verified-oversight",
+        "externalId": "PapersWithCode:verified-oversight",
+        "externalIds": ["PapersWithCode:verified-oversight"],
+        "publishedAt": "2026-08-01T13:00:00.000Z",
+        "retrievedAt": "2026-08-02T09:06:00.000Z",
+        "accessLevel": "metadata",
+        "authors": ["Morgan Verifier"],
+        "institutions": [],
+        "abstract": "Code and benchmark metadata linked to the paper.",
+        "content": null,
+        "relatedPaperIds": ["arXiv:2607.20001"],
+        "metadata": {
+          "caseId": "cross-source-papers-with-code-commentary",
+          "discoveryFamily": "commentary",
+          "discoveryLaneIds": ["papers-with-code-co:page"],
+          "implementationAvailable": true,
+          "repositoryUrl": "https://github.com/example/verified-oversight"
+        }
+      },
+      "score": {
+        "topicalFit": 0.85,
+        "technicalQuality": 0.5,
+        "researchSignal": 0.55,
+        "novelty": 0.5,
+        "seriousAttention": 0.6
+      }
+    },
+    {
+      "caseId": "linked-alignment-forum-commentary",
+      "raw": {
+        "kind": "blog",
+        "sourceId": "alignment-forum",
+        "sourceName": "Alignment Forum",
+        "sourceRole": "blog",
+        "title": "Where Verified Oversight May Break",
+        "originalUrl": "https://www.alignmentforum.org/posts/verified-oversight-review",
+        "externalId": "AlignmentForum:verified-oversight-review",
+        "externalIds": ["AlignmentForum:verified-oversight-review"],
+        "publishedAt": "2026-08-01T16:00:00.000Z",
+        "retrievedAt": "2026-08-02T09:08:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["Independent Reviewer"],
+        "institutions": [],
+        "abstract": null,
+        "content": "This independent commentary examines the causal identification argument, the capability-elicitation assumptions, the evaluation protocol, the reported ablations, and the limits of external validity. It explains which conclusions follow from the evidence and which depend on untested deployment conditions.",
+        "relatedPaperIds": ["https://arxiv.org/abs/2607.20001v2"],
+        "metadata": {
+          "caseId": "linked-alignment-forum-commentary",
+          "discoveryFamily": "commentary",
+          "discoveryLaneIds": ["alignment-forum:rss"],
+          "voteCount": 12,
+          "commentCount": 4
+        }
+      },
+      "score": {
+        "topicalFit": 0.9,
+        "technicalQuality": 0.78,
+        "researchSignal": 0.58,
+        "novelty": 0.66,
+        "seriousAttention": 0.62
+      }
+    },
+    {
+      "caseId": "popular-unsupported-lesswrong-commentary",
+      "raw": {
+        "kind": "blog",
+        "sourceId": "lesswrong-curated",
+        "sourceName": "LessWrong Curated",
+        "sourceRole": "blog",
+        "title": "A Viral Intuition About Scalable Oversight",
+        "originalUrl": "https://www.lesswrong.com/posts/viral-oversight-intuition",
+        "externalId": "LessWrong:viral-oversight-intuition",
+        "externalIds": ["LessWrong:viral-oversight-intuition"],
+        "publishedAt": "2026-08-02T05:00:00.000Z",
+        "retrievedAt": "2026-08-02T09:10:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["Popular Poster"],
+        "institutions": [],
+        "abstract": null,
+        "content": "A popular claim about scalable oversight that provides no identified paper, method, evidence, baseline, or falsifiable evaluation.",
+        "relatedPaperIds": [],
+        "metadata": {
+          "caseId": "popular-unsupported-lesswrong-commentary",
+          "discoveryFamily": "commentary",
+          "discoveryLaneIds": ["lesswrong-curated:rss"],
+          "voteCount": 4200,
+          "commentCount": 900
+        }
+      },
+      "score": {
+        "topicalFit": 0.72,
+        "technicalQuality": 0.18,
+        "researchSignal": 0.12,
+        "novelty": 0.2,
+        "seriousAttention": 0.15
+      }
+    },
+    {
+      "caseId": "newly-coded-four-day-old-paper",
+      "raw": {
+        "kind": "paper",
+        "sourceId": "semantic-scholar",
+        "sourceName": "Semantic Scholar",
+        "sourceRole": "analysis",
+        "title": "Secure Multiparty Evaluation for Language Models",
+        "originalUrl": "https://www.semanticscholar.org/paper/s2-secure-evaluation",
+        "externalId": "SemanticScholar:S2-SECURE-EVALUATION",
+        "externalIds": ["SemanticScholar:S2-SECURE-EVALUATION", "DOI:10.5555/secure-evaluation"],
+        "publishedAt": "2026-07-29T12:00:00.000Z",
+        "retrievedAt": "2026-08-02T09:12:00.000Z",
+        "accessLevel": "abstract",
+        "authors": ["Casey Cryptographer"],
+        "institutions": ["University of Waterloo"],
+        "abstract": "We present secure multiparty computation for language-model evaluation.",
+        "content": null,
+        "relatedPaperIds": [],
+        "metadata": {
+          "caseId": "newly-coded-four-day-old-paper",
+          "discoveryFamily": "bibliographic",
+          "discoveryLaneIds": ["semantic-scholar:recommendations:secure-computation"],
+          "implementationAvailable": true,
+          "contentFingerprint": "content:secure-evaluation-v1",
+          "evidenceFingerprint": "evidence:secure-evaluation-with-code-v2"
+        }
+      },
+      "score": {
+        "topicalFit": 0.91,
+        "technicalQuality": 0.84,
+        "researchSignal": 0.74,
+        "novelty": 0.82,
+        "seriousAttention": 0.58
+      }
+    }
+  ],
+  "publicationCases": [
+    {
+      "caseId": "official-lab-technical-result",
+      "raw": {
+        "kind": "publication",
+        "sourceId": "anthropic",
+        "sourceName": "Anthropic Research",
+        "sourceRole": "blog",
+        "title": "A Causal Method for Tracing Alignment Training",
+        "originalUrl": "https://www.anthropic.com/research/causal-alignment-training",
+        "externalId": "https://www.anthropic.com/research/causal-alignment-training",
+        "externalIds": ["https://www.anthropic.com/research/causal-alignment-training"],
+        "publishedAt": "2026-08-02T06:00:00.000Z",
+        "retrievedAt": "2026-08-02T09:14:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["Lab Research Team"],
+        "institutions": ["Anthropic"],
+        "abstract": "We study internal representations and report a causal alignment result.",
+        "content": "The technical report presents a method, controlled experiment, result, and limitations.",
+        "relatedPaperIds": ["arXiv:2608.30001"],
+        "sectionEligibility": ["research", "research_radar", "technology", "ai_policy"],
+        "discoveryFamily": "official-publication",
+        "metadata": { "caseId": "official-lab-technical-result", "discoveryLaneIds": ["anthropic:page"] }
+      },
+      "score": {
+        "topicalFit": 0.93,
+        "technicalQuality": 0.88,
+        "researchSignal": 0.9,
+        "novelty": 0.84,
+        "seriousAttention": 0.7
+      }
+    },
+    {
+      "caseId": "official-lab-product-release",
+      "raw": {
+        "kind": "publication",
+        "sourceId": "openai",
+        "sourceName": "OpenAI",
+        "sourceRole": "blog",
+        "title": "We Launch a New Developer Assistant Product",
+        "originalUrl": "https://openai.com/index/developer-assistant-release",
+        "externalId": "https://openai.com/index/developer-assistant-release",
+        "externalIds": ["https://openai.com/index/developer-assistant-release"],
+        "publishedAt": "2026-08-02T06:30:00.000Z",
+        "retrievedAt": "2026-08-02T09:16:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["Product Team"],
+        "institutions": ["OpenAI"],
+        "abstract": "The software release adds a developer assistant capability and API deployment.",
+        "content": "The product announcement documents release availability and deployment details.",
+        "relatedPaperIds": [],
+        "sectionEligibility": ["research", "research_radar", "technology", "ai_policy"],
+        "discoveryFamily": "official-publication",
+        "metadata": { "caseId": "official-lab-product-release", "discoveryLaneIds": ["openai:rss"] }
+      }
+    },
+    {
+      "caseId": "official-lab-policy-announcement",
+      "raw": {
+        "kind": "publication",
+        "sourceId": "google-deepmind",
+        "sourceName": "Google DeepMind",
+        "sourceRole": "blog",
+        "title": "An AI Evaluation Policy and Governance Standard",
+        "originalUrl": "https://deepmind.google/discover/blog/evaluation-policy-standard",
+        "externalId": "https://deepmind.google/discover/blog/evaluation-policy-standard",
+        "externalIds": ["https://deepmind.google/discover/blog/evaluation-policy-standard"],
+        "publishedAt": "2026-08-02T07:00:00.000Z",
+        "retrievedAt": "2026-08-02T09:18:00.000Z",
+        "accessLevel": "full_text",
+        "authors": ["Policy Team"],
+        "institutions": ["Google DeepMind"],
+        "abstract": "The lab announces an oversight and regulatory accountability framework.",
+        "content": "The official governance standard describes evaluation-policy requirements and enforcement.",
+        "relatedPaperIds": [],
+        "sectionEligibility": ["research", "research_radar", "technology", "ai_policy"],
+        "discoveryFamily": "official-publication",
+        "metadata": { "caseId": "official-lab-policy-announcement", "discoveryLaneIds": ["google-deepmind:rss"] }
+      }
+    },
+    {
+      "caseId": "noisy-ai-product-headline",
+      "raw": {
+        "kind": "publication",
+        "sourceId": "lesswrong-curated",
+        "sourceName": "LessWrong Curated",
+        "sourceRole": "blog",
+        "title": "This Shocking AI Product Launch Changes Everything",
+        "originalUrl": "https://www.lesswrong.com/posts/shocking-product-launch",
+        "externalId": "LessWrong:shocking-product-launch",
+        "externalIds": ["LessWrong:shocking-product-launch"],
+        "publishedAt": "2026-08-02T07:30:00.000Z",
+        "retrievedAt": "2026-08-02T09:20:00.000Z",
+        "accessLevel": "secondary",
+        "authors": ["Headline Poster"],
+        "institutions": [],
+        "abstract": "A noisy product headline without release evidence or technical detail.",
+        "content": null,
+        "relatedPaperIds": [],
+        "sectionEligibility": ["technology"],
+        "discoveryFamily": "commentary",
+        "metadata": { "caseId": "noisy-ai-product-headline", "discoveryLaneIds": ["lesswrong-curated:rss"] }
       }
     }
   ]
