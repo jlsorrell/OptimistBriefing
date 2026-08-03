@@ -1155,28 +1155,32 @@ export function createProductionPipelineContext(
     ) {
       return;
     }
-    if (field === undefined || !discoveryDiagnosticsLoaded) {
-      discoveryDiagnostics = DiscoveryDiagnosticsArraySchema.parse(
-        await options.loadDiscoveryDiagnostics(),
+    try {
+      if (field === undefined || !discoveryDiagnosticsLoaded) {
+        discoveryDiagnostics = DiscoveryDiagnosticsArraySchema.parse(
+          await options.loadDiscoveryDiagnostics(),
+        );
+        discoveryDiagnosticsLoaded = true;
+      }
+      if (field !== undefined) {
+        discoveryDiagnostics = discoveryDiagnostics.map((diagnostic) => ({
+          ...diagnostic,
+          [field]: items.filter(
+            (item) =>
+              isResearchItem(item) &&
+              discoveryLaneIds(item).includes(diagnostic.laneId) &&
+              (field !== "assessed" ||
+                workflowPayload(item).assessment !== undefined),
+          ).length,
+        }));
+      }
+      await options.researchRepository.recordDiscoveryDiagnostics(
+        options.runId,
+        discoveryDiagnostics,
       );
-      discoveryDiagnosticsLoaded = true;
+    } catch {
+      // Optional observability must not abort editorial work.
     }
-    if (field !== undefined) {
-      discoveryDiagnostics = discoveryDiagnostics.map((diagnostic) => ({
-        ...diagnostic,
-        [field]: items.filter(
-          (item) =>
-            isResearchItem(item) &&
-            discoveryLaneIds(item).includes(diagnostic.laneId) &&
-            (field !== "assessed" ||
-              workflowPayload(item).assessment !== undefined),
-        ).length,
-      }));
-    }
-    await options.researchRepository.recordDiscoveryDiagnostics(
-      options.runId,
-      discoveryDiagnostics,
-    );
   };
   return {
     editionDate: options.editionDate,
