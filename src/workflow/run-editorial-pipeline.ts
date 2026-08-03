@@ -103,6 +103,7 @@ import {
   type PipelineContext,
   type PipelineResult,
   type PipelineRun,
+  type PipelineStep,
   type PipelineStore,
   type PipelineStatus,
   type WorkflowItemPayload,
@@ -2406,6 +2407,74 @@ async function checkpoint<T>(
     : context.checkpointExecutor(step, executeCheckpoint);
 }
 
+async function readCheckpointOutput<T>(
+  context: PipelineContext,
+  step: PipelineStep,
+  schema: z.ZodType<T, z.ZodTypeDef, unknown>,
+): Promise<T> {
+  const artifact = await context.store.readArtifact(context.runId, step);
+  if (artifact === null) throw new Error(`MISSING_CHECKPOINT_ARTIFACT:${step}`);
+  return schema.parse(artifact.output);
+}
+
+async function collectAndNormalize(
+  context: PipelineContext,
+  run: PipelineRun,
+): Promise<readonly Item[]> {
+  const collected = await checkpoint(
+    context,
+    run,
+    "collect",
+    CollectedCandidatesSchema,
+    context.collect,
+  );
+  return checkpoint(
+    context,
+    run,
+    "normalize",
+    NormalizedItemsSchema,
+    () => context.normalize(collected),
+    context.persistItems,
+  );
+}
+
+async function advanceSelectionStages(
+  context: PipelineContext,
+  run: PipelineRun,
+): Promise<readonly Item[]> {
+  let items: readonly Item[] = await collectAndNormalize(context, run);
+  let input = items;
+  items = await checkpoint(
+    context, run, "enrich", EnrichedItemsSchema,
+    () => context.enrich(input),
+  );
+  input = items;
+  items = await checkpoint(
+    context, run, "prefilter", PrefilteredItemsSchema,
+    () => context.prefilter(input),
+  );
+  input = items;
+  items = await checkpoint(
+    context, run, "assess", AssessedItemsSchema,
+    () => context.assess(input),
+  );
+  input = items;
+  items = await checkpoint(
+    context, run, "score", ScoredItemsSchema,
+    () => context.score(input),
+  );
+  input = items;
+  items = await checkpoint(
+    context, run, "cluster", ClusteredItemsSchema,
+    () => context.cluster(input),
+  );
+  input = items;
+  return checkpoint(
+    context, run, "shortlist", ShortlistedItemsSchema,
+    () => context.shortlist(input),
+  );
+}
+
 export async function runEditorialPipeline(
   context: PipelineContext,
 ): Promise<PipelineResult> {
@@ -2430,38 +2499,7 @@ export async function runEditorialPipeline(
   await context.store.saveRun(run);
 
   try {
-    const collected = await checkpoint(
-      context, run, "collect", CollectedCandidatesSchema, context.collect,
-    );
-    const normalized = await checkpoint(
-      context, run, "normalize", NormalizedItemsSchema,
-      () => context.normalize(collected),
-      context.persistItems,
-    );
-    const enriched = await checkpoint(
-      context, run, "enrich", EnrichedItemsSchema,
-      () => context.enrich(normalized),
-    );
-    const prefilted = await checkpoint(
-      context, run, "prefilter", PrefilteredItemsSchema,
-      () => context.prefilter(enriched),
-    );
-    const assessed = await checkpoint(
-      context, run, "assess", AssessedItemsSchema,
-      () => context.assess(prefilted),
-    );
-    const scored = await checkpoint(
-      context, run, "score", ScoredItemsSchema,
-      () => context.score(assessed),
-    );
-    const clustered = await checkpoint(
-      context, run, "cluster", ClusteredItemsSchema,
-      () => context.cluster(scored),
-    );
-    const shortlisted = await checkpoint(
-      context, run, "shortlist", ShortlistedItemsSchema,
-      () => context.shortlist(clustered),
-    );
+    const shortlisted = await advanceSelectionStages(context, run);
     const synthesized = await checkpoint(
       context, run, "synthesize", SummaryCandidatesSchema,
       () => context.synthesize(shortlisted),
@@ -2469,6 +2507,11 @@ export async function runEditorialPipeline(
     const validated = await checkpoint(
       context, run, "validate", ValidatedSummaryCandidatesSchema,
       () => context.validate(synthesized),
+    );
+    const normalizedForComposition = await readCheckpointOutput(
+      context,
+      "normalize",
+      NormalizedItemsSchema,
     );
     const durableSourceFailures = context.loadSourceFailures === undefined
       ? boundedSourceFailureMetadata(context.sourceFailures ?? [])
@@ -2478,7 +2521,7 @@ export async function runEditorialPipeline(
       () => composeEdition(
         { ...context, sourceFailures: durableSourceFailures },
         validated,
-        normalized,
+        normalizedForComposition,
       ),
     );
     await checkpoint(

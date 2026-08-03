@@ -159,6 +159,7 @@ class ResumeStore implements PipelineStore {
   readonly editions = new Map<string, EditionWithEntries>();
   readonly invalidatedFrom: string[] = [];
   readonly preferenceSnapshots = new Map<string, ReaderPreferences>();
+  readonly artifactReads: PipelineStep[] = [];
 
   async getRun(runId: string) { return this.runs.get(runId) ?? null; }
   async createRun(run: PipelineRun) { this.runs.set(run.id, run); }
@@ -184,6 +185,7 @@ class ResumeStore implements PipelineStore {
     this.artifacts.set(`${runId}:${step}`, structuredClone(artifact));
   }
   async readArtifact(runId: string, step: PipelineStep) {
+    this.artifactReads.push(step);
     return this.artifacts.get(`${runId}:${step}`) ?? null;
   }
   async beginAttempt(_runId: string, step: PipelineStep) {
@@ -841,6 +843,16 @@ describe("durable workflow checkpoint execution", () => {
       retryable: true,
       failureCode: "BUDGET_HARD_STOP",
     });
+  });
+
+  it("reloads normalized data only when composition needs it", async () => {
+    const context = resumableContext("publish");
+    context.checkpointExecutor = async (_step, execute) => execute();
+
+    await runEditorialPipeline(context);
+
+    expect(context.store.artifactReads).toEqual(["normalize"]);
+    expect(context.store.runs.get(context.runId)?.currentStep).toBe("publish");
   });
 
   it.each([
