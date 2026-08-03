@@ -13,6 +13,7 @@ import {
 } from "./outbound-url";
 import {
   CollectionWindowSchema,
+  MAX_PROVIDER_ARRAY_ITEMS,
   RawItemSchema,
   ResearchSourceRecordSchema,
   type CollectionWindow,
@@ -223,7 +224,9 @@ export class ArxivAdapter implements DiscoverySourceAdapter {
       publishedAt,
       retrievedAt,
       accessLevel: "abstract",
-      authors: asArray(entry.author).map((author) => author.name.trim()),
+      authors: asArray(entry.author)
+        .map((author) => author.name.trim())
+        .slice(0, MAX_PROVIDER_ARRAY_ITEMS),
       institutions: [],
       abstract: normalizeWhitespace(entry.summary),
       content: null,

@@ -227,6 +227,36 @@ describe("ResearchCollector", () => {
     expect(result.candidates[0]?.externalId).toBe("arXiv:2607.00001");
   });
 
+  it("bounds unusually large arXiv author lists without rejecting the lane", async () => {
+    const fixture = (await loadFixture("arxiv-response.xml")).replace(
+      "    <author><name>Ada Example</name></author>\n" +
+        "    <author><name>Grace Example</name></author>",
+      Array.from(
+        { length: 65 },
+        (_, index) => `    <author><name>Author ${index}</name></author>`,
+      ).join("\n"),
+    );
+    const collector = new ResearchCollector({
+      discoveryAdapters: [
+        new ArxivAdapter(
+          new SourceHttpClient({
+            fetch: vi.fn(async () => new Response(fixture)),
+          }),
+          arxivSource,
+          { laneId: "arxiv:bounded-authors", maxPages: 1 },
+        ),
+      ],
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]?.authors).toHaveLength(64);
+  });
+
   it("retains cross-source paper evidence for normalized identity consolidation", async () => {
     const providerPaper = {
       ...rawPaper("openalex"),
@@ -611,6 +641,28 @@ describe("ResearchCollector", () => {
 });
 
 describe("bibliographic discovery", () => {
+  it("accepts Semantic Scholar empty search pages with a null continuation token", async () => {
+    const fetch = vi.fn(async () => Response.json({
+      total: 0,
+      token: null,
+      data: [],
+    }));
+    const collector = new ResearchCollector({
+      discoveryAdapters: createPaperDiscoveryAdapters(
+        new SourceHttpClient({ fetch }),
+        [semanticScholarSource],
+      ).filter(({ laneId }) => laneId.startsWith("semantic-scholar:search:")),
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates).toEqual([]);
+    expect(result.succeededSourceIds).toEqual(["semantic-scholar"]);
+  });
+
   it("discovers recent Semantic Scholar search and recommendation papers", async () => {
     const searchFixture = await loadFixture("semantic-scholar-search.json");
     const recommendationFixture = await loadFixture(
@@ -780,7 +832,7 @@ describe("bibliographic discovery", () => {
     expect(institutionUrls.every(
       (url) => url.searchParams.get("select") === "id,display_name",
     )).toBe(true);
-    expect(workUrls).toHaveLength(7);
+    expect(workUrls).toHaveLength(4);
     expect(workUrls.every(
       (url) => url.searchParams.get("per-page") === "100",
     )).toBe(true);
@@ -797,15 +849,12 @@ describe("bibliographic discovery", () => {
     );
     expect(institutionWorkUrl?.searchParams.has("search")).toBe(false);
     expect(workUrls.filter((url) => url.searchParams.has("search"))).toHaveLength(
-      6,
+      3,
     );
     const updatedWorkUrls = workUrls.filter((url) =>
       url.searchParams.get("filter")?.includes("updated_date:>")
     );
-    expect(updatedWorkUrls).toHaveLength(3);
-    expect(updatedWorkUrls.every((url) =>
-      url.searchParams.get("sort") === "updated_date:desc"
-    )).toBe(true);
+    expect(updatedWorkUrls).toHaveLength(0);
   });
 
   it("discovers older OpenAlex works updated inside the reconsideration window", async () => {
@@ -854,13 +903,20 @@ describe("bibliographic discovery", () => {
       throw new Error(`Unexpected OpenAlex URL: ${url}`);
     });
     const collector = new ResearchCollector({
-      discoveryAdapters: createPaperDiscoveryAdapters(
-        new SourceHttpClient({
-          fetch,
-          now: () => new Date("2026-07-29T08:30:00.000Z"),
-        }),
-        [openAlexSource],
-      ),
+      discoveryAdapters: [
+        new OpenAlexDiscoveryAdapter(
+          new SourceHttpClient({
+            fetch,
+            now: () => new Date("2026-07-29T08:30:00.000Z"),
+          }),
+          openAlexSource,
+          {
+            laneId: "openalex:updated:alignment-interpretability",
+            mode: "updated",
+            query: "AI safety, alignment, and interpretability",
+          },
+        ),
+      ],
       enrichers: [],
       preferredInstitutions: [],
     });
@@ -887,12 +943,50 @@ describe("bibliographic discovery", () => {
         url.pathname === "/works" &&
         url.searchParams.get("filter")?.includes("updated_date:>")
       );
-    expect(updatedUrls).toHaveLength(3);
+    expect(updatedUrls).toHaveLength(1);
     expect(updatedUrls.every((url) =>
       !url.searchParams.get("filter")?.includes("from_publication_date") &&
       url.searchParams.get("sort") === "updated_date:desc" &&
       url.searchParams.get("per-page") === "100"
     )).toBe(true);
+  });
+
+  it("bounds large OpenAlex provider arrays without rejecting the lane", async () => {
+    const payload = JSON.parse(await loadFixture("openalex-discovery.json"));
+    payload.results[0].authorships = Array.from({ length: 65 }, (_, index) => ({
+      author: { id: null, display_name: `Author ${index}` },
+      institutions: [{
+        id: `https://openalex.org/I${index}`,
+        display_name: `Institution ${index}`,
+      }],
+    }));
+    payload.results[0].topics = Array.from({ length: 65 }, (_, index) => ({
+      display_name: `Topic ${index}`,
+      score: 0.9,
+    }));
+    const collector = new ResearchCollector({
+      discoveryAdapters: [
+        new OpenAlexDiscoveryAdapter(
+          new SourceHttpClient({ fetch: vi.fn(async () => Response.json(payload)) }),
+          openAlexSource,
+          {
+            laneId: "openalex:text:bounded-arrays",
+            mode: "text",
+            query: "alignment",
+          },
+        ),
+      ],
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]?.authors).toHaveLength(64);
+    expect(result.candidates[0]?.institutions).toHaveLength(64);
+    expect(result.candidates[0]?.topics).toHaveLength(64);
   });
 
   it("keeps arXiv papers when bibliographic discovery returns malformed data", async () => {
@@ -998,6 +1092,34 @@ describe("bibliographic discovery", () => {
 });
 
 describe("RssAdapter", () => {
+  it("bounds oversized article bodies without rejecting the feed", async () => {
+    const oversizedEvidence = "x".repeat(5_000);
+    const feed = `<?xml version="1.0"?>
+      <rss version="2.0"><channel><item>
+        <title>Bounded source evidence</title>
+        <link>https://lab.example.org/posts/bounded-source-evidence</link>
+        <guid>bounded-source-evidence</guid>
+        <pubDate>Wed, 29 Jul 2026 08:00:00 GMT</pubDate>
+        <description><![CDATA[${oversizedEvidence}]]></description>
+      </item></channel></rss>`;
+    const adapter = new RssAdapter(
+      new SourceHttpClient({
+        fetch: async () => new Response(feed, {
+          headers: { "content-type": "application/rss+xml" },
+        }),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      [{ source: blogSource, feedUrl: "https://lab.example.org/feed.xml" }],
+    );
+
+    const result = await adapter.collect(fixedWindow());
+
+    expect(result.failures).toEqual([]);
+    expect(result.succeededSourceIds).toEqual(["alignment-lab"]);
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]?.abstract).toHaveLength(4_000);
+  });
+
   it("retains a valid feed when another feed is malformed", async () => {
     const validFeed = await loadFixture("research-blog.xml");
     const malformedSource = source({

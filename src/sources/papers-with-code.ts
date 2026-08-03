@@ -33,6 +33,21 @@ function publishedAt(value: string | null | undefined): string | null {
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
 }
 
+function articlePublishedAt(article: Element): string | null {
+  const time = article.querySelector("time");
+  const structured = publishedAt(
+    time?.getAttribute("datetime") ?? time?.textContent,
+  );
+  if (structured !== null) return structured;
+  for (const paragraph of article.querySelectorAll("p")) {
+    const match = /^Trending research\s*·\s*(\d{4}-\d{2}-\d{2})$/i.exec(
+      normalizedText(paragraph.textContent) ?? "",
+    );
+    if (match?.[1] !== undefined) return publishedAt(match[1]);
+  }
+  return null;
+}
+
 function paperIdentity(pathname: string): string | null {
   const match = /^\/paper\/([^/]+)\/?$/.exec(pathname);
   if (match?.[1] === undefined) return null;
@@ -98,8 +113,7 @@ export class PapersWithCodeAdapter {
       let paperUrl: URL;
       try { paperUrl = assertSafeOutboundUrl(new URL(paperLink.getAttribute("href") ?? "", finalUrl), PAPERS_WITH_CODE_POLICY); } catch { return []; }
       const identifier = paperIdentity(paperUrl.pathname);
-      const time = article.querySelector("time");
-      const date = publishedAt(time?.getAttribute("datetime") ?? time?.textContent);
+      const date = articlePublishedAt(article);
       if (title === null || identifier === null || date === null || date < validWindow.from || date > validWindow.to) return [];
       return [RawPublicationCandidateSchema.parse({
         kind: "publication",

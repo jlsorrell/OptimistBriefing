@@ -97,7 +97,7 @@ const SemanticScholarDiscoveryPaperSchema = z.object({
     .string()
     .regex(/^\d{4}-\d{2}-\d{2}$/)
     .nullable(),
-  venue: z.string().min(1).nullable(),
+  venue: z.string().nullable(),
   citationCount: z.number().int().nonnegative().nullable(),
   influentialCitationCount: z.number().int().nonnegative().nullable(),
   fieldsOfStudy: z.array(z.string().min(1)).nullable(),
@@ -106,7 +106,7 @@ const SemanticScholarDiscoveryPaperSchema = z.object({
 
 const SemanticScholarSearchResponseSchema = z.object({
   total: z.number().int().nonnegative(),
-  token: z.string().optional(),
+  token: z.string().nullable().optional(),
   data: z.array(SemanticScholarDiscoveryPaperSchema),
 });
 
@@ -294,7 +294,7 @@ implements DiscoverySourceAdapter {
         discoveryFamily: "bibliographic",
         semanticScholarId: paper.paperId,
         year: paper.year,
-        venue: paper.venue,
+        venue: paper.venue?.trim() || null,
         citationCount: paper.citationCount,
         influentialCitationCount: paper.influentialCitationCount,
         topics: paper.fieldsOfStudy ?? [],

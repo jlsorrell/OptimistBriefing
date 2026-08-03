@@ -2722,7 +2722,7 @@ describe("manual editorial run", () => {
         ),
       ],
       [
-        "https://www.wypr.org/rss/local-news",
+        "https://www.wypr.org/wypr-news.rss",
         rss(
           "Source wypr reports a Baltimore school clinic",
           "https://www.wypr.org/wypr-news/baltimore-school-clinic",

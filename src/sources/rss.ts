@@ -12,6 +12,7 @@ import {
 } from "./collection-settlement";
 import {
   CollectionWindowSchema,
+  MAX_PROVIDER_EVIDENCE_CHARACTERS,
   RawItemSchema,
   ResearchSourceRecordSchema,
   type CollectionBatch,
@@ -165,7 +166,10 @@ export class RssAdapter {
               }
               const rawDescription =
                 item.encoded ?? item.description ?? "";
-              const description = normalizeWhitespace(rawDescription);
+              const description = normalizeWhitespace(rawDescription).slice(
+                0,
+                MAX_PROVIDER_EVIDENCE_CHARACTERS,
+              );
               const guid =
                 typeof item.guid === "string"
                   ? item.guid

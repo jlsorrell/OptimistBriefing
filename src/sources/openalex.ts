@@ -12,6 +12,7 @@ import {
 } from "./outbound-url";
 import {
   CollectionWindowSchema,
+  MAX_PROVIDER_ARRAY_ITEMS,
   RawItemSchema,
   RawResearchCandidateSchema,
   ResearchSourceRecordSchema,
@@ -31,7 +32,7 @@ const OpenAlexInstitutionSchema = z.object({
 
 const OpenAlexAuthorshipSchema = z.object({
   author: z.object({
-    id: z.string().url(),
+    id: z.string().url().nullable(),
     display_name: z.string().min(1),
   }),
   institutions: z.array(OpenAlexInstitutionSchema),
@@ -400,10 +401,14 @@ export class OpenAlexDiscoveryAdapter implements DiscoverySourceAdapter {
       publishedAt: dateOnlyIso(work.publication_date),
       retrievedAt,
       accessLevel: abstract === null ? "metadata" : "abstract",
-      authors: work.authorships.map(({ author }) => author.display_name),
-      institutions: work.authorships.flatMap(({ institutions }) =>
-        institutions.map(({ display_name }) => display_name),
-      ),
+      authors: unique(
+        work.authorships.map(({ author }) => author.display_name),
+      ).slice(0, MAX_PROVIDER_ARRAY_ITEMS),
+      institutions: unique(
+        work.authorships.flatMap(({ institutions }) =>
+          institutions.map(({ display_name }) => display_name)
+        ),
+      ).slice(0, MAX_PROVIDER_ARRAY_ITEMS),
       abstract,
       content: null,
       relatedPaperIds: [],
@@ -414,7 +419,9 @@ export class OpenAlexDiscoveryAdapter implements DiscoverySourceAdapter {
         venue: work.primary_location?.source?.display_name ?? null,
         citationCount: work.cited_by_count,
         influentialCitationCount: null,
-        topics: work.topics.map(({ display_name }) => display_name),
+        topics: unique(
+          work.topics.map(({ display_name }) => display_name),
+        ).slice(0, MAX_PROVIDER_ARRAY_ITEMS),
       },
     });
   }
