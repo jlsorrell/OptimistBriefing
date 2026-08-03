@@ -11,6 +11,7 @@ import type {
 import {
   createBudgetedPipelineRuntimeFactory,
   createD1ModelBudgetCallbacks,
+  runCheckpointWithWorkflowStep,
   RunParamsSchema,
   ScheduledModelConfigSchema,
 } from "../../../src/workflow/daily-briefing-workflow";
@@ -292,6 +293,63 @@ function resumableContext(
 }
 
 describe("durable workflow checkpoint execution", () => {
+  it("persists only a small Workflow marker while returning the checkpoint output", async () => {
+    const checkpointOutput = { payload: "x".repeat(1_100_000) };
+    let persistedStepOutput: unknown;
+    let operationCalls = 0;
+    const workflowStep = {
+      do: async <T,>(
+        _name: string,
+        _config: unknown,
+        operation: () => Promise<T>,
+      ): Promise<T> => {
+        const output = await operation();
+        persistedStepOutput = output;
+        return output;
+      },
+    };
+
+    const result = await runCheckpointWithWorkflowStep(
+      workflowStep,
+      "enrich",
+      async () => {
+        operationCalls += 1;
+        return checkpointOutput;
+      },
+    );
+
+    expect(result).toBe(checkpointOutput);
+    expect(operationCalls).toBe(1);
+    expect(persistedStepOutput).toEqual({
+      checkpoint: "enrich",
+      completed: true,
+    });
+    expect(JSON.stringify(persistedStepOutput).length).toBeLessThan(100);
+  });
+
+  it("reloads D1 checkpoint output when Cloudflare reuses a completed step marker", async () => {
+    const checkpointOutput = { payload: "restored-from-d1" };
+    let operationCalls = 0;
+    const workflowStep = {
+      do: async <T,>(): Promise<T> => ({
+        checkpoint: "enrich",
+        completed: true,
+      }) as T,
+    };
+
+    const result = await runCheckpointWithWorkflowStep(
+      workflowStep,
+      "enrich",
+      async () => {
+        operationCalls += 1;
+        return checkpointOutput;
+      },
+    );
+
+    expect(result).toBe(checkpointOutput);
+    expect(operationCalls).toBe(1);
+  });
+
   it("keeps pre-feedback ranking on resume while a new run applies feedback", async () => {
     // This fails if ranking ignores effective feedback weights or a resume
     // rereads mutable global preferences.

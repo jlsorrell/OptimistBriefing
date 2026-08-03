@@ -74,12 +74,21 @@ const CHECKPOINT_OPTIONS = {
   retries: { limit: 2, delay: "10 seconds", backoff: "exponential" as const },
 };
 
-export function runCheckpointWithWorkflowStep<T>(
+export async function runCheckpointWithWorkflowStep<T>(
   step: WorkflowStepLike,
   checkpoint: PipelineStep,
   operation: () => Promise<T>,
 ): Promise<T> {
-  return step.do(checkpoint, CHECKPOINT_OPTIONS, operation);
+  let executed = false;
+  let output!: T;
+
+  await step.do(checkpoint, CHECKPOINT_OPTIONS, async () => {
+    output = await operation();
+    executed = true;
+    return { checkpoint, completed: true };
+  });
+
+  return executed ? output : operation();
 }
 
 function monthStart(now: Date): string {
