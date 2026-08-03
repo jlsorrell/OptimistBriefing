@@ -66,10 +66,7 @@ function sourceDocumentForItem(item: Item): SourcePacket {
       sourceId: source.id,
       sourceName: source.name,
       evidenceKind: researchItem
-        ? primaryResearchSourceIds.has(source.id) ||
-            (primaryResearchSourceIds.size === 0 &&
-              commentary === undefined &&
-              source.role === "primary")
+        ? primaryResearchSourceIds.has(source.id)
           ? "primary-research"
           : "commentary"
         : "news-evidence",

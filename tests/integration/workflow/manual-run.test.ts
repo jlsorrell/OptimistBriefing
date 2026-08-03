@@ -1243,6 +1243,16 @@ describe("manual editorial run", () => {
         assessed: 0,
         outcome: "success" as const,
       },
+      {
+        laneId: "papers-with-code-co:page",
+        sourceId: "papers-with-code-co",
+        discoveryFamily: "commentary" as const,
+        discovered: 1,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "success" as const,
+      },
     ];
     const repository = {
       getDiscoveryObservations: async () => [],
@@ -1272,6 +1282,28 @@ describe("manual editorial run", () => {
         implementationAvailable: true,
       },
     };
+    const commentary = {
+      ...rawResearchCandidate(),
+      kind: "blog" as const,
+      sourceId: "papers-with-code-co",
+      sourceName: "Papers with Code",
+      sourceRole: "blog" as const,
+      originalUrl: "https://paperswithcode.co/paper/2607.12345",
+      externalId: "papers-with-code:2607.12345",
+      externalIds: ["papers-with-code:2607.12345"],
+      accessLevel: "metadata" as const,
+      abstract: null,
+      content: null,
+      relatedPaperIds: [candidate.externalId],
+      preferredInstitutionMatches: [],
+      citationCount: null,
+      influentialCitationCount: null,
+      metadata: {
+        discoveryFamily: "commentary",
+        discoveryLaneIds: ["papers-with-code-co:page"],
+        implementationAvailable: true,
+      },
+    };
     const context = createProductionPipelineContext({
       editionDate: "2033-01-20",
       runId: "run-discovery-diagnostics",
@@ -1290,7 +1322,7 @@ describe("manual editorial run", () => {
           generatedObjects: [assessment],
         }),
       },
-      collectCandidates: async () => [candidate],
+      collectCandidates: async () => [candidate, commentary],
       loadDiscoveryDiagnostics: () => initialDiagnostics,
       researchRepository: repository,
     });
@@ -1307,10 +1339,12 @@ describe("manual editorial run", () => {
       [
         { ...initialDiagnostics[0], deduplicated: 1 },
         initialDiagnostics[1],
+        { ...initialDiagnostics[2], deduplicated: 1 },
       ],
       [
         { ...initialDiagnostics[0], deduplicated: 1, triaged: 1 },
         initialDiagnostics[1],
+        { ...initialDiagnostics[2], deduplicated: 1, triaged: 1 },
       ],
       [
         {
@@ -1320,6 +1354,12 @@ describe("manual editorial run", () => {
           assessed: 1,
         },
         initialDiagnostics[1],
+        {
+          ...initialDiagnostics[2],
+          deduplicated: 1,
+          triaged: 1,
+          assessed: 1,
+        },
       ],
     ]);
     expect(

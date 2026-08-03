@@ -89,8 +89,22 @@ describe("PublicationCollector", () => {
       relatedPaperIds: ["arXiv:2608.00001"],
       sourceRole: "blog",
       sectionEligibility: ["research", "research_radar", "technology", "ai_policy"],
-      metadata: { canCorroborateFacts: false, retention: "ephemeral-only" },
+      metadata: {
+        canCorroborateFacts: false,
+        retention: "ephemeral-only",
+        discoveryLaneIds: ["example-lab:page"],
+      },
     });
+    expect(result.discoveryDiagnostics).toEqual([{
+      laneId: "example-lab:page",
+      sourceId: "example-lab",
+      discoveryFamily: "official-publication",
+      discovered: 2,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "success",
+    }]);
     expect(technical?.content).toContain("bounded study");
     expect(technical?.content).not.toContain("Discard navigation");
     expect(technical?.content).not.toContain("discard()");
@@ -141,9 +155,23 @@ describe("PublicationCollector", () => {
 
     expect(result.candidates).toHaveLength(2);
     expect(result.candidates).toEqual(expect.arrayContaining([
-      expect.objectContaining({ sourceId: "alignment-forum", discoveryFamily: "commentary", relatedPaperIds: ["arXiv:2608.00001"], metadata: expect.objectContaining({ canCorroborateFacts: false }) }),
-      expect.objectContaining({ sourceId: "lesswrong-curated", discoveryFamily: "commentary", relatedPaperIds: ["arXiv:2608.00001"], metadata: expect.objectContaining({ canCorroborateFacts: false }) }),
+      expect.objectContaining({ sourceId: "alignment-forum", discoveryFamily: "commentary", relatedPaperIds: ["arXiv:2608.00001"], metadata: expect.objectContaining({ canCorroborateFacts: false, discoveryLaneIds: ["alignment-forum:rss"] }) }),
+      expect.objectContaining({ sourceId: "lesswrong-curated", discoveryFamily: "commentary", relatedPaperIds: ["arXiv:2608.00001"], metadata: expect.objectContaining({ canCorroborateFacts: false, discoveryLaneIds: ["lesswrong-curated:rss"] }) }),
     ]));
+    expect(result.discoveryDiagnostics).toEqual([
+      expect.objectContaining({
+        laneId: "alignment-forum:rss",
+        sourceId: "alignment-forum",
+        discovered: 1,
+        outcome: "success",
+      }),
+      expect.objectContaining({
+        laneId: "lesswrong-curated:rss",
+        sourceId: "lesswrong-curated",
+        discovered: 1,
+        outcome: "success",
+      }),
+    ]);
   });
 
   it("marks oversized RSS bodies ephemeral so durable checkpoints bound them", async () => {
@@ -199,6 +227,43 @@ describe("PublicationCollector", () => {
 
     expect(result.candidates).toEqual([]);
     expect(result.failures).toEqual([{ sourceId: "broken", kind: "fetch" }]);
+    expect(result.discoveryDiagnostics).toEqual([{
+      laneId: "broken:page",
+      sourceId: "broken",
+      discoveryFamily: "official-publication",
+      discovered: 0,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "fetch",
+    }]);
+  });
+
+  it("retains a real page lane when collection succeeds with zero results", async () => {
+    const collector = createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () =>
+          new Response("<!doctype html><html><body></body></html>", {
+            headers: { "content-type": "text/html" },
+          })
+        ),
+      }),
+      sources: [source()],
+    });
+
+    const result = await collector.collect(window);
+
+    expect(result.candidates).toEqual([]);
+    expect(result.discoveryDiagnostics).toEqual([{
+      laneId: "example-lab:page",
+      sourceId: "example-lab",
+      discoveryFamily: "official-publication",
+      discovered: 0,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "success",
+    }]);
   });
 
   it("uses configured selectors only when JSON-LD is absent and caps items and detail fetches", async () => {
@@ -319,6 +384,7 @@ describe("PapersWithCodeAdapter", () => {
 
     const candidates = await adapter.collect(window);
 
+    expect(adapter.laneId).toBe("papers-with-code-co:page");
     expect(candidates).toHaveLength(2);
     expect(candidates[0]).toMatchObject({
       externalId: "arXiv:2608.00001",
@@ -328,7 +394,11 @@ describe("PapersWithCodeAdapter", () => {
       accessLevel: "metadata",
       abstract: null,
       content: null,
-      metadata: { implementationAvailable: true, canCorroborateFacts: false },
+      metadata: {
+        implementationAvailable: true,
+        canCorroborateFacts: false,
+        discoveryLaneIds: ["papers-with-code-co:page"],
+      },
     });
     expect(candidates[1]).toMatchObject({
       externalId: "papers-with-code:98456",

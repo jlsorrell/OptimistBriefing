@@ -309,6 +309,10 @@ function existingAttachedCommentary(value: unknown): AttachedResearchCommentary[
 }
 
 function attachCommentary(paper: Item, commentary: Item): Item {
+  const discoveryLaneIds = [...new Set([
+    ...stringArray(paper.metadata.discoveryLaneIds),
+    ...stringArray(commentary.metadata.discoveryLaneIds),
+  ])].sort((left, right) => left.localeCompare(right)).slice(0, 64);
   const commentaryMetadata = new Map<string, AttachedResearchCommentary>();
   for (const entry of [
     ...existingAttachedCommentary(paper.metadata.attachedCommentary),
@@ -330,6 +334,7 @@ function attachCommentary(paper: Item, commentary: Item): Item {
     ),
     metadata: {
       ...paper.metadata,
+      discoveryLaneIds,
       attachedCommentary: [...commentaryMetadata.values()].sort((left, right) =>
         attachedCommentaryKey(left).localeCompare(attachedCommentaryKey(right)),
       ),

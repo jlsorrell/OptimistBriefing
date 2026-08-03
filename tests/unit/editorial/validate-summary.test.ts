@@ -139,6 +139,32 @@ function researchPacket(commentaryClaim: string): SourcePacket {
   } as SourcePacket;
 }
 
+function researchItemWithAuthority(
+  metadata: Record<string, unknown>,
+): Item {
+  return {
+    id: "paper-authority",
+    kind: "paper",
+    canonicalUrl: "https://arxiv.org/abs/2608.00001",
+    title: "A measured research result",
+    publishedAt: "2026-08-01T12:00:00.000Z",
+    sourceRefs: [{
+      id: "arxiv",
+      name: "arXiv",
+      url: "https://arxiv.org/abs/2608.00001",
+      role: "primary",
+      retrievedAt: "2026-08-02T09:00:00.000Z",
+    }],
+    accessLevel: "abstract",
+    primaryTopic: "oversight",
+    tags: ["research"],
+    normalizedText: GROUNDED_TEXT,
+    metadata,
+    createdAt: "2026-08-02T09:00:00.000Z",
+    expiresAt: null,
+  };
+}
+
 describe("validateSummary", () => {
   it("requires primary research authority for an unattributed paper-result claim", () => {
     const claim = "The paper reports a twenty percent improvement.";
@@ -925,6 +951,44 @@ describe("validateSummary", () => {
 
 describe("SourcePacketSchema", () => {
   const source = sourcePacketFixture().sources[0]!;
+
+  it("does not infer primary research authority from a source role", () => {
+    const packet = sourcePacketForItem(researchItemWithAuthority({}));
+    const result = validateSummary(
+      summaryFixture({
+        accessLevel: "abstract",
+        claims: [{
+          text: GROUNDED_TEXT,
+          sourceIds: ["arxiv"],
+          evidenceExcerpt: GROUNDED_TEXT,
+        }],
+      }),
+      packet,
+    );
+
+    expect(packet.sources[0]?.evidenceKind).toBe("commentary");
+    expect(result.errors).toContain("PRIMARY_RESEARCH_SOURCE_REQUIRED:0");
+  });
+
+  it("accepts explicit primary research source IDs as claim authority", () => {
+    const packet = sourcePacketForItem(researchItemWithAuthority({
+      primaryResearchSourceIds: ["arxiv"],
+    }));
+    const result = validateSummary(
+      summaryFixture({
+        accessLevel: "abstract",
+        claims: [{
+          text: GROUNDED_TEXT,
+          sourceIds: ["arxiv"],
+          evidenceExcerpt: GROUNDED_TEXT,
+        }],
+      }),
+      packet,
+    );
+
+    expect(packet.sources[0]?.evidenceKind).toBe("primary-research");
+    expect(result.errors).not.toContain("PRIMARY_RESEARCH_SOURCE_REQUIRED:0");
+  });
 
   it("requires a bounded source name and exact evidence kind", () => {
     const attributed = {

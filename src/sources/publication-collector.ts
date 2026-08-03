@@ -7,10 +7,13 @@ import { type OutboundUrlPolicy } from "./outbound-url";
 import { PublicationPageAdapter } from "./publication-page";
 import { mapRssCollectionBatch, RssAdapter } from "./rss";
 import {
+  DiscoveryLaneDiagnosticSchema,
   RawPublicationCandidateSchema,
   ResearchSourceRecordSchema,
   type CollectionBatch,
   type CollectionWindow,
+  type DiscoveryFamily,
+  type DiscoveryLaneDiagnostic,
   type RawItem,
   type RawPublicationCandidate,
 } from "./types";
@@ -37,6 +40,7 @@ function publicationFromRss(item: RawItem, source: SourceRecord): RawPublication
           ? "metadata-only"
           : "ephemeral-only",
       discoveryMechanism: "rss",
+      discoveryLaneIds: [`${source.id}:rss`],
     },
   });
 }
@@ -49,8 +53,34 @@ export type PublicationCollectorOptions = {
 
 type PublicationSourceAdapter = {
   sourceId: string;
+  laneId: string;
+  discoveryFamily: DiscoveryFamily;
   collect(window: CollectionWindow): Promise<readonly RawPublicationCandidate[]>;
 };
+
+function publicationFamily(source: SourceRecord): DiscoveryFamily {
+  return source.id === "alignment-forum" || source.id === "lesswrong-curated"
+    ? "commentary"
+    : "official-publication";
+}
+
+function publicationDiagnostic(
+  laneId: string,
+  sourceId: string,
+  discoveryFamily: DiscoveryFamily,
+  batch: CollectionBatch<RawPublicationCandidate>,
+): DiscoveryLaneDiagnostic {
+  return DiscoveryLaneDiagnosticSchema.parse({
+    laneId,
+    sourceId,
+    discoveryFamily,
+    discovered: batch.candidates.length,
+    deduplicated: 0,
+    triaged: 0,
+    assessed: 0,
+    outcome: batch.failures[0]?.kind ?? "success",
+  });
+}
 
 export class PublicationCollector {
   private readonly rssAdapters: readonly { source: SourceRecord; adapter: RssAdapter }[];
@@ -67,24 +97,72 @@ export class PublicationCollector {
   }
 
   async collect(window: CollectionWindow): Promise<CollectionBatch<RawPublicationCandidate>> {
-    const rssBatches = await Promise.all(
+    const rssOutcomes = await Promise.all(
       this.rssAdapters.map(async ({ source, adapter }) => {
+        const laneId = `${source.id}:rss`;
+        const discoveryFamily = publicationFamily(source);
         try {
-          return mapRssCollectionBatch(
+          const batch = mapRssCollectionBatch(
             await adapter.collect(window),
             (item) => publicationFromRss(item, source),
           );
-        } catch {
           return {
+            batch,
+            diagnostic: publicationDiagnostic(
+              laneId,
+              source.id,
+              discoveryFamily,
+              batch,
+            ),
+          };
+        } catch {
+          const batch: CollectionBatch<RawPublicationCandidate> = {
             candidates: [],
             succeededSourceIds: [],
             failures: [{ sourceId: source.id, kind: "parse" as const }],
           };
+          return {
+            batch,
+            diagnostic: publicationDiagnostic(
+              laneId,
+              source.id,
+              discoveryFamily,
+              batch,
+            ),
+          };
         }
       }),
     );
-    const pages = await settleCollectionBatch(this.pageAdapters.map((adapter) => ({ sourceId: adapter.sourceId, collect: () => adapter.collect(window) })));
-    const candidates = [...rssBatches.flatMap((batch) => batch.candidates), ...pages.candidates];
+    const pageOutcomes = await Promise.all(this.pageAdapters.map(
+      async (adapter) => {
+        const batch = await settleCollectionBatch([{
+          sourceId: adapter.sourceId,
+          collect: async () => (await adapter.collect(window)).map((candidate) =>
+            RawPublicationCandidateSchema.parse({
+              ...candidate,
+              metadata: {
+                ...candidate.metadata,
+                discoveryLaneIds: [adapter.laneId],
+              },
+            })
+          ),
+        }]);
+        return {
+          batch,
+          diagnostic: publicationDiagnostic(
+            adapter.laneId,
+            adapter.sourceId,
+            adapter.discoveryFamily,
+            batch,
+          ),
+        };
+      }
+    ));
+    const batches = [
+      ...rssOutcomes.map(({ batch }) => batch),
+      ...pageOutcomes.map(({ batch }) => batch),
+    ];
+    const candidates = batches.flatMap((batch) => batch.candidates);
     const position = (sourceId: string) => {
       const index = this.sourceOrder.indexOf(sourceId);
       return index < 0 ? Number.MAX_SAFE_INTEGER : index;
@@ -92,15 +170,34 @@ export class PublicationCollector {
     candidates.sort((left, right) => position(left.sourceId) - position(right.sourceId) || (right.publishedAt ?? "").localeCompare(left.publishedAt ?? "") || left.externalId.localeCompare(right.externalId));
     return {
       candidates,
-      succeededSourceIds: [...rssBatches.flatMap((batch) => batch.succeededSourceIds), ...pages.succeededSourceIds].sort((left, right) => position(left) - position(right)),
-      failures: [...rssBatches.flatMap((batch) => batch.failures), ...pages.failures].sort((left, right) => position(left.sourceId) - position(right.sourceId)),
+      succeededSourceIds: [...new Set(batches.flatMap((batch) =>
+        batch.succeededSourceIds
+      ))].sort((left, right) => position(left) - position(right)),
+      failures: batches.flatMap((batch) => batch.failures).sort((left, right) =>
+        position(left.sourceId) - position(right.sourceId)
+      ),
+      discoveryDiagnostics: [
+        ...rssOutcomes.map(({ diagnostic }) => diagnostic),
+        ...pageOutcomes.map(({ diagnostic }) => diagnostic),
+      ].sort((left, right) =>
+        position(left.sourceId) - position(right.sourceId) ||
+        left.laneId.localeCompare(right.laneId)
+      ).slice(0, 64),
     };
   }
 }
 
-function failedAdapter(sourceId: string, error: unknown): PublicationSourceAdapter {
+function failedAdapter(
+  source: SourceRecord,
+  error: unknown,
+): PublicationSourceAdapter {
   const failure = error instanceof Error ? error : new SyntaxError("Invalid publication source configuration.", { cause: error });
-  return { sourceId, collect: async (_window) => { throw failure; } };
+  return {
+    sourceId: source.id,
+    laneId: `${source.id}:${source.discoveryMechanism}`,
+    discoveryFamily: publicationFamily(source),
+    collect: async (_window) => { throw failure; },
+  };
 }
 
 export function createPublicationCollectorFromCatalog(options: {
@@ -129,7 +226,7 @@ export function createPublicationCollectorFromCatalog(options: {
         throw new SyntaxError("Unsupported publication discovery mechanism.");
       }
     } catch (error) {
-      pageAdapters.push(failedAdapter(input.id, error));
+      pageAdapters.push(failedAdapter(input, error));
     }
   }
   return new PublicationCollector({ rssAdapters, pageAdapters, sourceOrder });

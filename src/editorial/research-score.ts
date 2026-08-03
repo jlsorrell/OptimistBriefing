@@ -47,6 +47,19 @@ export type ResearchContextSignals = {
 
 const MAX_ATTACHED_COMMENTARY_SIGNALS = 16;
 const CONTEXT_ATTENTION_INCREMENT = 0.15;
+const SUBSTANTIVE_COMMENTARY_CODE_POINTS = 200;
+const COMMENTARY_PLACEHOLDERS = new Set([
+  "abstract unavailable",
+  "commentary unavailable",
+  "content unavailable",
+  "no abstract available",
+  "no commentary available",
+  "no content available",
+  "no substantive commentary available",
+  "no summary available",
+  "read more",
+  "summary unavailable",
+]);
 
 function normalizedContextText(value: string): string {
   return value
@@ -66,6 +79,15 @@ function attachedCommentary(candidate: Item): Record<string, unknown>[] {
     );
 }
 
+function isCommentaryPlaceholder(value: string): boolean {
+  const statements = value.split(/[.!?]+/u)
+    .map((statement) => statement.trim())
+    .filter((statement) => statement.length > 0);
+  return statements.length > 0 && statements.every((statement) =>
+    COMMENTARY_PLACEHOLDERS.has(statement)
+  );
+}
+
 export function deriveResearchContextSignals(
   candidate: Item,
 ): ResearchContextSignals {
@@ -81,7 +103,8 @@ export function deriveResearchContextSignals(
     const title = typeof entry.title === "string"
       ? normalizedContextText(entry.title)
       : "";
-    return entry.accessLevel !== "metadata" || excerpt !== title;
+    return excerpt !== title && !isCommentaryPlaceholder(excerpt) &&
+      [...excerpt].length >= SUBSTANTIVE_COMMENTARY_CODE_POINTS;
   });
   const contextCount = Number(implementationAvailability) +
     Number(substantiveCommentary);

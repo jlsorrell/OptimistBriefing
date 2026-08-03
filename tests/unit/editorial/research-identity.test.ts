@@ -175,7 +175,10 @@ describe("consolidateResearchCandidates", () => {
       externalIds: ["arXiv:2608.00001"],
       accessLevel: "abstract",
       abstract: "Primary abstract evidence.",
-      metadata: { discoveryFamily: "arxiv" },
+      metadata: {
+        discoveryFamily: "arxiv",
+        discoveryLaneIds: ["arxiv:oversight"],
+      },
     });
     const commentary = normalized("alignment-forum", {
       kind: "blog",
@@ -190,6 +193,10 @@ describe("consolidateResearchCandidates", () => {
       relatedPaperIds: ["https://arxiv.org/abs/2608.00001v2"],
       metadata: {
         discoveryFamily: "commentary",
+        discoveryLaneIds: [
+          "papers-with-code-co:page",
+          "arxiv:oversight",
+        ],
         implementationAvailable: true,
         leaderboardRank: 1,
       },
@@ -203,6 +210,10 @@ describe("consolidateResearchCandidates", () => {
       normalizedText: "Primary abstract evidence.",
       metadata: {
         primaryResearchSourceIds: ["arxiv"],
+        discoveryLaneIds: [
+          "arxiv:oversight",
+          "papers-with-code-co:page",
+        ],
         attachedCommentary: [expect.objectContaining({
           sourceId: "alignment-forum",
           role: "blog",
@@ -228,6 +239,37 @@ describe("consolidateResearchCandidates", () => {
       ]),
     );
     expect(consolidated.standaloneCommentary).toHaveLength(0);
+  });
+
+  it("bounds sorted attached-commentary discovery lanes at sixty-four", () => {
+    const paper = normalized("arxiv", {
+      externalId: "arXiv:2608.00002",
+      externalIds: ["arXiv:2608.00002"],
+      metadata: { discoveryFamily: "arxiv" },
+    });
+    const commentary = normalized("papers-with-code-co", {
+      kind: "blog",
+      sourceRole: "blog",
+      externalId: "papers-with-code:2608.00002",
+      externalIds: ["papers-with-code:2608.00002"],
+      relatedPaperIds: ["arXiv:2608.00002"],
+      metadata: {
+        discoveryFamily: "commentary",
+        discoveryLaneIds: Array.from(
+          { length: 65 },
+          (_, index) => `papers-with-code-co:page:${String(index).padStart(2, "0")}`,
+        ).reverse(),
+      },
+    });
+
+    const lanes = consolidateResearchCandidates([commentary, paper]).papers[0]
+      ?.metadata.discoveryLaneIds;
+
+    expect(lanes).toHaveLength(64);
+    expect(lanes).toEqual(Array.from(
+      { length: 64 },
+      (_, index) => `papers-with-code-co:page:${String(index).padStart(2, "0")}`,
+    ));
   });
 
   it("treats a paper-shaped blog source as commentary without metadata hints", () => {

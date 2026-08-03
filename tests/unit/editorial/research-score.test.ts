@@ -6,6 +6,7 @@ import {
   type NewsEvidenceSource,
 } from "../../../src/editorial/news-score";
 import {
+  deriveResearchContextSignals,
   scoreResearch,
   type ResearchScoreInput,
 } from "../../../src/editorial/research-score";
@@ -188,7 +189,8 @@ describe("scoreResearch", () => {
             url: "https://paperswithcode.co/paper/2608.00001",
             retrievedAt: "2026-08-02T09:00:00.000Z",
             accessLevel: "secondary",
-            excerpt: "This review critiques the result and links an implementation.",
+            excerpt: "This review critiques the result and links an implementation. " +
+              "It examines the method, evidence, assumptions, limitations, and external validity in enough detail to support independent expert interpretation of the reported findings and their practical implications.",
             relatedPaperIds: ["arXiv:2608.00001"],
             implementationAvailable: true,
           },
@@ -206,6 +208,51 @@ describe("scoreResearch", () => {
         "Independent implementation located.",
         "Substantive expert commentary located.",
       ]),
+    );
+  });
+
+  it("requires two hundred normalized code points for substantive commentary", () => {
+    const attached = (excerpt: string, title = "Independent review") =>
+      researchItemFixture({
+        attachedCommentary: [{
+          sourceId: "alignment-forum",
+          role: "blog",
+          title,
+          url: "https://www.alignmentforum.org/posts/review",
+          retrievedAt: "2026-08-02T09:00:00.000Z",
+          accessLevel: "secondary",
+          excerpt,
+          relatedPaperIds: ["arXiv:2608.00001"],
+        }],
+      });
+
+    for (const candidate of [
+      attached("x".repeat(199)),
+      attached("t".repeat(220), "t".repeat(220)),
+      attached("No commentary available. ".repeat(10)),
+    ]) {
+      expect(deriveResearchContextSignals(candidate)).toMatchObject({
+        substantiveCommentary: false,
+        seriousAttention: 0.5,
+      });
+      expect(scoreResearch({
+        ...researchScoreFixture(),
+        candidate,
+      }).selectionReasons).not.toContain(
+        "Substantive expert commentary located.",
+      );
+    }
+
+    const substantive = attached("x".repeat(200));
+    expect(deriveResearchContextSignals(substantive)).toMatchObject({
+      substantiveCommentary: true,
+      seriousAttention: 0.65,
+    });
+    expect(scoreResearch({
+      ...researchScoreFixture(),
+      candidate: substantive,
+    }).selectionReasons).toContain(
+      "Substantive expert commentary located.",
     );
   });
 

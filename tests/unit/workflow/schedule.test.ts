@@ -92,6 +92,9 @@ function cachedItem(
     normalizedText: "Supported evidence.",
     metadata: {
       section: options.section,
+      ...(options.kind === "paper"
+        ? { primaryResearchSourceIds: ["source"] }
+        : {}),
       contentFingerprint: `content:${id}`,
       evidenceFingerprint: `evidence:${id}`,
       workflow: {

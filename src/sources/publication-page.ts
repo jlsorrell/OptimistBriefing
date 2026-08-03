@@ -113,6 +113,8 @@ function restriction(source: ResearchSourceRecord, key: string, fallback: string
 
 export class PublicationPageAdapter {
   readonly sourceId: string;
+  readonly laneId: string;
+  readonly discoveryFamily = "official-publication" as const;
   private readonly pageUrl: string;
   private readonly listing: ListingConfig | null;
 
@@ -124,6 +126,7 @@ export class PublicationPageAdapter {
     listing?: unknown,
   ) {
     this.sourceId = source.id;
+    this.laneId = `${source.id}:page`;
     this.pageUrl = assertSafeOutboundUrl(pageUrl, urlPolicy).toString();
     this.listing = listing === undefined ? null : ListingConfigSchema.parse(listing);
   }
@@ -238,6 +241,7 @@ export class PublicationPageAdapter {
               ? "metadata-only"
               : "ephemeral-only",
           discoveryMechanism: "page",
+          discoveryLaneIds: [this.laneId],
           listingUrl: response.finalUrl,
         },
       });

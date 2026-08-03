@@ -1738,46 +1738,12 @@ export function createD1ProductionPipelineContext(
         researchCollector.collect({ from, to }),
         publicationCollector.collect({ from, to }),
       ]);
-      const publicationSourceIds = [
-        ...new Set([
-          ...publications.candidates.map((candidate) => candidate.sourceId),
-          ...publications.succeededSourceIds,
-          ...publications.failures.map((failure) => failure.sourceId),
-        ]),
-      ].sort((left, right) => left.localeCompare(right));
-      const publicationDiagnostics = publicationSourceIds.map((sourceId) => {
-        const candidate = publications.candidates.find(
-          (entry) => entry.sourceId === sourceId,
-        );
-        const catalogSource = sources.find((entry) => entry.id === sourceId);
-        const failure = publications.failures.find(
-          (entry) => entry.sourceId === sourceId,
-        );
-        return DiscoveryLaneDiagnosticSchema.parse({
-          laneId: sourceId,
-          sourceId,
-          discoveryFamily: candidate?.discoveryFamily ??
-            (catalogSource?.role === "blog"
-              ? "commentary"
-              : "official-publication"),
-          discovered: publications.candidates.filter(
-            (entry) => entry.sourceId === sourceId,
-          ).length,
-          deduplicated: 0,
-          triaged: 0,
-          assessed: 0,
-          outcome: failure?.kind ??
-            (publications.succeededSourceIds.includes(sourceId)
-              ? "success"
-              : "unknown"),
-        });
-      });
       discoveryDiagnostics.splice(
         0,
         discoveryDiagnostics.length,
         ...DiscoveryDiagnosticsArraySchema.parse([
           ...(research.discoveryDiagnostics ?? []),
-          ...publicationDiagnostics,
+          ...(publications.discoveryDiagnostics ?? []),
         ].sort((left, right) => left.laneId.localeCompare(right.laneId)).slice(
           0,
           64,
@@ -1828,13 +1794,7 @@ export function createD1ProductionPipelineContext(
           RawNewsCandidateSchema.parse(candidate),
         ),
         ...publications.candidates.map((candidate) =>
-          RawPublicationCandidateSchema.parse({
-            ...candidate,
-            metadata: {
-              ...candidate.metadata,
-              discoveryLaneIds: [candidate.sourceId],
-            },
-          }),
+          RawPublicationCandidateSchema.parse(candidate)
         ),
       ];
     },

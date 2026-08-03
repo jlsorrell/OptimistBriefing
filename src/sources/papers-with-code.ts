@@ -59,6 +59,8 @@ function identifiableCodeLink(article: Element): boolean {
 
 export class PapersWithCodeAdapter {
   readonly sourceId: string;
+  readonly laneId: string;
+  readonly discoveryFamily = "commentary" as const;
   private readonly source: ResearchSourceRecord;
 
   constructor(
@@ -67,6 +69,7 @@ export class PapersWithCodeAdapter {
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
     this.sourceId = this.source.id;
+    this.laneId = `${this.source.id}:page`;
   }
 
   async collect(window: CollectionWindow): Promise<RawPublicationCandidate[]> {
@@ -123,6 +126,7 @@ export class PapersWithCodeAdapter {
           contentUse: "discovery-metadata-only",
           retention: "metadata-only",
           discoveryMechanism: "page",
+          discoveryLaneIds: [this.laneId],
         },
       })];
     }).slice(0, 100);
