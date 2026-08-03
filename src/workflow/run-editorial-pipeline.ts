@@ -1467,11 +1467,30 @@ function sourceDiscoveryFamily(item: Item, sourceId: string): DiscoveryFamily {
   return lineageFamilies.sort()[0] ?? itemDiscoveryFamily(item);
 }
 
-function researchObservation(
+function routedOfficialPublicationRoute(
+  item: Item,
+): "technology" | "ai_policy" | null {
+  const discoveryFamily = DiscoveryFamilySchema.safeParse(
+    item.metadata.discoveryFamily,
+  );
+  if (
+    isResearchItem(item) ||
+    !discoveryFamily.success ||
+    discoveryFamily.data !== "official-publication"
+  ) {
+    return null;
+  }
+  const route = z.enum(["technology", "ai_policy"])
+    .safeParse(item.metadata.primarySection);
+  return route.success ? route.data : null;
+}
+
+function discoveryObservation(
   item: Item,
   sourceId: string,
   retrievedAt: string,
   windowKind: DiscoveryObservation["windowKind"],
+  route: DiscoveryObservation["route"],
   runId: string,
   observedAt: string,
 ): DiscoveryObservation {
@@ -1488,7 +1507,7 @@ function researchObservation(
     contentFingerprint: fingerprints.contentFingerprint,
     evidenceFingerprint: fingerprints.evidenceFingerprint,
     joinedExternalIds: itemStringArray(item.metadata.externalIds).slice(0, 32),
-    route: "research",
+    route,
     expiresAt: new Date(
       Date.parse(observedAt) + 7 * 24 * 60 * 60 * 1_000,
     ).toISOString(),
@@ -1592,6 +1611,19 @@ export function createProductionPipelineContext(
         const fingerprints = researchFingerprints(item);
         return withWorkflowPayload(item, {}, fingerprints);
       });
+      const fingerprintedOfficialArticles = normalized.flatMap((item) => {
+        const route = routedOfficialPublicationRoute(item);
+        if (route === null) return [];
+        return [{
+          original: item,
+          item: withWorkflowPayload(item, {}, researchFingerprints(item)),
+          route,
+        }];
+      });
+      const observedCandidates = [
+        ...fingerprintedResearch,
+        ...fingerprintedOfficialArticles.map(({ item }) => item),
+      ];
       const observedAt = options.now();
       const since = new Date(
         Date.parse(observedAt) - 7 * 24 * 60 * 60 * 1_000,
@@ -1599,12 +1631,12 @@ export function createProductionPipelineContext(
       let priorObservations: readonly DiscoveryObservation[] = [];
       if (
         options.researchRepository !== undefined &&
-        fingerprintedResearch.length > 0
+        observedCandidates.length > 0
       ) {
         try {
           priorObservations = await options.researchRepository
             .getDiscoveryObservations(
-              fingerprintedResearch.map(canonicalResearchIdentity),
+              observedCandidates.map(canonicalResearchIdentity),
               since,
               options.runId,
             );
@@ -1622,20 +1654,47 @@ export function createProductionPipelineContext(
           ? []
           : [withWorkflowPayload(item, {}, { discoveryWindow: windowKind })];
       });
+      const selectedOfficialArticles = fingerprintedOfficialArticles.flatMap(
+        (candidate) => {
+          const windowKind = classifyDiscoveryWindow(
+            candidate.item,
+            priorObservations,
+            observedAt,
+          );
+          return windowKind === null
+            ? []
+            : [{
+                ...candidate,
+                item: withWorkflowPayload(
+                  candidate.item,
+                  {},
+                  { discoveryWindow: windowKind },
+                ),
+              }];
+        },
+      );
+      const selectedObservedItems = [
+        ...selectedResearch.map((item) => ({
+          item,
+          route: "research" as const,
+        })),
+        ...selectedOfficialArticles.map(({ item, route }) => ({ item, route })),
+      ];
       if (
         options.researchRepository !== undefined &&
-        selectedResearch.length > 0
+        selectedObservedItems.length > 0
       ) {
         await options.researchRepository.upsertDiscoveryObservations(
-          selectedResearch.flatMap((item) => {
+          selectedObservedItems.flatMap(({ item, route }) => {
             const windowKind = z.enum(["fresh", "reconsideration"])
               .parse(item.metadata.discoveryWindow);
             return item.sourceRefs.map((source) =>
-              researchObservation(
+              discoveryObservation(
                 item,
                 source.id,
                 source.retrievedAt,
                 windowKind,
+                route,
                 options.runId,
                 observedAt,
               )
@@ -1643,9 +1702,21 @@ export function createProductionPipelineContext(
           }),
         );
       }
-      const news = deduplicateItems(normalized.filter((item) =>
-        !isResearchItem(item)
-      )).items.map((item) => withWorkflowPayload(item, {}));
+      const officialArticleOriginals = new Set(
+        fingerprintedOfficialArticles.map(({ original }) => original),
+      );
+      const selectedOfficialByOriginal = new Map(
+        selectedOfficialArticles.map(({ original, item }) => [original, item]),
+      );
+      const newsCandidates = normalized.flatMap((item) => {
+        if (isResearchItem(item)) return [];
+        if (!officialArticleOriginals.has(item)) return [item];
+        const selected = selectedOfficialByOriginal.get(item);
+        return selected === undefined ? [] : [selected];
+      });
+      const news = deduplicateItems(newsCandidates).items.map((item) =>
+        withWorkflowPayload(item, {})
+      );
       const result = [...selectedResearch, ...news];
       await recordDiscoveryDiagnostics("deduplicated", result);
       return result;

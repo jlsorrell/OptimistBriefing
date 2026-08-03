@@ -109,6 +109,14 @@ export function createPaperDiscoveryAdapters(
                 query: openAlexQuery(topic),
               }),
           ),
+          ...READER_PROFILE.researchTopics.map(
+            (topic) =>
+              new OpenAlexDiscoveryAdapter(http, openAlex, {
+                laneId: `openalex:updated:${topic.id}`,
+                mode: "updated",
+                query: openAlexQuery(topic),
+              }),
+          ),
           new OpenAlexDiscoveryAdapter(http, openAlex, {
             laneId: "openalex:preferred-institutions",
             mode: "institutions",

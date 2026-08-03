@@ -779,14 +779,15 @@ describe("bibliographic discovery", () => {
       }
       throw new Error(`Unexpected OpenAlex URL: ${url}`);
     });
+    const discoveryAdapters = createPaperDiscoveryAdapters(
+      new SourceHttpClient({
+        fetch,
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      [openAlexSource],
+    );
     const collector = new ResearchCollector({
-      discoveryAdapters: createPaperDiscoveryAdapters(
-        new SourceHttpClient({
-          fetch,
-          now: () => new Date("2026-07-29T08:30:00.000Z"),
-        }),
-        [openAlexSource],
-      ),
+      discoveryAdapters,
       enrichers: [],
       preferredInstitutions: READER_PROFILE.preferredInstitutions,
       preferredLabs: READER_PROFILE.preferredLabs,
@@ -816,6 +817,13 @@ describe("bibliographic discovery", () => {
       "arXiv:2608.00001",
       "DOI:10.1000/example",
     ]));
+    expect(discoveryAdapters.map(({ laneId }) => laneId).filter((laneId) =>
+      laneId.startsWith("openalex:updated:")
+    )).toEqual([
+      "openalex:updated:alignment-interpretability",
+      "openalex:updated:oversight-governance",
+      "openalex:updated:secure-computation-ml",
+    ]);
 
     const urls = fetch.mock.calls.map(([input]) => new URL(String(input)));
     expect(urls.every(({ pathname }) =>
@@ -832,7 +840,7 @@ describe("bibliographic discovery", () => {
     expect(institutionUrls.every(
       (url) => url.searchParams.get("select") === "id,display_name",
     )).toBe(true);
-    expect(workUrls).toHaveLength(4);
+    expect(workUrls).toHaveLength(7);
     expect(workUrls.every(
       (url) => url.searchParams.get("per-page") === "100",
     )).toBe(true);
@@ -849,12 +857,20 @@ describe("bibliographic discovery", () => {
     );
     expect(institutionWorkUrl?.searchParams.has("search")).toBe(false);
     expect(workUrls.filter((url) => url.searchParams.has("search"))).toHaveLength(
-      3,
+      6,
     );
     const updatedWorkUrls = workUrls.filter((url) =>
       url.searchParams.get("filter")?.includes("updated_date:>")
     );
-    expect(updatedWorkUrls).toHaveLength(0);
+    expect(updatedWorkUrls).toHaveLength(3);
+    expect(updatedWorkUrls.every((url) => {
+      const filter = url.searchParams.get("filter") ?? "";
+      return filter.includes("updated_date:>2026-07-22") &&
+        filter.includes("to_updated_date:2026-07-29") &&
+        !filter.includes("from_publication_date") &&
+        !filter.includes("to_publication_date") &&
+        url.searchParams.get("sort") === "updated_date:desc";
+    })).toBe(true);
   });
 
   it("discovers older OpenAlex works updated inside the reconsideration window", async () => {

@@ -49,6 +49,7 @@ import type {
 import type {
   DiscoveryObservation,
   RawNewsCandidate,
+  RawPublicationCandidate,
   RawResearchCandidate,
 } from "../../../src/sources/types";
 
@@ -191,6 +192,39 @@ function rawNewsCandidate(
     primaryDocumentUrls: [],
     eventFamilies: [`evaluation-standard-${id}`],
     materialFacts: [],
+  };
+}
+
+function rawOfficialPublicationCandidate(
+  section: "technology" | "ai_policy",
+  id: string,
+  publishedAt: string,
+  evidence: string,
+): RawPublicationCandidate {
+  const sourceId = section === "technology" ? "nist" : "federal-register";
+  const title = section === "technology"
+    ? `NIST launches AI software capability ${id}`
+    : `Federal Register adopts AI regulatory oversight standard ${id}`;
+  return {
+    kind: "publication",
+    sourceId,
+    sourceName: section === "technology" ? "NIST" : "Federal Register",
+    sourceRole: "primary",
+    title,
+    originalUrl: `https://${sourceId}.example.com/publications/${id}`,
+    externalId: id,
+    externalIds: [id],
+    publishedAt,
+    retrievedAt: now,
+    accessLevel: "abstract",
+    authors: [],
+    institutions: [],
+    abstract: evidence,
+    content: null,
+    relatedPaperIds: [],
+    metadata: {},
+    sectionEligibility: [section],
+    discoveryFamily: "official-publication",
   };
 }
 
@@ -2320,6 +2354,149 @@ describe("manual editorial run", () => {
     expect(currentRunObservations.filter(({ runId }) =>
       runId === "two-window-current-run"
     )).toHaveLength(2);
+  });
+
+  it.each([
+    { section: "technology" as const, label: "Technology" },
+    { section: "ai_policy" as const, label: "AI Policy" },
+  ])("applies two-window observation policy to routed $label official publications", async ({
+    section,
+  }) => {
+    // This fails if routed official-publication articles bypass observation
+    // classification or if their persisted route is hardcoded as research.
+    const repository = new D1BriefingRepository(env.DB);
+    const priorNow = "2026-07-27T09:00:00.000Z";
+    const olderPublishedAt = "2026-07-26T09:00:00.000Z";
+    const contextFor = (
+      runId: string,
+      observedAt: string,
+      candidates: readonly RawPublicationCandidate[],
+    ) =>
+      createProductionPipelineContext({
+        editionDate: "2033-03-12",
+        runId,
+        store: new FixtureStore(),
+        now: () => observedAt,
+        providers: {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+        collectCandidates: async () => candidates,
+        researchRepository: repository,
+      });
+    const normalize = async (
+      runId: string,
+      observedAt: string,
+      candidates: readonly RawPublicationCandidate[],
+    ) => {
+      const context = contextFor(runId, observedAt, candidates);
+      return context.normalize(await context.collect());
+    };
+
+    const fresh = rawOfficialPublicationCandidate(
+      section,
+      `${section}-fresh`,
+      "2026-07-30T08:00:00.000Z",
+      "The official publication supplies fresh evidence.",
+    );
+    const unchanged = rawOfficialPublicationCandidate(
+      section,
+      `${section}-unchanged`,
+      olderPublishedAt,
+      "The official publication supplies unchanged evidence.",
+    );
+    const changedBefore = rawOfficialPublicationCandidate(
+      section,
+      `${section}-changed`,
+      olderPublishedAt,
+      "The official publication supplies initial evidence.",
+    );
+    const changedAfter = {
+      ...changedBefore,
+      abstract: "The official publication supplies materially changed evidence.",
+    };
+
+    const freshSelected = await normalize(
+      `${section}-fresh-run`,
+      now,
+      [fresh],
+    );
+    await normalize(`${section}-unchanged-prior`, priorNow, [unchanged]);
+    const unchangedSelected = await normalize(
+      `${section}-unchanged-current`,
+      now,
+      [unchanged],
+    );
+    await normalize(`${section}-changed-prior`, priorNow, [changedBefore]);
+    const changedSelected = await normalize(
+      `${section}-changed-current`,
+      now,
+      [changedAfter],
+    );
+
+    expect(freshSelected).toHaveLength(1);
+    expect(freshSelected[0]).toMatchObject({
+      kind: "article",
+      metadata: {
+        primarySection: section,
+        discoveryWindow: "fresh",
+      },
+    });
+    expect(unchangedSelected).toEqual([]);
+    expect(changedSelected).toHaveLength(1);
+    expect(changedSelected[0]).toMatchObject({
+      kind: "article",
+      metadata: {
+        primarySection: section,
+        discoveryWindow: "reconsideration",
+      },
+    });
+    const changedItem = changedSelected[0]!;
+    const observations = await repository.getDiscoveryObservations(
+      [canonicalResearchIdentity(changedItem)],
+      "2026-07-23T09:00:00.000Z",
+      "inspection-run",
+    );
+    expect(observations.find(({ runId }) =>
+      runId === `${section}-changed-current`
+    )).toMatchObject({
+      canonicalId: canonicalResearchIdentity(changedItem),
+      sourceId: section === "technology" ? "nist" : "federal-register",
+      discoveryFamily: "official-publication",
+      windowKind: "reconsideration",
+      route: section,
+      ...researchFingerprints(changedItem),
+    });
+  });
+
+  it("keeps ordinary news outside discovery-observation classification", async () => {
+    // This fails if the official-publication fallback family accidentally
+    // classifies ordinary article collection as routed publication discovery.
+    const repository = new D1BriefingRepository(env.DB);
+    const context = createProductionPipelineContext({
+      editionDate: "2033-03-12",
+      runId: "ordinary-news-window",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [
+        rawNewsCandidate("ordinary-technology", "technology"),
+      ],
+      researchRepository: repository,
+    });
+
+    const selected = await context.normalize(await context.collect());
+
+    expect(selected).toHaveLength(1);
+    expect(selected[0]?.metadata).not.toHaveProperty("discoveryWindow");
+    expect(await repository.getDiscoveryObservations(
+      [canonicalResearchIdentity(selected[0]!)],
+      "2026-07-23T09:00:00.000Z",
+      "inspection-run",
+    )).toEqual([]);
   });
 
   it("runs paid synthesis calls sequentially", async () => {
