@@ -714,9 +714,16 @@ export class D1PipelineStore implements PipelineStore {
   ): Promise<CheckpointArtifact<unknown> | null> {
     const records = await this.db.prepare(
       `SELECT event_json FROM audit_events
-       WHERE run_id = ? AND event_type = ?
+       WHERE run_id = ?
+         AND event_type = ?
+         AND json_valid(event_json) = 1
+         AND json_extract(event_json, '$.step') = ?
        ORDER BY created_at DESC, id DESC`,
-    ).bind(runId, "workflow_checkpoint").all<{ event_json: string }>();
+    ).bind(
+      runId,
+      "workflow_checkpoint",
+      step,
+    ).all<{ event_json: string }>();
     const groups = new Map<string, {
       chunkCount: number;
       chunks: Map<number, unknown>;

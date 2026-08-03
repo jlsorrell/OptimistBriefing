@@ -350,6 +350,47 @@ describe("durable workflow checkpoint execution", () => {
     expect(operationCalls).toBe(1);
   });
 
+  it("does not transfer malformed checkpoint rows from another step", async () => {
+    const runId = "step-filtered-checkpoint";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2036-04-08",
+      status: "running",
+      currentStep: "shortlist",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const shortlisted = [item("filtered-shortlist", "research")];
+    await store.saveCheckpoint(runId, "shortlist", {
+      output: shortlisted,
+      attempts: 1,
+      durationMs: 10,
+      itemCount: 1,
+      estimatedCostUsd: 0,
+    });
+    await env.DB.prepare(
+      `INSERT INTO audit_events (
+      id, run_id, event_type, event_json, created_at
+    ) VALUES (?, ?, ?, ?, ?)`,
+    ).bind(
+      "malformed-unrelated-checkpoint",
+      runId,
+      "workflow_checkpoint",
+      "{malformed unrelated checkpoint",
+      "2036-04-08T09:01:00.000Z",
+    ).run();
+
+    await expect(store.readArtifact(runId, "shortlist")).resolves.toMatchObject({
+      output: shortlisted,
+      itemCount: 1,
+    });
+  });
+
   it("keeps pre-feedback ranking on resume while a new run applies feedback", async () => {
     // This fails if ranking ignores effective feedback weights or a resume
     // rereads mutable global preferences.
