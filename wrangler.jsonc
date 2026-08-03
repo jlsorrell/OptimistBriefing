@@ -2,6 +2,9 @@
   "name": "optimist-briefing",
   "main": "src/worker.ts",
   "compatibility_date": "2026-07-29",
+  "limits": {
+    "cpu_ms": 5000
+  },
   "assets": {
     "directory": "./dist",
     "not_found_handling": "single-page-application",
