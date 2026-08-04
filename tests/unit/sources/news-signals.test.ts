@@ -44,8 +44,10 @@ describe("AI Policy evidence", () => {
   it.each([
     "Senate bill requires frontier AI model evaluations",
     "AI training compute reporting obligation",
+    "AI training-compute reporting rule",
     "Secure foundation model evaluation standard",
     "Automated decision system procurement rule",
+    "automated-decision-system procurement rule",
   ])("routes explicit policy evidence in %s to AI Policy", (title) => {
     expect(primary(title)).toBe("ai_policy");
   });

@@ -37,9 +37,9 @@ const ENTITY_PATTERNS: readonly [string, RegExp][] = [
 ];
 
 const EXPLICIT_AI_EVIDENCE =
-  /\b(?:artificial intelligence|AI (?:systems?|models?|governance|training|inference)|machine learning|foundation models?|frontier models?|generative AI|automated decision systems?|neural networks?|compute governance|model evaluations?|algorithmic accountability)\b/i;
+  /\b(?:artificial intelligence|AI (?:systems?|models?|governance|training|inference)|machine learning|foundation models?|frontier models?|generative AI|automated[-\s]+decision[-\s]+systems?|neural networks?|compute governance|model evaluations?|algorithmic accountability)\b/i;
 const EXPLICIT_POLICY_ACTION =
-  /\b(?:legislation|bill|regulation|rulemaking|rule (?:requires?|mandates?|governs?)|executive order|standards?|audit (?:requirement|mandate)|requires? audits?|evaluation policy|enforcement|oversight|accountability|procurement rule|reporting obligation|treaty)\b/i;
+  /\b(?:legislation|bill|regulation|rulemaking|rule (?:requires?|mandates?|governs?)|executive order|standards?|audit (?:requirement|mandate)|requires? audits?|evaluation policy|enforcement|oversight|accountability|procurement rule|reporting (?:obligation|rule)|treaty)\b/i;
 const TECHNOLOGY_TERMS =
   /\b(?:AI|artificial intelligence|technology|software|chip|semiconductor|cyber|compute|model|robot|internet|data center)\b/i;
 
