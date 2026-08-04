@@ -1,6 +1,11 @@
 import {
+  DiscoveryDiagnosticsOwnerStageSchema,
+  DiscoveryDiagnosticsStateSchema,
   DiscoveryLaneDiagnosticSchema,
+  type DiscoveryDiagnosticsOwnerStage,
+  type DiscoveryDiagnosticsState,
   type DiscoveryLaneDiagnostic,
+  type DiscoveryRejectionCounts,
   type DiscoveryRejectionReason,
 } from "../sources/types";
 
@@ -11,12 +16,38 @@ export type DiscoveryDiagnosticRef = {
 
 export class DiscoveryDiagnosticsTracker {
   private diagnostics: DiscoveryLaneDiagnostic[];
-  private readonly rejected = new Set<string>();
+  private rejectionCountsByStage: DiscoveryDiagnosticsState["rejectionCountsByStage"];
+  private rejected = new Set<string>();
+  private activeStage: DiscoveryDiagnosticsOwnerStage = "normalize";
 
-  constructor(input: readonly DiscoveryLaneDiagnostic[]) {
-    this.diagnostics = input.map((value) =>
-      DiscoveryLaneDiagnosticSchema.parse(value)
+  constructor(
+    input: readonly DiscoveryLaneDiagnostic[] | DiscoveryDiagnosticsState,
+  ) {
+    const state = DiscoveryDiagnosticsStateSchema.parse(
+      Array.isArray(input)
+        ? {
+            diagnostics: input.map((diagnostic) => ({
+              ...diagnostic,
+              rejectionCounts: {},
+            })),
+            rejectionCountsByStage: emptyRejectionCountsByStage(),
+          }
+        : input,
     );
+    this.diagnostics = state.diagnostics.map((value) =>
+      DiscoveryLaneDiagnosticSchema.parse({ ...value, rejectionCounts: {} })
+    );
+    this.rejectionCountsByStage = structuredClone(
+      state.rejectionCountsByStage,
+    );
+    this.refreshRejectionCounts();
+  }
+
+  beginStage(stage: DiscoveryDiagnosticsOwnerStage): void {
+    this.activeStage = DiscoveryDiagnosticsOwnerStageSchema.parse(stage);
+    this.rejectionCountsByStage[this.activeStage] = [];
+    this.rejected = new Set<string>();
+    this.refreshRejectionCounts();
   }
 
   setStage(
@@ -49,20 +80,37 @@ export class DiscoveryDiagnosticsTracker {
         ({ laneId }) => laneId === ref.laneId,
       );
       if (!diagnostic) continue;
-      const key = `${reason}\u0000${ref.laneId}\u0000${ref.identity}`;
+      const key = `${this.activeStage}\u0000${reason}\u0000${ref.laneId}\u0000${ref.identity}`;
       if (this.rejected.has(key)) continue;
       this.rejected.add(key);
-      diagnostic.rejectionCounts[reason] = Math.min(
+      const stageCounts = this.stageCountsForLane(ref.laneId);
+      stageCounts[reason] = Math.min(
         10_000,
-        (diagnostic.rejectionCounts[reason] ?? 0) + 1,
+        (stageCounts[reason] ?? 0) + 1,
       );
     }
+    this.refreshRejectionCounts();
   }
 
   snapshot(): DiscoveryLaneDiagnostic[] {
     return this.diagnostics
       .map((value) => DiscoveryLaneDiagnosticSchema.parse(value))
       .sort((left, right) => left.laneId.localeCompare(right.laneId));
+  }
+
+  state(): DiscoveryDiagnosticsState {
+    const rejectionCountsByStage = Object.fromEntries(
+      DiscoveryDiagnosticsOwnerStageSchema.options.map((stage) => [
+        stage,
+        [...this.rejectionCountsByStage[stage]].sort((left, right) =>
+          left.laneId.localeCompare(right.laneId)
+        ),
+      ]),
+    );
+    return DiscoveryDiagnosticsStateSchema.parse({
+      diagnostics: this.snapshot(),
+      rejectionCountsByStage,
+    });
   }
 
   private identitiesByLane(
@@ -76,4 +124,49 @@ export class DiscoveryDiagnosticsTracker {
     }
     return result;
   }
+
+  private stageCountsForLane(
+    laneId: string,
+  ): DiscoveryRejectionCounts {
+    const entries = this.rejectionCountsByStage[this.activeStage];
+    const existing = entries.find((entry) => entry.laneId === laneId);
+    if (existing !== undefined) return existing.rejectionCounts;
+    const created = { laneId, rejectionCounts: {} };
+    entries.push(created);
+    return created.rejectionCounts;
+  }
+
+  private refreshRejectionCounts(): void {
+    this.diagnostics = this.diagnostics.map((diagnostic) => {
+      const rejectionCounts: DiscoveryRejectionCounts = {};
+      for (const stage of DiscoveryDiagnosticsOwnerStageSchema.options) {
+        const stageCounts = this.rejectionCountsByStage[stage].find(
+          ({ laneId }) => laneId === diagnostic.laneId,
+        )?.rejectionCounts ?? {};
+        for (const [reason, count] of Object.entries(stageCounts) as Array<
+          [DiscoveryRejectionReason, number]
+        >) {
+          rejectionCounts[reason] = Math.min(
+            10_000,
+            (rejectionCounts[reason] ?? 0) + count,
+          );
+        }
+      }
+      return DiscoveryLaneDiagnosticSchema.parse({
+        ...diagnostic,
+        rejectionCounts,
+      });
+    });
+  }
+}
+
+function emptyRejectionCountsByStage(): DiscoveryDiagnosticsState[
+  "rejectionCountsByStage"
+] {
+  return {
+    normalize: [],
+    prefilter: [],
+    assess: [],
+    shortlist: [],
+  };
 }

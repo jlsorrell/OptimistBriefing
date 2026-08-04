@@ -183,6 +183,9 @@ export const DiscoveryRejectionCountsSchema = z
     capacity_limited: DiscoveryRejectionCountSchema.optional(),
   })
   .strict();
+export type DiscoveryRejectionCounts = z.infer<
+  typeof DiscoveryRejectionCountsSchema
+>;
 
 export const DiscoveryLaneDiagnosticSchema = z
   .object({
@@ -213,6 +216,116 @@ export const DiscoveryLaneDiagnosticSchema = z
       }
     }
   });
+
+export const DiscoveryDiagnosticsOwnerStageSchema = z.enum([
+  "normalize",
+  "prefilter",
+  "assess",
+  "shortlist",
+]);
+export type DiscoveryDiagnosticsOwnerStage = z.infer<
+  typeof DiscoveryDiagnosticsOwnerStageSchema
+>;
+
+const DiscoveryStageLaneRejectionsSchema = z.object({
+  laneId: z.string().min(1).max(200),
+  rejectionCounts: DiscoveryRejectionCountsSchema,
+}).strict();
+
+const DISCOVERY_REJECTION_STAGE_OWNERS: Record<
+  DiscoveryDiagnosticsOwnerStage,
+  ReadonlySet<DiscoveryRejectionReason>
+> = {
+  normalize: new Set([
+    "out_of_window",
+    "unchanged_observation",
+    "identity_merged",
+    "route_excluded",
+    "capacity_limited",
+  ]),
+  prefilter: new Set([
+    "topic_mismatch",
+    "quality_rejected",
+    "capacity_limited",
+  ]),
+  assess: new Set(["quality_rejected", "capacity_limited"]),
+  shortlist: new Set(["capacity_limited"]),
+};
+
+export const DiscoveryDiagnosticsStateSchema = z.object({
+  diagnostics: z.array(DiscoveryLaneDiagnosticSchema).max(64),
+  rejectionCountsByStage: z.object({
+    normalize: z.array(DiscoveryStageLaneRejectionsSchema).max(64),
+    prefilter: z.array(DiscoveryStageLaneRejectionsSchema).max(64),
+    assess: z.array(DiscoveryStageLaneRejectionsSchema).max(64),
+    shortlist: z.array(DiscoveryStageLaneRejectionsSchema).max(64),
+  }).strict(),
+}).strict().superRefine((state, context) => {
+  const diagnosticLaneIds = new Set(
+    state.diagnostics.map(({ laneId }) => laneId),
+  );
+  for (const stage of DiscoveryDiagnosticsOwnerStageSchema.options) {
+    const seen = new Set<string>();
+    for (const [index, lane] of state.rejectionCountsByStage[stage].entries()) {
+      if (!diagnosticLaneIds.has(lane.laneId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Stage rejection lane must exist in diagnostics.",
+          path: ["rejectionCountsByStage", stage, index, "laneId"],
+        });
+      }
+      if (seen.has(lane.laneId)) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Stage rejection lanes must be unique.",
+          path: ["rejectionCountsByStage", stage, index, "laneId"],
+        });
+      }
+      seen.add(lane.laneId);
+      for (const reason of Object.keys(lane.rejectionCounts)) {
+        if (!DISCOVERY_REJECTION_STAGE_OWNERS[stage].has(
+          DiscoveryRejectionReasonSchema.parse(reason),
+        )) {
+          context.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `Rejection reason is not owned by ${stage}.`,
+            path: [
+              "rejectionCountsByStage",
+              stage,
+              index,
+              "rejectionCounts",
+              reason,
+            ],
+          });
+        }
+      }
+    }
+  }
+  for (const [diagnosticIndex, diagnostic] of state.diagnostics.entries()) {
+    for (const reason of DiscoveryRejectionReasonSchema.options) {
+      const derived = Math.min(
+        10_000,
+        DiscoveryDiagnosticsOwnerStageSchema.options.reduce(
+          (total, stage) =>
+            total + (state.rejectionCountsByStage[stage].find(
+              ({ laneId }) => laneId === diagnostic.laneId,
+            )?.rejectionCounts[reason] ?? 0),
+          0,
+        ),
+      );
+      if ((diagnostic.rejectionCounts[reason] ?? 0) !== derived) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: "Public rejection count must equal bounded stage totals.",
+          path: ["diagnostics", diagnosticIndex, "rejectionCounts", reason],
+        });
+      }
+    }
+  }
+});
+export type DiscoveryDiagnosticsState = z.infer<
+  typeof DiscoveryDiagnosticsStateSchema
+>;
 
 export const NewsMaterialFactSchema = z.object({
   kind: z.enum(["status", "number", "date", "amount"]),

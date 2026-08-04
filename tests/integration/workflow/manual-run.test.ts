@@ -47,6 +47,7 @@ import type {
   ModelProvider,
 } from "../../../src/models/provider";
 import type {
+  DiscoveryDiagnosticsState,
   DiscoveryObservation,
   RawNewsCandidate,
   RawPublicationCandidate,
@@ -1261,6 +1262,8 @@ describe("manual editorial run", () => {
 
   it("updates real-lane diagnostics through assessment and applies research context scoring", async () => {
     const diagnosticWrites: Array<readonly unknown[]> = [];
+    let persistedDiagnostics: DiscoveryDiagnosticsState | undefined;
+    let failedNormalizeDiagnostics: DiscoveryDiagnosticsState | undefined;
     const observationWrites: Array<readonly DiscoveryObservation[]> = [];
     const initialDiagnostics = [
       {
@@ -1308,9 +1311,19 @@ describe("manual editorial run", () => {
       putCachedResearchAssessment: async () => undefined,
       recordDiscoveryDiagnostics: async (
         _runId: string,
-        diagnostics: readonly unknown[],
+        diagnostics: DiscoveryDiagnosticsState["diagnostics"],
+        rejectionCountsByStage?: DiscoveryDiagnosticsState[
+          "rejectionCountsByStage"
+        ],
       ) => {
         diagnosticWrites.push(structuredClone(diagnostics));
+        persistedDiagnostics = structuredClone({
+          diagnostics,
+          rejectionCountsByStage: rejectionCountsByStage!,
+        });
+        if (diagnosticWrites.length === 2) {
+          failedNormalizeDiagnostics = persistedDiagnostics;
+        }
       },
     };
     const assessment = {
@@ -1455,20 +1468,106 @@ describe("manual editorial run", () => {
         assessment: new FakeModelProvider(),
       },
       collectCandidates: async () => [],
-      loadDiscoveryDiagnostics: async () => initialDiagnostics,
+      loadDiscoveryDiagnostics: async () => failedNormalizeDiagnostics!,
       researchRepository: {
         ...repository,
         recordDiscoveryDiagnostics: async (
           _runId: string,
-          diagnostics: readonly unknown[],
+          diagnostics: DiscoveryDiagnosticsState["diagnostics"],
+          rejectionCountsByStage?: DiscoveryDiagnosticsState[
+            "rejectionCountsByStage"
+          ],
         ) => {
           resumedWrites.push(structuredClone(diagnostics));
+          expect(rejectionCountsByStage).toEqual(
+            failedNormalizeDiagnostics?.rejectionCountsByStage,
+          );
         },
       },
     });
 
     await resumeContext.normalize(collected);
     expect(resumedWrites).toEqual([diagnosticWrites[1]]);
+  });
+
+  it("attributes every rejected identity from merge groups larger than stored lineage", async () => {
+    const laneIds = Array.from(
+      { length: 64 },
+      (_, index) => `arxiv:large-merge-${String(index).padStart(2, "0")}`,
+    );
+    const candidates = Array.from({ length: 20 }, (_, index) => {
+      const base = rawResearchCandidate(
+        "2607.77777",
+        "A large multi-provider identity merge",
+      );
+      const retained = index === 0;
+      return {
+        ...base,
+        sourceId: `provider-${String(index).padStart(2, "0")}`,
+        sourceName: `Provider ${index}`,
+        originalUrl: `${base.originalUrl}?provider=${index}`,
+        accessLevel: retained ? "full_text" as const : "abstract" as const,
+        content: retained
+          ? "Full text makes this candidate the actual retained winner."
+          : null,
+        metadata: {
+          discoveryFamily: "arxiv",
+          discoveryLaneIds: retained ? laneIds.slice(0, 32) : laneIds,
+        },
+      } satisfies RawResearchCandidate;
+    });
+    const writes: DiscoveryDiagnosticsState[] = [];
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-20",
+      runId: "run-large-merge-diagnostics",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => candidates,
+      loadDiscoveryDiagnostics: () => laneIds.map((laneId, index) => ({
+        laneId,
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv" as const,
+        discovered: index < 32 ? 20 : 19,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "success" as const,
+        rejectionCounts: {},
+      })),
+      researchRepository: {
+        getDiscoveryObservations: async () => [],
+        upsertDiscoveryObservations: async () => undefined,
+        getCachedResearchAssessment: async () => null,
+        putCachedResearchAssessment: async () => undefined,
+        recordDiscoveryDiagnostics: async (
+          _runId,
+          diagnostics,
+          rejectionCountsByStage,
+        ) => {
+          writes.push(structuredClone({
+            diagnostics: [...diagnostics],
+            rejectionCountsByStage: rejectionCountsByStage!,
+          }));
+        },
+      },
+    });
+
+    const normalized = await context.normalize(await context.collect());
+
+    expect(normalized).toHaveLength(1);
+    expect(
+      (normalized[0]?.metadata.discoveryLineage as unknown[]).length,
+    ).toBe(1_024);
+    expect(writes.at(-1)?.diagnostics).toHaveLength(64);
+    expect(writes.at(-1)?.diagnostics.every((diagnostic) =>
+      diagnostic.rejectionCounts.identity_merged === 19
+    )).toBe(true);
+    expect(writes.at(-1)?.rejectionCountsByStage.normalize).toHaveLength(64);
+    expect(JSON.stringify(writes.at(-1))).not.toContain("provider=19");
   });
 
   it("attributes bounded discovery rejections without changing selected IDs", async () => {

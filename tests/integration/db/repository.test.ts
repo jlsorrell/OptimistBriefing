@@ -1597,6 +1597,16 @@ describe("D1BriefingRepository", () => {
         ...diagnostic,
         rejectionCounts: {},
       }]);
+    expect(await repo.getDiscoveryDiagnosticsState("run-diagnostics"))
+      .toEqual({
+        diagnostics: [{ ...diagnostic, rejectionCounts: {} }],
+        rejectionCountsByStage: {
+          normalize: [],
+          prefilter: [],
+          assess: [],
+          shortlist: [],
+        },
+      });
 
     await repo.recordDiscoveryDiagnostics("run-diagnostics", [{
       ...diagnostic,
@@ -1605,7 +1615,18 @@ describe("D1BriefingRepository", () => {
         unchanged_observation: 2,
         capacity_limited: 1,
       },
-    }]);
+    }], {
+      normalize: [{
+        laneId: diagnostic.laneId,
+        rejectionCounts: { unchanged_observation: 2 },
+      }],
+      prefilter: [{
+        laneId: diagnostic.laneId,
+        rejectionCounts: { capacity_limited: 1 },
+      }],
+      assess: [],
+      shortlist: [],
+    });
 
     const events = await env.DB.prepare(
       `SELECT id, event_type, event_json
@@ -1619,14 +1640,28 @@ describe("D1BriefingRepository", () => {
     expect(events.results).toEqual([{
       id: "discovery_diagnostics:run-diagnostics",
       event_type: "discovery_diagnostics",
-      event_json: JSON.stringify([{
-        ...diagnostic,
-        discovered: 4,
-        rejectionCounts: {
-          unchanged_observation: 2,
-          capacity_limited: 1,
+      event_json: JSON.stringify({
+        diagnostics: [{
+          ...diagnostic,
+          discovered: 4,
+          rejectionCounts: {
+            unchanged_observation: 2,
+            capacity_limited: 1,
+          },
+        }],
+        rejectionCountsByStage: {
+          normalize: [{
+            laneId: diagnostic.laneId,
+            rejectionCounts: { unchanged_observation: 2 },
+          }],
+          prefilter: [{
+            laneId: diagnostic.laneId,
+            rejectionCounts: { capacity_limited: 1 },
+          }],
+          assess: [],
+          shortlist: [],
         },
-      }]),
+      }),
     }]);
     expect((await repo.getWorkflowRunDetail("run-diagnostics"))
       ?.discoveryDiagnostics).toEqual([{
@@ -1637,6 +1672,35 @@ describe("D1BriefingRepository", () => {
           capacity_limited: 1,
         },
       }]);
+    expect(await repo.getDiscoveryDiagnosticsState("run-diagnostics"))
+      .toMatchObject({
+        rejectionCountsByStage: {
+          normalize: [{
+            laneId: diagnostic.laneId,
+            rejectionCounts: { unchanged_observation: 2 },
+          }],
+          prefilter: [{
+            laneId: diagnostic.laneId,
+            rejectionCounts: { capacity_limited: 1 },
+          }],
+          assess: [],
+          shortlist: [],
+        },
+      });
+
+    await expect(repo.recordDiscoveryDiagnostics(
+      "run-diagnostics",
+      [{ ...diagnostic, rejectionCounts: { route_excluded: 1 } }],
+      {
+        normalize: [],
+        prefilter: [{
+          laneId: diagnostic.laneId,
+          rejectionCounts: { route_excluded: 1 },
+        }],
+        assess: [],
+        shortlist: [],
+      },
+    )).rejects.toBeInstanceOf(RepositoryValidationError);
 
     await expect(repo.recordDiscoveryDiagnostics(
       "run-diagnostics",

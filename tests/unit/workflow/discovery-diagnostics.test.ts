@@ -99,4 +99,43 @@ describe("DiscoveryDiagnosticsTracker", () => {
       route_excluded: 10_000,
     });
   });
+
+  it("replaces one owner stage on replay and preserves other stage totals", () => {
+    const firstAttempt = new DiscoveryDiagnosticsTracker([
+      diagnostic("arxiv:one", 10),
+    ]);
+    firstAttempt.beginStage("normalize");
+    firstAttempt.reject("capacity_limited", [
+      { laneId: "arxiv:one", identity: "normalize-1" },
+      { laneId: "arxiv:one", identity: "normalize-2" },
+    ]);
+    firstAttempt.beginStage("prefilter");
+    firstAttempt.reject("capacity_limited", [
+      { laneId: "arxiv:one", identity: "prefilter-1" },
+    ]);
+
+    const replay = new DiscoveryDiagnosticsTracker(firstAttempt.state());
+    replay.beginStage("prefilter");
+    replay.reject("capacity_limited", [
+      { laneId: "arxiv:one", identity: "prefilter-1" },
+    ]);
+
+    expect(replay.snapshot()[0]?.rejectionCounts).toEqual({
+      capacity_limited: 3,
+    });
+    expect(replay.state().rejectionCountsByStage).toEqual({
+      normalize: [{
+        laneId: "arxiv:one",
+        rejectionCounts: { capacity_limited: 2 },
+      }],
+      prefilter: [{
+        laneId: "arxiv:one",
+        rejectionCounts: { capacity_limited: 1 },
+      }],
+      assess: [],
+      shortlist: [],
+    });
+    expect(JSON.stringify(replay.state())).not.toContain("normalize-1");
+    expect(JSON.stringify(replay.state())).not.toContain("prefilter-1");
+  });
 });

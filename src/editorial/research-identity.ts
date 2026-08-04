@@ -8,7 +8,11 @@ import {
   normalizeArxivIdentifier,
   normalizeDoi,
 } from "../sources/identifiers";
-import { mergeItemGroup } from "./deduplicate";
+import {
+  mergeItemGroup,
+  preferredItem,
+  type ItemMergeGroup,
+} from "./deduplicate";
 import {
   canonicalizeUrl,
   normalizeAuthorKey,
@@ -53,6 +57,7 @@ export type ConsolidatedResearchCandidates = {
   papers: Item[];
   standaloneCommentary: Item[];
   merges: ResearchIdentityMerge[];
+  mergeGroups: ItemMergeGroup[];
 };
 
 type DurableIdentities = {
@@ -448,16 +453,14 @@ export function consolidateResearchCandidates(
   });
   const paperGroups = [...grouped.values()].map((members) => ({
     members,
+    retainedItem: members.reduce(preferredItem),
+    attachedCommentary: [] as Item[],
     paper: mergeItemGroup(members),
   }));
   const merges: ResearchIdentityMerge[] = [];
-  for (const { members, paper } of paperGroups) {
-    let retainedWinner = false;
+  for (const { members, paper, retainedItem } of paperGroups) {
     members.forEach((member) => {
-      if (!retainedWinner && member.id === paper.id) {
-        retainedWinner = true;
-        return;
-      }
+      if (member === retainedItem) return;
       const memberIndex = paperCandidates.indexOf(member);
       const reason = members.flatMap((other) => {
         const otherIndex = paperCandidates.indexOf(other);
@@ -489,6 +492,7 @@ export function consolidateResearchCandidates(
       const group = paperGroups[index];
       if (group === undefined) continue;
       group.paper = attachCommentary(group.paper, commentary);
+      group.attachedCommentary.push(commentary);
       merges.push({
         keptItemId: group.paper.id,
         mergedItemId: commentary.id,
@@ -509,5 +513,9 @@ export function consolidateResearchCandidates(
       left.mergedItemId.localeCompare(right.mergedItemId) ||
       left.reason.localeCompare(right.reason),
     ),
+    mergeGroups: paperGroups.map((group) => ({
+      retainedItem: group.retainedItem,
+      inputItems: [...group.members, ...group.attachedCommentary],
+    })),
   };
 }

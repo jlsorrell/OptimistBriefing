@@ -22,6 +22,7 @@ import {
 } from "../contracts/editorial";
 import type {
   CollectionFailureKind,
+  DiscoveryDiagnosticsState,
   DiscoveryLaneDiagnostic,
   DiscoveryObservation,
 } from "../sources/types";
@@ -701,9 +702,13 @@ export interface BriefingRepository {
   listWorkflowRuns(): Promise<readonly WorkflowRun[]>;
   getWorkflowRun(runId: string): Promise<WorkflowRun | null>;
   getWorkflowRunDetail(runId: string): Promise<WorkflowRunDetail | null>;
+  getDiscoveryDiagnosticsState(
+    runId: string,
+  ): Promise<DiscoveryDiagnosticsState | null>;
   recordDiscoveryDiagnostics(
     runId: string,
     diagnostics: readonly DiscoveryLaneDiagnostic[],
+    rejectionCountsByStage?: DiscoveryDiagnosticsState["rejectionCountsByStage"],
   ): Promise<void>;
   recordModelUsage(runId: string, usage: ModelUsageRecord): Promise<void>;
   listMonthlyModelUsage(monthStart: string): Promise<readonly ModelUsageRecord[]>;

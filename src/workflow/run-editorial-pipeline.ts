@@ -18,7 +18,10 @@ import {
 import { durableCollectedCandidate } from "../sources/durable-evidence";
 import { normalizeCandidate } from "../editorial/normalize";
 import { routePublication } from "../editorial/route-publication";
-import { deduplicateItems } from "../editorial/deduplicate";
+import {
+  deduplicateItems,
+  type ItemMergeGroup,
+} from "../editorial/deduplicate";
 import {
   canonicalResearchIdentity,
   consolidateResearchCandidates,
@@ -66,11 +69,13 @@ import {
   RawPublicationCandidateSchema,
   RawResearchCandidateSchema,
   DiscoveryFamilySchema,
+  DiscoveryDiagnosticsStateSchema,
   DiscoveryLaneDiagnosticSchema,
   type RawNewsCandidate,
   type RawPublicationCandidate,
   type RawResearchCandidate,
   type DiscoveryFamily,
+  type DiscoveryDiagnosticsState,
   type DiscoveryLaneDiagnostic,
   type DiscoveryObservation,
   type DiscoveryRejectionReason,
@@ -895,7 +900,8 @@ export type ProductionPipelineContextOptions = {
   collectCandidates: () => Promise<readonly CollectedCandidate[]>;
   loadDiscoveryDiagnostics?: () =>
     | readonly DiscoveryLaneDiagnostic[]
-    | Promise<readonly DiscoveryLaneDiagnostic[]>;
+    | DiscoveryDiagnosticsState
+    | Promise<readonly DiscoveryLaneDiagnostic[] | DiscoveryDiagnosticsState>;
   persistItems?: (items: readonly Item[]) => Promise<void>;
   sourceFailures?: readonly string[];
   loadSourceFailures?: PipelineContext["loadSourceFailures"];
@@ -1489,19 +1495,13 @@ function retainedUpstreamDiagnosticRefs(item: Item): DiscoveryDiagnosticRef[] {
 }
 
 function mergedUpstreamDiagnosticRefs(
-  mergedItems: readonly Item[],
-  inputItems: readonly Item[],
+  mergeGroups: readonly ItemMergeGroup[],
 ): DiscoveryDiagnosticRef[] {
-  return distinctDiagnosticRefs(mergedItems.flatMap((item) => {
-    const refs = upstreamDiagnosticRefs(item);
-    const retainedIdentity = [
-      ...new Set(
-        inputItems
-          .filter((input) => input.id === item.id)
-          .flatMap(upstreamDiagnosticRefs)
-          .map(({ identity }) => identity),
-      ),
-    ].sort()[0] ?? [...new Set(refs.map(({ identity }) => identity))].sort()[0];
+  return distinctDiagnosticRefs(mergeGroups.flatMap((group) => {
+    const refs = group.inputItems.flatMap(upstreamDiagnosticRefs);
+    const retainedIdentity = retainedUpstreamDiagnosticRefs(
+      group.retainedItem,
+    )[0]?.identity;
     return retainedIdentity === undefined
       ? []
       : refs.filter(({ identity }) => identity !== retainedIdentity);
@@ -1648,9 +1648,10 @@ export function createProductionPipelineContext(
     }
     try {
       if (discoveryDiagnostics === null) {
-        const input = DiscoveryDiagnosticsArraySchema.parse(
-          await options.loadDiscoveryDiagnostics(),
-        );
+        const loaded = await options.loadDiscoveryDiagnostics();
+        const input = Array.isArray(loaded)
+          ? DiscoveryDiagnosticsArraySchema.parse(loaded)
+          : DiscoveryDiagnosticsStateSchema.parse(loaded);
         discoveryDiagnostics = new DiscoveryDiagnosticsTracker(input);
       }
       await action(discoveryDiagnostics);
@@ -1678,6 +1679,7 @@ export function createProductionPipelineContext(
       await discoveryDiagnosticsWriter!(
         options.runId,
         tracker.snapshot(),
+        tracker.state().rejectionCountsByStage,
       );
     });
   };
@@ -1701,6 +1703,9 @@ export function createProductionPipelineContext(
       return collected;
     },
     normalize: async (candidates) => {
+      await withDiscoveryDiagnostics((tracker) => {
+        tracker.beginStage("normalize");
+      });
       const normalized: Item[] = [];
       const routeExcluded: DiscoveryDiagnosticRef[] = [];
       for (const candidate of candidates) {
@@ -1725,10 +1730,7 @@ export function createProductionPipelineContext(
       const consolidated = consolidateResearchCandidates(boundedResearch);
       await rejectDiscoveryDiagnostics(
         "identity_merged",
-        mergedUpstreamDiagnosticRefs([
-          ...consolidated.papers,
-          ...consolidated.standaloneCommentary,
-        ], boundedResearch),
+        mergedUpstreamDiagnosticRefs(consolidated.mergeGroups),
       );
       const fingerprintedResearch = [
         ...consolidated.papers,
@@ -1871,7 +1873,7 @@ export function createProductionPipelineContext(
       const deduplicatedNews = deduplicateItems(newsCandidates);
       await rejectDiscoveryDiagnostics(
         "identity_merged",
-        mergedUpstreamDiagnosticRefs(deduplicatedNews.items, newsCandidates),
+        mergedUpstreamDiagnosticRefs(deduplicatedNews.mergeGroups),
       );
       const news = deduplicatedNews.items.map((item) =>
         withWorkflowPayload(item, {})
@@ -1972,6 +1974,9 @@ export function createProductionPipelineContext(
       });
     },
     prefilter: async (items) => {
+      await withDiscoveryDiagnostics((tracker) => {
+        tracker.beginStage("prefilter");
+      });
       const parsed = items.map((item) => WorkflowItemSchema.parse(item));
       const research = parsed.filter(isResearchItem);
       const news = parsed.filter((item) =>
@@ -2006,6 +2011,9 @@ export function createProductionPipelineContext(
       return result;
     },
     assess: async (items) => {
+      await withDiscoveryDiagnostics((tracker) => {
+        tracker.beginStage("assess");
+      });
       const assessed: Item[] = [];
       const maximumUncached = options.budgetPolicy?.state === "hard_stop"
         ? 0
@@ -2195,6 +2203,9 @@ export function createProductionPipelineContext(
       return [...compactResearch, ...developmentItems];
     },
     shortlist: async (items) => {
+      await withDiscoveryDiagnostics((tracker) => {
+        tracker.beginStage("shortlist");
+      });
       const parsed = items.map((item) => WorkflowItemSchema.parse(item));
       const candidates = parsed.map((item) =>
         item.kind === "paper" || item.kind === "blog"
@@ -2394,8 +2405,7 @@ export function createD1ProductionPipelineContext(
     loadDiscoveryDiagnostics: async () =>
       discoveryDiagnostics.length > 0
         ? discoveryDiagnostics
-        : (await store.repository.getWorkflowRunDetail(runId))
-            ?.discoveryDiagnostics ?? [],
+        : (await store.repository.getDiscoveryDiagnosticsState(runId)) ?? [],
     sourceFailures,
     loadSourceFailures: () => store.readCollectionSourceFailures(runId),
     persistItems: async (items) => store.repository.upsertItems(items),
