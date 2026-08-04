@@ -23,6 +23,36 @@ function signals(input: {
   });
 }
 
+function primary(title: string, abstract?: string | null, content?: string | null) {
+  return signals({
+    title,
+    ...(abstract === undefined ? {} : { abstract }),
+    ...(content === undefined ? {} : { content }),
+  }).metadata.primarySection;
+}
+
+describe("AI Policy evidence", () => {
+  it.each([
+    "National Center for Advancing Translational Sciences; Notice of Meeting",
+    "Formations of, Acquisitions by, and Mergers of Bank Holding Companies",
+    "Annual audit notice for regional health grants",
+    "Acme launches an AI assistant product",
+  ])("does not let preferredSection route %s into AI Policy", (title) => {
+    expect(primary(title)).not.toBe("ai_policy");
+  });
+
+  it.each([
+    "Senate bill requires frontier AI model evaluations",
+    "AI training compute reporting obligation",
+    "AI training-compute reporting rule",
+    "Secure foundation model evaluation standard",
+    "Automated decision system procurement rule",
+    "automated-decision-system procurement rule",
+  ])("routes explicit policy evidence in %s to AI Policy", (title) => {
+    expect(primary(title)).toBe("ai_policy");
+  });
+});
+
 describe("news event clause integration", () => {
   it("binds an embedded event to the embedded subject", () => {
     const result = signals({

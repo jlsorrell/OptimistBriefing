@@ -49,7 +49,7 @@ describe("routePublication", () => {
 
   it("routes eligible governance publications to AI Policy", () => {
     const governancePost = publication({
-      title: "AI oversight standard and regulatory accountability framework",
+      title: "AI governance standard and regulatory accountability framework",
       abstract: "The lab publishes an official evaluation-policy standard.",
     });
 
@@ -64,7 +64,7 @@ describe("routePublication", () => {
     const governancePost = publication({
       title: "An update from our lab",
       abstract:
-        "We publish an official AI evaluation-policy standard with governance and regulatory accountability requirements.",
+        "We publish a secure foundation model evaluation standard with governance and accountability requirements.",
     });
 
     expect(routePublication(governancePost)).toMatchObject({
@@ -72,6 +72,15 @@ describe("routePublication", () => {
       canCorroborateFacts: false,
       metadata: { primarySection: "ai_policy" },
     });
+  });
+
+  it.each([
+    "National Center for Advancing Translational Sciences; Notice of Meeting",
+    "Formations of, Acquisitions by, and Mergers of Bank Holding Companies",
+    "Acme launches an AI assistant product amid an annual audit notice",
+  ])("does not route canary %s to AI Policy", (title) => {
+    expect(routePublication(publication({ title }))?.metadata.primarySection)
+      .not.toBe("ai_policy");
   });
 
   it("routes eligible product publications to Technology", () => {

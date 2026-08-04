@@ -62,6 +62,7 @@ function openAlexQuery(
 export function createPaperDiscoveryAdapters(
   http: SourceHttpClient,
   sources: readonly ResearchSourceInput[],
+  options: { openAlexApiKey?: string } = {},
 ): readonly DiscoverySourceAdapter[] {
   const arxiv = sources.find((source) => source.id === "arxiv");
   const semanticScholar = sources.find(
@@ -107,7 +108,9 @@ export function createPaperDiscoveryAdapters(
                 laneId: `openalex:text:${topic.id}`,
                 mode: "text",
                 query: openAlexQuery(topic),
-              }),
+              }, options.openAlexApiKey === undefined
+                ? {}
+                : { apiKey: options.openAlexApiKey }),
           ),
           ...READER_PROFILE.researchTopics.map(
             (topic) =>
@@ -115,7 +118,9 @@ export function createPaperDiscoveryAdapters(
                 laneId: `openalex:updated:${topic.id}`,
                 mode: "updated",
                 query: openAlexQuery(topic),
-              }),
+              }, options.openAlexApiKey === undefined
+                ? {}
+                : { apiKey: options.openAlexApiKey }),
           ),
           new OpenAlexDiscoveryAdapter(http, openAlex, {
             laneId: "openalex:preferred-institutions",
@@ -124,7 +129,9 @@ export function createPaperDiscoveryAdapters(
               ...READER_PROFILE.preferredInstitutions,
               ...READER_PROFILE.preferredLabs,
             ],
-          }),
+          }, options.openAlexApiKey === undefined
+            ? {}
+            : { apiKey: options.openAlexApiKey }),
         ]
       : []),
   ];

@@ -1121,6 +1121,32 @@ describe("durable workflow checkpoint execution", () => {
     })).toThrow();
   });
 
+  it("accepts an omitted OpenAlex key and trims a configured key in runtime configuration", async () => {
+    const base = {
+      DB: env.DB,
+      OPENAI_API_KEY: "secret",
+      SUMMARY_MODEL: "summary-model",
+      ASSESSMENT_MODEL: "assessment-model",
+      EMBEDDING_MODEL: "embedding-model",
+      MONTHLY_BUDGET_USD: "10",
+      SUMMARY_UNIT_PRICE_USD: "0.001",
+      ASSESSMENT_UNIT_PRICE_USD: "0.001",
+      EMBEDDING_UNIT_PRICE_USD: "0.0001",
+    };
+
+    await expect(createBudgetedPipelineRuntimeFactory(base)({
+      runId: "openalex-key-omitted",
+      editionDate: "2026-07-29",
+    })).resolves.not.toHaveProperty("openAlexApiKey");
+    await expect(createBudgetedPipelineRuntimeFactory({
+      ...base,
+      OPENALEX_API_KEY: " fixture-openalex-key ",
+    })({
+      runId: "openalex-key-trimmed",
+      editionDate: "2026-07-29",
+    })).resolves.toMatchObject({ openAlexApiKey: "fixture-openalex-key" });
+  });
+
   it("rejects conflicting prices for one model before runtime construction", () => {
     let dbAccesses = 0;
     const database = new Proxy({}, {

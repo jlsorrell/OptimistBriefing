@@ -3,6 +3,7 @@
 
 # Secret
 OPENAI_API_KEY=
+OPENALEX_API_KEY=
 
 # Nonsecret runtime configuration
 SUMMARY_MODEL=

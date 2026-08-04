@@ -14,6 +14,7 @@ export interface Env {
   CLOUDFLARE_ACCESS_AUDIENCE: string;
   ALLOWED_EMAILS: string;
   OPENAI_API_KEY: string;
+  OPENALEX_API_KEY?: string;
   SUMMARY_MODEL: string;
   ASSESSMENT_MODEL: string;
   EMBEDDING_MODEL: string;

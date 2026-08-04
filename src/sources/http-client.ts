@@ -31,12 +31,17 @@ type SourceHttpClientOptions = {
   now?: () => Date;
 };
 
-type RequestOptions = {
-  method?: "GET" | "POST";
+export type SourceRequestOptions = {
   headers?: HeadersInit;
-  body?: string;
   useValidators?: boolean;
   urlPolicy?: OutboundUrlPolicy;
+  sensitiveQueryParameters?: readonly string[];
+  maxRetries?: number;
+};
+
+type RequestOptions = SourceRequestOptions & {
+  method?: "GET" | "POST";
+  body?: string;
 };
 
 type Validators = {
@@ -118,6 +123,16 @@ function retryDelayMilliseconds(
     }
   }
   return Math.min(500 * 2 ** attempt, 8_000);
+}
+
+function redactedUrl(input: URL, names: readonly string[]): string {
+  const output = new URL(input);
+  for (const name of names) {
+    if (output.searchParams.has(name)) {
+      output.searchParams.set(name, "REDACTED");
+    }
+  }
+  return output.toString();
 }
 
 async function readBoundedBody(
@@ -213,11 +228,7 @@ export class SourceHttpClient {
   get(
     source: ResearchSourceInput,
     url: string,
-    options: {
-      headers?: HeadersInit;
-      useValidators?: boolean;
-      urlPolicy?: OutboundUrlPolicy;
-    } = {},
+    options: SourceRequestOptions = {},
   ): Promise<SourceHttpResponse> {
     return this.request(source, url, {
       method: "GET",
@@ -226,6 +237,12 @@ export class SourceHttpClient {
       ...(options.urlPolicy === undefined
         ? {}
         : { urlPolicy: options.urlPolicy }),
+      ...(options.sensitiveQueryParameters === undefined
+        ? {}
+        : { sensitiveQueryParameters: options.sensitiveQueryParameters }),
+      ...(options.maxRetries === undefined
+        ? {}
+        : { maxRetries: options.maxRetries }),
     });
   }
 
@@ -256,6 +273,14 @@ export class SourceHttpClient {
     url: string,
     options: RequestOptions,
   ): Promise<SourceHttpResponse> {
+    const maxRetries = options.maxRetries ?? this.maxRetries;
+    if (
+      !Number.isSafeInteger(maxRetries) ||
+      maxRetries < 0 ||
+      maxRetries > 5
+    ) {
+      throw new RangeError("Source retry count must be an integer from 0 to 5.");
+    }
     let initialUrl: URL;
     try {
       initialUrl = assertSafeOutboundUrl(url, options.urlPolicy);
@@ -271,10 +296,11 @@ export class SourceHttpClient {
       }
       throw error;
     }
-    const validatorKey = `${source.id}:${initialUrl.toString()}`;
+    const sensitiveNames = options.sensitiveQueryParameters ?? [];
+    const validatorKey = `${source.id}:${redactedUrl(initialUrl, sensitiveNames)}`;
     const method = options.method ?? "GET";
 
-    for (let attempt = 0; attempt <= this.maxRetries; attempt += 1) {
+    for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
       const headers = new Headers(options.headers);
       headers.set("user-agent", this.userAgent);
       if (options.useValidators === true) {
@@ -350,6 +376,18 @@ export class SourceHttpClient {
             options.urlPolicy,
           );
           await response.body?.cancel();
+          if (
+            nextUrl.origin !== previousOrigin &&
+            sensitiveNames.some((name) => finalUrl.searchParams.has(name))
+          ) {
+            throw new SourceFetchError({
+              sourceId: source.id,
+              status: response.status,
+              retryable: false,
+              failureKind: "policy",
+              reason: "sensitive query redirect rejected",
+            });
+          }
           redirectCount += 1;
           if (nextUrl.origin !== previousOrigin) {
             requestHeaders = new Headers();
@@ -401,13 +439,13 @@ export class SourceHttpClient {
           contentType: response.headers.get("content-type"),
           etag: response.headers.get("etag"),
           lastModified: response.headers.get("last-modified"),
-          finalUrl: finalUrl.toString(),
+          finalUrl: redactedUrl(finalUrl, sensitiveNames),
         };
       }
 
       if (!response.ok) {
         const retryable = RETRYABLE_STATUSES.has(response.status);
-        if (retryable && attempt < this.maxRetries) {
+        if (retryable && attempt < maxRetries) {
           const delay = retryDelayMilliseconds(
             response.headers.get("retry-after"),
             attempt,
@@ -474,7 +512,7 @@ export class SourceHttpClient {
         contentType: response.headers.get("content-type"),
         etag,
         lastModified,
-        finalUrl: finalUrl.toString(),
+        finalUrl: redactedUrl(finalUrl, sensitiveNames),
       };
     }
 

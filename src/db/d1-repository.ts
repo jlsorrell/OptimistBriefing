@@ -70,8 +70,10 @@ import {
 } from "../pagination/edition-cursor";
 import {
   CollectionFailureKindSchema,
+  DiscoveryDiagnosticsStateSchema,
   DiscoveryObservationSchema,
   type CollectionFailureKind,
+  type DiscoveryDiagnosticsState,
   type DiscoveryObservation,
   type DiscoveryLaneDiagnostic,
 } from "../sources/types";
@@ -2102,6 +2104,12 @@ export class D1BriefingRepository implements BriefingRepository {
   async recordDiscoveryDiagnostics(
     runId: string,
     diagnostics: readonly DiscoveryLaneDiagnostic[],
+    rejectionCountsByStage: DiscoveryDiagnosticsState["rejectionCountsByStage"] = {
+      normalize: [],
+      prefilter: [],
+      assess: [],
+      shortlist: [],
+    },
   ): Promise<void> {
     const validRunId = validated(
       NonemptyIdSchema,
@@ -2112,6 +2120,11 @@ export class D1BriefingRepository implements BriefingRepository {
       DiscoveryDiagnosticsSchema,
       diagnostics,
       "Invalid discovery diagnostics",
+    );
+    const validState = validated(
+      DiscoveryDiagnosticsStateSchema,
+      { diagnostics: validDiagnostics, rejectionCountsByStage },
+      "Invalid discovery diagnostics state",
     );
     const result = await this.db.prepare(
       `INSERT INTO audit_events (
@@ -2127,7 +2140,7 @@ export class D1BriefingRepository implements BriefingRepository {
       `discovery_diagnostics:${validRunId}`,
       validRunId,
       "discovery_diagnostics",
-      JSON.stringify(validDiagnostics),
+      JSON.stringify(validState),
       new Date().toISOString(),
       validRunId,
     ).run();
@@ -2136,6 +2149,46 @@ export class D1BriefingRepository implements BriefingRepository {
         "Discovery diagnostics require an existing workflow run",
       );
     }
+  }
+
+  async getDiscoveryDiagnosticsState(
+    runId: string,
+  ): Promise<DiscoveryDiagnosticsState | null> {
+    const validRunId = validated(
+      NonemptyIdSchema,
+      runId,
+      "Invalid discovery diagnostics run ID",
+    );
+    const row = await this.db.prepare(
+      `SELECT event_json
+       FROM audit_events
+       WHERE run_id = ? AND event_type = 'discovery_diagnostics'
+       LIMIT 1`,
+    ).bind(validRunId).first<{ event_json: string }>();
+    if (row === null) return null;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(row.event_json);
+    } catch {
+      return null;
+    }
+    const state = DiscoveryDiagnosticsStateSchema.safeParse(parsed);
+    if (state.success) return state.data;
+    const legacy = DiscoveryDiagnosticsSchema.safeParse(parsed);
+    return legacy.success
+      ? DiscoveryDiagnosticsStateSchema.parse({
+          diagnostics: legacy.data.map((diagnostic) => ({
+            ...diagnostic,
+            rejectionCounts: {},
+          })),
+          rejectionCountsByStage: {
+            normalize: [],
+            prefilter: [],
+            assess: [],
+            shortlist: [],
+          },
+        })
+      : null;
   }
 
   async getWorkflowRunDetail(
@@ -2183,9 +2236,14 @@ export class D1BriefingRepository implements BriefingRepository {
         continue;
       }
       if (event.event_type === "discovery_diagnostics") {
-        const diagnostics = DiscoveryDiagnosticsSchema.safeParse(parsed);
-        if (diagnostics.success) {
-          discoveryDiagnostics = diagnostics.data;
+        const state = DiscoveryDiagnosticsStateSchema.safeParse(parsed);
+        if (state.success) {
+          discoveryDiagnostics = state.data.diagnostics;
+        } else {
+          const diagnostics = DiscoveryDiagnosticsSchema.safeParse(parsed);
+          if (diagnostics.success) {
+            discoveryDiagnostics = diagnostics.data;
+          }
         }
         continue;
       }

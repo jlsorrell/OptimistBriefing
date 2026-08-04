@@ -12,10 +12,14 @@ Only `/health` is outside application middleware and returns
 applies to that path. Static assets contain no credentials or private briefing
 data.
 
-`OPENAI_API_KEY` is an encrypted Worker secret. `ALLOWED_EMAILS` should also be
-stored as an encrypted secret because it is personal access-control data. Never
-log Access assertions, cookies, OAuth secrets, API keys, source packets, article
-bodies, or a populated `.dev.vars`.
+`OPENAI_API_KEY` is an encrypted Worker secret. `OPENALEX_API_KEY`, when
+configured, is also an encrypted Worker secret; it is optional and must never
+be treated as ordinary configuration. `ALLOWED_EMAILS` should also be stored as
+an encrypted secret because it is personal access-control data. Never log
+Access assertions, cookies, OAuth secrets, API keys, source packets, article
+bodies, or a populated `.dev.vars`. In particular, an OpenAlex key must not
+appear in command arguments, Git, D1 records, logs, audit events, screenshots,
+returned URLs, or run-detail JSON.
 
 ## Diagnostic redaction
 

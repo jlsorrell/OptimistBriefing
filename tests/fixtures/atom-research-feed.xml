@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom">
+  <title>Example Research Feed</title>
+  <entry>
+    <title>An Atom research result</title>
+    <link href="https://www.lesswrong.com/posts/example/atom-result" rel="alternate" />
+    <author><name>Atom Researcher</name></author>
+    <id>urn:example:atom-result</id>
+    <published>2026-08-02T12:00:00Z</published>
+    <summary><![CDATA[A sanitized Atom summary.]]></summary>
+  </entry>
+</feed>

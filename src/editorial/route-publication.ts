@@ -1,4 +1,7 @@
-import { deriveNewsSignals } from "../sources/news-signals";
+import {
+  deriveNewsSignals,
+  hasExplicitAiPolicyEvidence,
+} from "../sources/news-signals";
 import { normalizeArxivIdentifier, normalizeDoi } from "../sources/identifiers";
 import {
   RawNewsCandidateSchema,
@@ -11,7 +14,6 @@ import {
 import { mapResearchTopicIds } from "./research-topics";
 
 const SUBSTANTIVE_RESEARCH = /\b(?:study|studies|method|methodology|experiment|analysis|result|results|finding|findings|proof|theorem)\b/i;
-const GOVERNANCE = /\b(?:legislation|regulation|regulatory|governance|standard|standards|oversight|accountability|audit|evaluation[- ]policy|enforcement|law|legal|bill|executive order)\b/i;
 const TECHNOLOGY = /\b(?:product|model|capability|deployment|deploy|launch|release|released|code release|open[- ]source|software|assistant|api|benchmark release)\b/i;
 const EXPLICIT_PAPER_LINK = /(?:arxiv\.org\/(?:abs|html|pdf)\/|doi\.org\/|\/papers?\/|\bdoi:\s*|\barxiv:\s*)/i;
 
@@ -70,10 +72,7 @@ function routeResearch(
   });
 }
 
-function routeNews(
-  candidate: RawPublicationCandidate,
-  sectionEvidence = candidate.title,
-): RawNewsCandidate {
+function routeNews(candidate: RawPublicationCandidate): RawNewsCandidate {
   const metadata = {
     ...candidate.metadata,
     discoveryFamily: candidate.discoveryFamily,
@@ -86,7 +85,7 @@ function routeNews(
     canCorroborateFacts: false,
     ...deriveNewsSignals({
       kind: "article",
-      title: sectionEvidence,
+      title: candidate.title,
       abstract: candidate.abstract,
       content: candidate.content,
       originalUrl: candidate.originalUrl,
@@ -105,12 +104,17 @@ export function routePublication(
   const topics = mapResearchTopicIds([candidate.title, candidate.abstract ?? "", candidate.content ?? ""]);
   const identifiers = explicitIdentifiers(candidate, searchable);
   const explicitPaperEvidence = identifiers.length > 0 || EXPLICIT_PAPER_LINK.test(searchable);
+  const aiPolicyEvidence = hasExplicitAiPolicyEvidence([
+    candidate.title,
+    candidate.abstract,
+    candidate.content,
+  ]);
   const researchEligible = candidate.sectionEligibility.includes("research") || candidate.sectionEligibility.includes("research_radar");
   if (researchEligible && topics.length > 0 && (explicitPaperEvidence || SUBSTANTIVE_RESEARCH.test(searchable))) {
     return routeResearch(candidate, topics, identifiers, explicitPaperEvidence);
   }
-  if (candidate.sectionEligibility.includes("ai_policy") && GOVERNANCE.test(searchable)) {
-    const routed = routeNews(candidate, searchable);
+  if (candidate.sectionEligibility.includes("ai_policy") && aiPolicyEvidence) {
+    const routed = routeNews(candidate);
     return routed.metadata.primarySection === "ai_policy" ? routed : null;
   }
   if (candidate.sectionEligibility.includes("technology") && TECHNOLOGY.test(searchable)) {

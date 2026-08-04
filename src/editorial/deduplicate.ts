@@ -28,6 +28,12 @@ export type DeduplicationMerge = {
 export type DeduplicationResult = {
   items: Item[];
   merges: DeduplicationMerge[];
+  mergeGroups: ItemMergeGroup[];
+};
+
+export type ItemMergeGroup = {
+  retainedItem: Item;
+  inputItems: Item[];
 };
 
 const ACCESS_PRIORITY: Record<AccessLevel, number> = {
@@ -162,7 +168,7 @@ function stableItemKey(item: Item): string {
   ].join("\u0000");
 }
 
-function preferredItem(left: Item, right: Item): Item {
+export function preferredItem(left: Item, right: Item): Item {
   const accessDifference =
     ACCESS_PRIORITY[right.accessLevel] - ACCESS_PRIORITY[left.accessLevel];
   if (accessDifference !== 0) return accessDifference > 0 ? right : left;
@@ -438,10 +444,12 @@ export function deduplicateItems(
 
   const mergedItems: Item[] = [];
   const merges: DeduplicationMerge[] = [];
+  const mergeGroups: ItemMergeGroup[] = [];
   for (const group of groups.values()) {
     const winner = group.reduce(preferredItem);
     const merged = mergeItemGroup(group);
     mergedItems.push(merged);
+    mergeGroups.push({ retainedItem: winner, inputItems: [...group] });
     let retainedWinner = false;
     for (const item of group) {
       if (!retainedWinner && item === winner) {
@@ -479,6 +487,11 @@ export function deduplicateItems(
       (left, right) =>
         left.keptItemId.localeCompare(right.keptItemId) ||
         left.mergedItemId.localeCompare(right.mergedItemId),
+    ),
+    mergeGroups: mergeGroups.sort((left, right) =>
+      stableItemKey(left.retainedItem).localeCompare(
+        stableItemKey(right.retainedItem),
+      )
     ),
   };
 }

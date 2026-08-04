@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { SourceHttpClient } from "./http-client";
+import { SourceFetchError, SourceHttpClient } from "./http-client";
 import {
   normalizeArxivIdentifier,
   normalizeDoi,
@@ -76,6 +76,22 @@ const OPENALEX_DISCOVERY_POLICY: OutboundUrlPolicy = {
 
 const OPENALEX_DISCOVERY_FIELDS =
   "id,doi,title,publication_date,updated_date,cited_by_count,ids,authorships,topics,abstract_inverted_index,primary_location";
+
+export type OpenAlexRequestOptions = { apiKey?: string };
+
+function configuredApiKey(options: OpenAlexRequestOptions): string {
+  const apiKey = options.apiKey?.trim();
+  if (!apiKey) {
+    throw new SourceFetchError({
+      sourceId: "openalex",
+      status: null,
+      retryable: false,
+      failureKind: "policy",
+      reason: "provider credential unavailable",
+    });
+  }
+  return apiKey;
+}
 
 const MAX_OPENALEX_DISTINCT_ABSTRACT_WORDS = 2_000;
 const MAX_OPENALEX_ABSTRACT_TOKENS = 2_000;
@@ -267,6 +283,7 @@ export class OpenAlexDiscoveryAdapter implements DiscoverySourceAdapter {
     private readonly http: SourceHttpClient,
     source: ResearchSourceInput,
     private readonly options: OpenAlexDiscoveryOptions,
+    private readonly requestOptions: OpenAlexRequestOptions,
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
     this.sourceId = this.source.id;
@@ -282,9 +299,10 @@ export class OpenAlexDiscoveryAdapter implements DiscoverySourceAdapter {
 
   async collect(window: CollectionWindow): Promise<RawItem[]> {
     if (!this.source.enabled) return [];
+    const apiKey = configuredApiKey(this.requestOptions);
     const validWindow = CollectionWindowSchema.parse(window);
     const institutionIds = this.options.mode === "institutions"
-      ? await this.resolveInstitutionIds()
+      ? await this.resolveInstitutionIds(apiKey)
       : [];
     if (
       this.options.mode === "institutions" &&
@@ -300,10 +318,7 @@ export class OpenAlexDiscoveryAdapter implements DiscoverySourceAdapter {
     const url = new URL("https://api.openalex.org/works");
     const updatedWorkLane = this.options.mode === "updated";
     const filters = updatedWorkLane
-      ? [
-          `updated_date:>${localFrom.slice(0, 10)}`,
-          `to_updated_date:${validWindow.to.slice(0, 10)}`,
-        ]
+      ? []
       : [
           `from_publication_date:${localFrom.slice(0, 10)}`,
           `to_publication_date:${validWindow.to.slice(0, 10)}`,
@@ -315,16 +330,19 @@ export class OpenAlexDiscoveryAdapter implements DiscoverySourceAdapter {
         `authorships.institutions.id:${institutionIds.join("|")}`,
       );
     }
-    url.searchParams.set("filter", filters.join(","));
+    if (filters.length > 0) url.searchParams.set("filter", filters.join(","));
     url.searchParams.set("select", OPENALEX_DISCOVERY_FIELDS);
     url.searchParams.set(
       "sort",
       updatedWorkLane ? "updated_date:desc" : "publication_date:desc",
     );
-    url.searchParams.set("per-page", "100");
+    url.searchParams.set("per_page", "100");
+    url.searchParams.set("api_key", apiKey);
     const response = await this.http.get(this.source, url.toString(), {
       useValidators: false,
       urlPolicy: OPENALEX_DISCOVERY_POLICY,
+      sensitiveQueryParameters: ["api_key"],
+      maxRetries: 0,
     });
     const parsed = OpenAlexDiscoveryResponseSchema.parse(
       JSON.parse(response.body ?? "null"),
@@ -340,7 +358,7 @@ export class OpenAlexDiscoveryAdapter implements DiscoverySourceAdapter {
       .map((work) => this.toRawItem(work, response.retrievedAt));
   }
 
-  private async resolveInstitutionIds(): Promise<string[]> {
+  private async resolveInstitutionIds(apiKey: string): Promise<string[]> {
     if (this.options.mode !== "institutions") return [];
     const resolved = new Map<string, string | null>();
     for (const name of unique(this.options.institutionNames)) {
@@ -349,10 +367,13 @@ export class OpenAlexDiscoveryAdapter implements DiscoverySourceAdapter {
       const url = new URL("https://api.openalex.org/institutions");
       url.searchParams.set("search", name);
       url.searchParams.set("select", "id,display_name");
-      url.searchParams.set("per-page", "100");
+      url.searchParams.set("per_page", "100");
+      url.searchParams.set("api_key", apiKey);
       const response = await this.http.get(this.source, url.toString(), {
         useValidators: false,
         urlPolicy: OPENALEX_DISCOVERY_POLICY,
+        sensitiveQueryParameters: ["api_key"],
+        maxRetries: 0,
       });
       const parsed = OpenAlexInstitutionSearchResponseSchema.parse(
         JSON.parse(response.body ?? "null"),
@@ -436,6 +457,7 @@ export class OpenAlexAdapter implements ResearchEnricher {
     private readonly http: SourceHttpClient,
     source: ResearchSourceInput,
     endpoint = "https://api.openalex.org/works",
+    private readonly requestOptions: OpenAlexRequestOptions,
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
     this.sourceId = this.source.id;
@@ -462,6 +484,7 @@ export class OpenAlexAdapter implements ResearchEnricher {
     if (paperDois.length === 0) {
       return [...candidates];
     }
+    const apiKey = configuredApiKey(this.requestOptions);
 
     const enrichments = new Map<
       string,
@@ -477,9 +500,13 @@ export class OpenAlexAdapter implements ResearchEnricher {
         "select",
         "id,doi,title,cited_by_count,ids,authorships,topics",
       );
-      url.searchParams.set("per-page", "50");
+      url.searchParams.set("per_page", "50");
+      url.searchParams.set("api_key", apiKey);
       const response = await this.http.get(this.source, url.toString(), {
+        useValidators: false,
         urlPolicy: OPENALEX_POLICY,
+        sensitiveQueryParameters: ["api_key"],
+        maxRetries: 0,
       });
       if (response.body === null) {
         continue;

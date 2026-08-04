@@ -39,6 +39,7 @@ const MonthlyBudgetBindingSchema = z.string().trim().min(1).max(40)
 
 export const ScheduledModelConfigSchema = z.object({
   OPENAI_API_KEY: z.string().min(1).max(4_096),
+  OPENALEX_API_KEY: z.string().trim().min(1).max(4_096).optional(),
   SUMMARY_MODEL: z.string().min(1).max(200),
   ASSESSMENT_MODEL: z.string().min(1).max(200),
   EMBEDDING_MODEL: z.string().min(1).max(200),
@@ -221,6 +222,7 @@ export function createBudgetedPipelineRuntimeFactory(
     Env,
     | "DB"
     | "OPENAI_API_KEY"
+    | "OPENALEX_API_KEY"
     | "SUMMARY_MODEL"
     | "ASSESSMENT_MODEL"
     | "EMBEDDING_MODEL"
@@ -233,6 +235,7 @@ export function createBudgetedPipelineRuntimeFactory(
 ): PipelineRuntimeFactory {
   const config = ScheduledModelConfigSchema.parse({
     OPENAI_API_KEY: env.OPENAI_API_KEY,
+    OPENALEX_API_KEY: env.OPENALEX_API_KEY,
     SUMMARY_MODEL: env.SUMMARY_MODEL,
     ASSESSMENT_MODEL: env.ASSESSMENT_MODEL,
     EMBEDDING_MODEL: env.EMBEDDING_MODEL,
@@ -282,6 +285,9 @@ export function createBudgetedPipelineRuntimeFactory(
         }),
       },
       budgetPolicy: ledger.policy,
+      ...(config.OPENALEX_API_KEY === undefined
+        ? {}
+        : { openAlexApiKey: config.OPENALEX_API_KEY }),
     };
   };
 }
@@ -328,6 +334,9 @@ export class DailyBriefingWorkflow extends WorkflowEntrypoint<Env, RunParams> {
         ...(runtime.budgetPolicy === undefined
           ? {}
           : { budgetPolicy: runtime.budgetPolicy }),
+        ...(runtime.openAlexApiKey === undefined
+          ? {}
+          : { openAlexApiKey: runtime.openAlexApiKey }),
         checkpointExecutor: (checkpoint, operation) =>
           runCheckpointWithWorkflowStep(step as unknown as WorkflowStepLike, checkpoint, operation),
       },

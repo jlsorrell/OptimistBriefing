@@ -36,12 +36,10 @@ const ENTITY_PATTERNS: readonly [string, RegExp][] = [
   ["AI", /\bAI\b/i],
 ];
 
-const AI_CONTEXT =
-  /\b(?:AI|artificial intelligence|machine learning|algorithmic?|model(?:s)?)\b/i;
-const GOVERNANCE_CONTEXT =
-  /\b(?:policy|regulat(?:ion|ory)|law|bill|standard(?:s)?|oversight|governance|accountability|audit|executive order)\b/i;
-const STRONG_AI_POLICY_CONTEXT =
-  /\b(?:AI|artificial intelligence|algorithmic?|model)\s+(?:policy|regulat(?:ion|ory)|law|bill|standard(?:s)?|oversight|governance|accountability)|\b(?:policy|regulat(?:ion|ory)|law|bill|standard(?:s)?|oversight|governance|accountability)\s+(?:for|of|on)?\s*(?:AI|artificial intelligence|algorithmic?|models?)\b/i;
+const EXPLICIT_AI_EVIDENCE =
+  /\b(?:artificial intelligence|AI (?:systems?|models?|governance|training|inference)|machine learning|foundation models?|frontier models?|generative AI|automated[-\s]+decision[-\s]+systems?|neural networks?|compute governance|model evaluations?|algorithmic accountability)\b/i;
+const EXPLICIT_POLICY_ACTION =
+  /\b(?:legislation|bill|regulation|rulemaking|rule (?:requires?|mandates?|governs?)|executive order|standards?|audit (?:requirement|mandate)|requires? audits?|evaluation policy|enforcement|oversight|accountability|procurement rule|reporting (?:obligation|rule)|treaty)\b/i;
 const TECHNOLOGY_TERMS =
   /\b(?:AI|artificial intelligence|technology|software|chip|semiconductor|cyber|compute|model|robot|internet|data center)\b/i;
 
@@ -72,6 +70,16 @@ function materialParts(input: MaterialTextInput): string[] {
     .filter((value): value is string => typeof value === "string")
     .map((value) => value.replace(/\s+/g, " ").trim())
     .filter(Boolean);
+}
+
+export function hasExplicitAiPolicyEvidence(
+  values: readonly (string | null | undefined)[],
+): boolean {
+  const material = values
+    .filter((value): value is string => typeof value === "string")
+    .join("\n")
+    .slice(0, 12_000);
+  return EXPLICIT_AI_EVIDENCE.test(material) && EXPLICIT_POLICY_ACTION.test(material);
 }
 
 function sentences(input: MaterialTextInput): string[] {
@@ -946,6 +954,7 @@ export function derivePrimarySection(
   namedEntities: readonly string[],
   kind: ItemKind,
   preferredSection: EditionSection | undefined,
+  aiPolicyEvidence: boolean,
 ): EditionSection {
   if (kind === "forecast") return "forecast";
   const eligible = new Set(sectionEligibility);
@@ -966,27 +975,18 @@ export function derivePrimarySection(
   if (
     preferredSection !== undefined &&
     eligible.has(preferredSection) &&
-    preferredSection !== "morning_brief"
+    preferredSection !== "morning_brief" &&
+    (preferredSection !== "ai_policy" || aiPolicyEvidence)
   ) {
     return preferredSection;
   }
-  if (
-    eligible.has("ai_policy") &&
-    (STRONG_AI_POLICY_CONTEXT.test(title) ||
-      (AI_CONTEXT.test(title) && GOVERNANCE_CONTEXT.test(title)))
-  ) {
+  if (eligible.has("ai_policy") && aiPolicyEvidence) {
     return "ai_policy";
   }
   if (eligible.has("technology") && TECHNOLOGY_TERMS.test(title)) {
     return "technology";
   }
-  for (const section of [
-    "world",
-    "technology",
-    "ai_policy",
-    "dmv",
-    "baltimore",
-  ] as const) {
+  for (const section of ["world", "technology", "dmv", "baltimore"] as const) {
     if (eligible.has(section)) return section;
   }
   return "world";
@@ -1014,6 +1014,7 @@ export function deriveNewsSignals(input: {
 } {
   const sectionEligibility = [...new Set(input.sectionEligibility)];
   const materialText = [input.title, input.abstract, input.content];
+  const aiPolicyEvidence = hasExplicitAiPolicyEvidence(materialText);
   const namedEntities = deriveNamedEntities(
     materialText,
     input.metadata,
@@ -1070,6 +1071,7 @@ export function deriveNewsSignals(input: {
         namedEntities,
         input.kind,
         input.preferredSection,
+        aiPolicyEvidence,
       ),
     },
   };

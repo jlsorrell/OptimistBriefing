@@ -18,14 +18,17 @@ import {
 import { durableCollectedCandidate } from "../sources/durable-evidence";
 import { normalizeCandidate } from "../editorial/normalize";
 import { routePublication } from "../editorial/route-publication";
-import { deduplicateItems } from "../editorial/deduplicate";
+import {
+  deduplicateItems,
+  type ItemMergeGroup,
+} from "../editorial/deduplicate";
 import {
   canonicalResearchIdentity,
   consolidateResearchCandidates,
 } from "../editorial/research-identity";
 import {
   boundResearchDiscoveryPool,
-  classifyDiscoveryWindow,
+  classifyDiscoveryWindowDecision,
   researchFingerprints,
   triageResearch,
 } from "../editorial/research-triage";
@@ -66,13 +69,16 @@ import {
   RawPublicationCandidateSchema,
   RawResearchCandidateSchema,
   DiscoveryFamilySchema,
+  DiscoveryDiagnosticsStateSchema,
   DiscoveryLaneDiagnosticSchema,
   type RawNewsCandidate,
   type RawPublicationCandidate,
   type RawResearchCandidate,
   type DiscoveryFamily,
+  type DiscoveryDiagnosticsState,
   type DiscoveryLaneDiagnostic,
   type DiscoveryObservation,
+  type DiscoveryRejectionReason,
   type ResearchSourceInput,
 } from "../sources/types";
 import {
@@ -110,6 +116,10 @@ import {
 } from "./types";
 import type { BudgetPolicy } from "../models/cost-ledger";
 import { sourcePacketForItem } from "./source-packet";
+import {
+  DiscoveryDiagnosticsTracker,
+  type DiscoveryDiagnosticRef,
+} from "./discovery-diagnostics";
 
 export { PIPELINE_STEPS } from "./types";
 export type { PipelineContext, PipelineRun, PipelineStore } from "./types";
@@ -872,6 +882,7 @@ export type PipelineProviders = {
 export type PipelineRuntime = {
   providers: PipelineProviders;
   budgetPolicy?: BudgetPolicy;
+  openAlexApiKey?: string;
 };
 
 export type PipelineRuntimeFactory = (input: {
@@ -889,12 +900,14 @@ export type ProductionPipelineContextOptions = {
   collectCandidates: () => Promise<readonly CollectedCandidate[]>;
   loadDiscoveryDiagnostics?: () =>
     | readonly DiscoveryLaneDiagnostic[]
-    | Promise<readonly DiscoveryLaneDiagnostic[]>;
+    | DiscoveryDiagnosticsState
+    | Promise<readonly DiscoveryLaneDiagnostic[] | DiscoveryDiagnosticsState>;
   persistItems?: (items: readonly Item[]) => Promise<void>;
   sourceFailures?: readonly string[];
   loadSourceFailures?: PipelineContext["loadSourceFailures"];
   checkpointExecutor?: PipelineContext["checkpointExecutor"];
   budgetPolicy?: BudgetPolicy;
+  openAlexApiKey?: string;
   cleanupTerminalReservations?: PipelineContext["cleanupTerminalReservations"];
   researchRepository?: Pick<
     BriefingRepository,
@@ -1036,6 +1049,33 @@ function withWorkflowPayload(
   });
 }
 
+function discoveryIdentityHash(value: string): string {
+  let first = 2_166_136_261;
+  let second = 2_246_822_519;
+  for (const character of value) {
+    const point = character.codePointAt(0) ?? 0;
+    first = Math.imul(first ^ point, 16_777_619);
+    second = Math.imul(second ^ point, 32_654_599);
+  }
+  return `${(first >>> 0).toString(36)}${(second >>> 0).toString(36)}`;
+}
+
+function upstreamCandidateIdentity(
+  candidate: CollectedCandidate,
+  normalizedItemId?: string,
+): string {
+  if (!isRawCollectedCandidate(candidate)) return `item:${candidate.id}`;
+  const sourceLabel = candidate.sourceId.slice(0, 100);
+  const upstream = `${sourceLabel}:${discoveryIdentityHash(JSON.stringify([
+    candidate.sourceId,
+    candidate.externalId,
+    candidate.originalUrl,
+  ]))}`;
+  return normalizedItemId === undefined
+    ? `upstream:${upstream}`
+    : `item:${normalizedItemId}:${upstream}`;
+}
+
 function normalizedCandidate(candidate: CollectedCandidate): Item | null {
   const storedItem = ItemSchema.safeParse(candidate);
   if (storedItem.success) {
@@ -1068,7 +1108,7 @@ function normalizedCandidate(candidate: CollectedCandidate): Item | null {
     laneId,
     routed.sourceId,
     discoveryFamily,
-    normalized.id,
+    upstreamCandidateIdentity(routed, normalized.id),
   ]));
   const normalizedWithLineage = ItemSchema.parse({
     ...normalized,
@@ -1410,32 +1450,98 @@ function legacyCommentaryLineageKeys(
     ]));
 }
 
-function diagnosticLineageKeys(
-  item: Item,
-  diagnostic: DiscoveryLaneDiagnostic,
-): string[] {
-  const lineage = itemDiscoveryLineage(item).filter(
-    ([laneId, sourceId, family]) =>
-      laneId === diagnostic.laneId &&
-      sourceId === diagnostic.sourceId &&
-      family === diagnostic.discoveryFamily,
+function distinctDiagnosticRefs(
+  refs: readonly DiscoveryDiagnosticRef[],
+): DiscoveryDiagnosticRef[] {
+  return [...new Map(refs.map((ref) => [
+    `${ref.laneId}\u0000${ref.identity}`,
+    ref,
+  ])).values()];
+}
+
+function rawDiagnosticRefs(
+  candidate: CollectedCandidate,
+): DiscoveryDiagnosticRef[] {
+  const identity = upstreamCandidateIdentity(candidate);
+  return distinctDiagnosticRefs(discoveryLaneIds(candidate).map((laneId) => ({
+    laneId,
+    identity,
+  })));
+}
+
+function upstreamDiagnosticRefs(item: Item): DiscoveryDiagnosticRef[] {
+  const lineage = itemDiscoveryLineage(item).map(
+    ([laneId, , , identity]) => ({ laneId, identity }),
   );
-  if (lineage.length > 0) {
-    return lineage.map(([, , , upstreamItemId]) =>
-      `${diagnostic.laneId}\u0000${upstreamItemId}`
-    );
+  const coveredLanes = new Set(lineage.map(({ laneId }) => laneId));
+  const fallbackIdentity = canonicalResearchIdentity(item);
+  return distinctDiagnosticRefs([
+    ...lineage,
+    ...discoveryLaneIds(item).flatMap((laneId) =>
+      coveredLanes.has(laneId) ? [] : [{ laneId, identity: fallbackIdentity }]
+    ),
+  ]);
+}
+
+function retainedUpstreamDiagnosticRefs(item: Item): DiscoveryDiagnosticRef[] {
+  const refs = upstreamDiagnosticRefs(item);
+  const identities = [...new Set(refs.map(({ identity }) => identity))];
+  const retainedIdentity = identities
+    .filter((identity) => identity.startsWith(`item:${item.id}:`))
+    .sort()[0] ?? identities.sort()[0];
+  return retainedIdentity === undefined
+    ? []
+    : refs.filter(({ identity }) => identity === retainedIdentity);
+}
+
+function mergedUpstreamDiagnosticRefs(
+  mergeGroups: readonly ItemMergeGroup[],
+): DiscoveryDiagnosticRef[] {
+  return distinctDiagnosticRefs(mergeGroups.flatMap((group) => {
+    const refs = group.inputItems.flatMap(upstreamDiagnosticRefs);
+    const retainedIdentity = retainedUpstreamDiagnosticRefs(
+      group.retainedItem,
+    )[0]?.identity;
+    return retainedIdentity === undefined
+      ? []
+      : refs.filter(({ identity }) => identity !== retainedIdentity);
+  }));
+}
+
+function stageDiagnosticRefs(
+  items: readonly Item[],
+  assessedOnly = false,
+): DiscoveryDiagnosticRef[] {
+  return distinctDiagnosticRefs(items.flatMap((item) => {
+    if (
+      !isResearchItem(item) ||
+      (assessedOnly && workflowPayload(item).assessment === undefined)
+    ) {
+      return [];
+    }
+    const identity = canonicalResearchIdentity(item);
+    const laneIds = new Set([
+      ...discoveryLaneIds(item),
+      ...itemDiscoveryLineage(item).map(([laneId]) => laneId),
+    ]);
+    return [...laneIds].map((laneId) => ({ laneId, identity }));
+  }));
+}
+
+function omittedItems(
+  input: readonly Item[],
+  retained: readonly Item[],
+): Item[] {
+  const retainedCounts = new Map<string, number>();
+  for (const item of retained) {
+    retainedCounts.set(item.id, (retainedCounts.get(item.id) ?? 0) + 1);
   }
-  if (!discoveryLaneIds(item).includes(diagnostic.laneId)) return [];
-  if (diagnostic.discoveryFamily === "commentary") {
-    const commentaryKeys = legacyCommentaryLineageKeys(
-      item,
-      diagnostic.sourceId,
-    );
-    if (commentaryKeys.length > 0) return commentaryKeys;
-  }
-  return [
-    `${diagnostic.laneId}\u0000${canonicalResearchIdentity(item)}`,
-  ];
+  return input.filter((item) => {
+    const remaining = retainedCounts.get(item.id) ?? 0;
+    if (remaining === 0) return true;
+    retainedCounts.set(item.id, remaining - 1);
+    return false;
+  });
 }
 
 function itemDiscoveryFamily(item: Item): DiscoveryFamily {
@@ -1528,53 +1634,54 @@ export function createProductionPipelineContext(
   const preferences = parsedPreferences(options.preferences);
   const effectiveWeights = effectivePreferenceWeights(preferences);
   const configuredBudgets = preferredSectionBudgets(preferences);
-  let discoveryDiagnostics: DiscoveryLaneDiagnostic[] = [];
-  let discoveryDiagnosticsLoaded = false;
-  const recordDiscoveryDiagnostics = async (
-    field?: "deduplicated" | "triaged" | "assessed",
-    items: readonly Item[] = [],
+  const discoveryDiagnosticsWriter = options.researchRepository
+    ?.recordDiscoveryDiagnostics?.bind(options.researchRepository);
+  let discoveryDiagnostics: DiscoveryDiagnosticsTracker | null = null;
+  const withDiscoveryDiagnostics = async (
+    action: (tracker: DiscoveryDiagnosticsTracker) => void | Promise<void>,
   ): Promise<void> => {
     if (
-      options.researchRepository === undefined ||
-      options.researchRepository.recordDiscoveryDiagnostics === undefined ||
+      discoveryDiagnosticsWriter === undefined ||
       options.loadDiscoveryDiagnostics === undefined
     ) {
       return;
     }
     try {
-      if (field === undefined || !discoveryDiagnosticsLoaded) {
-        discoveryDiagnostics = DiscoveryDiagnosticsArraySchema.parse(
-          await options.loadDiscoveryDiagnostics(),
-        );
-        discoveryDiagnosticsLoaded = true;
+      if (discoveryDiagnostics === null) {
+        const loaded = await options.loadDiscoveryDiagnostics();
+        const input = Array.isArray(loaded)
+          ? DiscoveryDiagnosticsArraySchema.parse(loaded)
+          : DiscoveryDiagnosticsStateSchema.parse(loaded);
+        discoveryDiagnostics = new DiscoveryDiagnosticsTracker(input);
       }
-      if (field !== undefined) {
-        discoveryDiagnostics = discoveryDiagnostics.map((diagnostic) => {
-          const distinctLineage = new Set(items.flatMap((item) =>
-            isResearchItem(item) &&
-                (field !== "assessed" ||
-                  workflowPayload(item).assessment !== undefined)
-              ? diagnosticLineageKeys(item, diagnostic)
-              : []
-          ));
-          const precedingCount = field === "deduplicated"
-            ? diagnostic.discovered
-            : field === "triaged"
-              ? diagnostic.deduplicated
-              : diagnostic.triaged;
-          return DiscoveryLaneDiagnosticSchema.parse({
-            ...diagnostic,
-            [field]: Math.min(precedingCount, distinctLineage.size),
-          });
-        });
-      }
-      await options.researchRepository.recordDiscoveryDiagnostics(
-        options.runId,
-        discoveryDiagnostics,
-      );
+      await action(discoveryDiagnostics);
     } catch {
       // Optional observability must not abort editorial work.
     }
+  };
+  const rejectDiscoveryDiagnostics = async (
+    reason: DiscoveryRejectionReason,
+    refs: readonly DiscoveryDiagnosticRef[],
+  ): Promise<void> => {
+    await withDiscoveryDiagnostics((tracker) => tracker.reject(reason, refs));
+  };
+  const recordDiscoveryDiagnostics = async (
+    field?: "deduplicated" | "triaged" | "assessed",
+    items: readonly Item[] = [],
+  ): Promise<void> => {
+    await withDiscoveryDiagnostics(async (tracker) => {
+      if (field !== undefined) {
+        tracker.setStage(
+          field,
+          stageDiagnosticRefs(items, field === "assessed"),
+        );
+      }
+      await discoveryDiagnosticsWriter!(
+        options.runId,
+        tracker.snapshot(),
+        tracker.state().rejectionCountsByStage,
+      );
+    });
   };
   return {
     editionDate: options.editionDate,
@@ -1596,14 +1703,35 @@ export function createProductionPipelineContext(
       return collected;
     },
     normalize: async (candidates) => {
-      const normalized = candidates.flatMap((candidate) => {
-        const routed = normalizedCandidate(candidate);
-        return routed === null ? [] : [routed];
+      await withDiscoveryDiagnostics((tracker) => {
+        tracker.beginStage("normalize");
       });
+      const normalized: Item[] = [];
+      const routeExcluded: DiscoveryDiagnosticRef[] = [];
+      for (const candidate of candidates) {
+        const routed = normalizedCandidate(candidate);
+        if (routed === null) {
+          routeExcluded.push(...rawDiagnosticRefs(candidate));
+        } else {
+          normalized.push(routed);
+        }
+      }
+      await rejectDiscoveryDiagnostics("route_excluded", routeExcluded);
+      const unboundedResearch = normalized.filter(isResearchItem);
       const boundedResearch = boundResearchDiscoveryPool(
-        normalized.filter(isResearchItem),
+        unboundedResearch,
+      );
+      await rejectDiscoveryDiagnostics(
+        "capacity_limited",
+        omittedItems(unboundedResearch, boundedResearch).flatMap(
+          upstreamDiagnosticRefs,
+        ),
       );
       const consolidated = consolidateResearchCandidates(boundedResearch);
+      await rejectDiscoveryDiagnostics(
+        "identity_merged",
+        mergedUpstreamDiagnosticRefs(consolidated.mergeGroups),
+      );
       const fingerprintedResearch = [
         ...consolidated.papers,
         ...consolidated.standaloneCommentary,
@@ -1644,35 +1772,63 @@ export function createProductionPipelineContext(
           priorObservations = [];
         }
       }
-      const selectedResearch = fingerprintedResearch.flatMap((item) => {
-        const windowKind = classifyDiscoveryWindow(
+      const researchDecisions = fingerprintedResearch.map((item) => ({
+        item,
+        decision: classifyDiscoveryWindowDecision(
           item,
           priorObservations,
           observedAt,
-        );
-        return windowKind === null
+        ),
+      }));
+      const selectedResearch = researchDecisions.flatMap(({ item, decision }) => {
+        return decision.windowKind === null
           ? []
-          : [withWorkflowPayload(item, {}, { discoveryWindow: windowKind })];
+          : [withWorkflowPayload(
+              item,
+              {},
+              { discoveryWindow: decision.windowKind },
+            )];
       });
-      const selectedOfficialArticles = fingerprintedOfficialArticles.flatMap(
-        (candidate) => {
-          const windowKind = classifyDiscoveryWindow(
+      for (const { item, decision } of researchDecisions) {
+        if (decision.rejectionReason !== null) {
+          await rejectDiscoveryDiagnostics(
+            decision.rejectionReason,
+            retainedUpstreamDiagnosticRefs(item),
+          );
+        }
+      }
+      const officialArticleDecisions = fingerprintedOfficialArticles.map(
+        (candidate) => ({
+          candidate,
+          decision: classifyDiscoveryWindowDecision(
             candidate.item,
             priorObservations,
             observedAt,
-          );
-          return windowKind === null
+          ),
+        }),
+      );
+      const selectedOfficialArticles = officialArticleDecisions.flatMap(
+        ({ candidate, decision }) => {
+          return decision.windowKind === null
             ? []
             : [{
                 ...candidate,
                 item: withWorkflowPayload(
                   candidate.item,
                   {},
-                  { discoveryWindow: windowKind },
+                  { discoveryWindow: decision.windowKind },
                 ),
               }];
         },
       );
+      for (const { candidate: { item }, decision } of officialArticleDecisions) {
+        if (decision.rejectionReason !== null) {
+          await rejectDiscoveryDiagnostics(
+            decision.rejectionReason,
+            retainedUpstreamDiagnosticRefs(item),
+          );
+        }
+      }
       const selectedObservedItems = [
         ...selectedResearch.map((item) => ({
           item,
@@ -1714,7 +1870,12 @@ export function createProductionPipelineContext(
         const selected = selectedOfficialByOriginal.get(item);
         return selected === undefined ? [] : [selected];
       });
-      const news = deduplicateItems(newsCandidates).items.map((item) =>
+      const deduplicatedNews = deduplicateItems(newsCandidates);
+      await rejectDiscoveryDiagnostics(
+        "identity_merged",
+        mergedUpstreamDiagnosticRefs(deduplicatedNews.mergeGroups),
+      );
+      const news = deduplicatedNews.items.map((item) =>
         withWorkflowPayload(item, {})
       );
       const result = [...selectedResearch, ...news];
@@ -1813,6 +1974,9 @@ export function createProductionPipelineContext(
       });
     },
     prefilter: async (items) => {
+      await withDiscoveryDiagnostics((tracker) => {
+        tracker.beginStage("prefilter");
+      });
       const parsed = items.map((item) => WorkflowItemSchema.parse(item));
       const research = parsed.filter(isResearchItem);
       const news = parsed.filter((item) =>
@@ -1827,11 +1991,29 @@ export function createProductionPipelineContext(
         minimumTopicalFit:
           READER_PROFILE.researchQualityGates.minimumTopicalFit,
       });
+      const researchById = new Map(research.map((item) => [item.id, item]));
+      for (const exclusion of triaged.exclusions) {
+        const item = researchById.get(exclusion.itemId);
+        if (item === undefined) continue;
+        const reason: DiscoveryRejectionReason =
+          exclusion.reason === "below_topical_fit"
+            ? "topic_mismatch"
+            : exclusion.reason === "invalid_content"
+              ? "quality_rejected"
+              : "capacity_limited";
+        await rejectDiscoveryDiagnostics(
+          reason,
+          retainedUpstreamDiagnosticRefs(item),
+        );
+      }
       const result = [...triaged.items, ...news];
       await recordDiscoveryDiagnostics("triaged", result);
       return result;
     },
     assess: async (items) => {
+      await withDiscoveryDiagnostics((tracker) => {
+        tracker.beginStage("assess");
+      });
       const assessed: Item[] = [];
       const maximumUncached = options.budgetPolicy?.state === "hard_stop"
         ? 0
@@ -1890,7 +2072,13 @@ export function createProductionPipelineContext(
           }));
           continue;
         }
-        if (uncachedCalls >= maximumUncached) continue;
+        if (uncachedCalls >= maximumUncached) {
+          await rejectDiscoveryDiagnostics(
+            "capacity_limited",
+            retainedUpstreamDiagnosticRefs(item),
+          );
+          continue;
+        }
         uncachedCalls += 1;
         let assessment: ResearchAssessment;
         try {
@@ -1902,7 +2090,13 @@ export function createProductionPipelineContext(
           if (
             error instanceof Error &&
             error.message === "ACCESS_LEVEL_OVERCLAIM"
-          ) continue;
+          ) {
+            await rejectDiscoveryDiagnostics(
+              "quality_rejected",
+              retainedUpstreamDiagnosticRefs(item),
+            );
+            continue;
+          }
           throw error;
         }
         if (options.researchRepository !== undefined) {
@@ -2009,6 +2203,9 @@ export function createProductionPipelineContext(
       return [...compactResearch, ...developmentItems];
     },
     shortlist: async (items) => {
+      await withDiscoveryDiagnostics((tracker) => {
+        tracker.beginStage("shortlist");
+      });
       const parsed = items.map((item) => WorkflowItemSchema.parse(item));
       const candidates = parsed.map((item) =>
         item.kind === "paper" || item.kind === "blog"
@@ -2055,7 +2252,16 @@ export function createProductionPipelineContext(
         .map((item) => ({ id: item.id, section: "research_radar" as const }));
       const ordered = [...morning, ...radar];
       const byId = new Map(parsed.map((item) => [item.id, item]));
-      return ordered.map(({ id, section }) => {
+      const selectedIds = new Set(ordered.map(({ id }) => id));
+      await rejectDiscoveryDiagnostics(
+        "capacity_limited",
+        parsed.flatMap((item) =>
+          isResearchItem(item) && !selectedIds.has(item.id)
+            ? retainedUpstreamDiagnosticRefs(item)
+            : []
+        ),
+      );
+      const result = ordered.map(({ id, section }) => {
         const item = byId.get(id);
         if (item === undefined) throw new Error(`MISSING_SHORTLIST_ITEM:${id}`);
         const reasons = [...selectionReasons(item)];
@@ -2074,6 +2280,8 @@ export function createProductionPipelineContext(
           { section },
         );
       });
+      await recordDiscoveryDiagnostics();
+      return result;
     },
     synthesize: async (items) => {
       const summaries: Array<{
@@ -2178,6 +2386,7 @@ export function createD1ProductionPipelineContext(
     ProductionPipelineContextOptions,
     | "checkpointExecutor"
     | "budgetPolicy"
+    | "openAlexApiKey"
     | "preferences"
     | "cleanupTerminalReservations"
   > = {},
@@ -2185,6 +2394,7 @@ export function createD1ProductionPipelineContext(
   const now = () => new Date().toISOString();
   const sourceFailures: string[] = [];
   const discoveryDiagnostics: DiscoveryLaneDiagnostic[] = [];
+  let discoveryDiagnosticsCollectionCompleted = false;
   return createProductionPipelineContext({
     editionDate,
     runId,
@@ -2194,10 +2404,9 @@ export function createD1ProductionPipelineContext(
     ...options,
     researchRepository: store.repository,
     loadDiscoveryDiagnostics: async () =>
-      discoveryDiagnostics.length > 0
+      discoveryDiagnosticsCollectionCompleted
         ? discoveryDiagnostics
-        : (await store.repository.getWorkflowRunDetail(runId))
-            ?.discoveryDiagnostics ?? [],
+        : (await store.repository.getDiscoveryDiagnosticsState(runId)) ?? [],
     sourceFailures,
     loadSourceFailures: () => store.readCollectionSourceFailures(runId),
     persistItems: async (items) => store.repository.upsertItems(items),
@@ -2223,13 +2432,22 @@ export function createD1ProductionPipelineContext(
           arxivSource,
           semanticScholarSource,
           openAlexSource,
-        ]),
+        ], options.openAlexApiKey === undefined
+          ? {}
+          : { openAlexApiKey: options.openAlexApiKey }),
         enrichers: [
           ...(semanticScholarSource.enabled
             ? [new SemanticScholarAdapter(http, semanticScholarSource)]
             : []),
           ...(openAlexSource.enabled
-            ? [new OpenAlexAdapter(http, openAlexSource)]
+            ? [new OpenAlexAdapter(
+              http,
+              openAlexSource,
+              undefined,
+              options.openAlexApiKey === undefined
+                ? {}
+                : { apiKey: options.openAlexApiKey },
+            )]
             : []),
         ],
         preferredInstitutions: READER_PROFILE.preferredInstitutions,
@@ -2295,7 +2513,7 @@ export function createD1ProductionPipelineContext(
       }
       sourceFailures.push(...boundedSourceFailureLabels(collectionFailures));
       await store.saveCollectionSourceFailures(runId, sourceFailures);
-      return [
+      const candidates = [
         ...research.candidates.map((candidate) =>
           RawResearchCandidateSchema.parse(candidate),
         ),
@@ -2306,6 +2524,8 @@ export function createD1ProductionPipelineContext(
           RawPublicationCandidateSchema.parse(candidate)
         ),
       ];
+      discoveryDiagnosticsCollectionCompleted = true;
+      return candidates;
     },
   });
 }
@@ -2339,9 +2559,15 @@ export function createD1WorkflowLauncher(
           input.editionDate,
           runId,
           configured.providers,
-          configured.budgetPolicy === undefined
-            ? { preferences }
-            : { budgetPolicy: configured.budgetPolicy, preferences },
+          {
+            preferences,
+            ...(configured.openAlexApiKey === undefined
+              ? {}
+              : { openAlexApiKey: configured.openAlexApiKey }),
+            ...(configured.budgetPolicy === undefined
+              ? {}
+              : { budgetPolicy: configured.budgetPolicy }),
+          },
         ));
       } catch (error) {
         await store.audit(
@@ -2375,9 +2601,15 @@ export function createD1WorkflowLauncher(
         run.editionDate,
         run.id,
         configured.providers,
-        configured.budgetPolicy === undefined
-          ? { preferences }
-          : { budgetPolicy: configured.budgetPolicy, preferences },
+        {
+          preferences,
+          ...(configured.openAlexApiKey === undefined
+            ? {}
+            : { openAlexApiKey: configured.openAlexApiKey }),
+          ...(configured.budgetPolicy === undefined
+            ? {}
+            : { budgetPolicy: configured.budgetPolicy }),
+        },
       ));
     },
   };

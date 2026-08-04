@@ -8,6 +8,8 @@ import {
 import {
   DiscoveryLaneDiagnosticSchema,
   DiscoveryObservationSchema,
+  DiscoveryRejectionCountsSchema,
+  DiscoveryRejectionReasonSchema,
   RawPublicationCandidateSchema,
 } from "../../../src/sources/types";
 
@@ -203,6 +205,63 @@ describe("research discovery source contracts", () => {
       assessed: 2,
       outcome: "success",
     }).success).toBe(false);
+  });
+
+  it("defaults old discovery diagnostics to empty rejection counts", () => {
+    const diagnostic = {
+      laneId: "arxiv:oversight-governance",
+      sourceId: "arxiv",
+      discoveryFamily: "arxiv",
+      discovered: 3,
+      deduplicated: 2,
+      triaged: 1,
+      assessed: 1,
+      outcome: "success",
+    };
+
+    expect(DiscoveryLaneDiagnosticSchema.parse(diagnostic).rejectionCounts)
+      .toEqual({});
+  });
+
+  it("round-trips only fixed bounded discovery rejection reasons", () => {
+    const diagnostic = {
+      laneId: "arxiv:oversight-governance",
+      sourceId: "arxiv",
+      discoveryFamily: "arxiv",
+      discovered: 3,
+      deduplicated: 2,
+      triaged: 1,
+      assessed: 1,
+      outcome: "success",
+    };
+    const rejectionCounts = {
+      unchanged_observation: 2,
+      capacity_limited: 1,
+    };
+
+    expect(DiscoveryLaneDiagnosticSchema.parse({
+      ...diagnostic,
+      rejectionCounts,
+    }).rejectionCounts).toEqual(rejectionCounts);
+    expect(DiscoveryRejectionReasonSchema.options).toEqual([
+      "out_of_window",
+      "unchanged_observation",
+      "identity_merged",
+      "route_excluded",
+      "topic_mismatch",
+      "quality_rejected",
+      "capacity_limited",
+    ]);
+  });
+
+  it.each([
+    [{ private_provider_error: 1 }, "unknown reason"],
+    [{ route_excluded: -1 }, "negative count"],
+    [{ route_excluded: 0.5 }, "fractional count"],
+    [{ route_excluded: 10_001 }, "count above the cap"],
+  ])("rejects discovery rejection counts with a %s", (rejectionCounts, _label) => {
+    expect(DiscoveryRejectionCountsSchema.safeParse(rejectionCounts).success)
+      .toBe(false);
   });
 
   it("rejects observations with non-ISO timestamps", () => {

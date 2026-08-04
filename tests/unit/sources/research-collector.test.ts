@@ -175,7 +175,12 @@ async function collectorWithFixtures() {
       ],
       enrichers: [
         new SemanticScholarAdapter(http, semanticScholarSource),
-        new OpenAlexAdapter(http, openAlexSource),
+        new OpenAlexAdapter(
+          http,
+          openAlexSource,
+          undefined,
+          { apiKey: "fixture-openalex-key" },
+        ),
       ],
       preferredInstitutions: READER_PROFILE.preferredInstitutions,
       preferredLabs: READER_PROFILE.preferredLabs,
@@ -495,6 +500,7 @@ describe("ResearchCollector", () => {
         triaged: 0,
         assessed: 0,
         outcome: "unknown",
+        rejectionCounts: {},
       },
       {
         laneId: "arxiv:one",
@@ -505,6 +511,7 @@ describe("ResearchCollector", () => {
         triaged: 0,
         assessed: 0,
         outcome: "success",
+        rejectionCounts: {},
       },
       {
         laneId: "arxiv:two",
@@ -515,6 +522,7 @@ describe("ResearchCollector", () => {
         triaged: 0,
         assessed: 0,
         outcome: "success",
+        rejectionCounts: {},
       },
       {
         laneId: "arxiv:zero",
@@ -525,6 +533,7 @@ describe("ResearchCollector", () => {
         triaged: 0,
         assessed: 0,
         outcome: "success",
+        rejectionCounts: {},
       },
     ]);
     expect(result.candidates).toHaveLength(1);
@@ -785,6 +794,7 @@ describe("bibliographic discovery", () => {
         now: () => new Date("2026-07-29T08:30:00.000Z"),
       }),
       [openAlexSource],
+      { openAlexApiKey: "fixture-openalex-key" },
     );
     const collector = new ResearchCollector({
       discoveryAdapters,
@@ -842,7 +852,10 @@ describe("bibliographic discovery", () => {
     )).toBe(true);
     expect(workUrls).toHaveLength(7);
     expect(workUrls.every(
-      (url) => url.searchParams.get("per-page") === "100",
+      (url) => url.searchParams.get("per_page") === "100",
+    )).toBe(true);
+    expect(urls.every(
+      (url) => url.searchParams.get("api_key") === "fixture-openalex-key",
     )).toBe(true);
     expect(workUrls.every(
       (url) =>
@@ -860,17 +873,36 @@ describe("bibliographic discovery", () => {
       6,
     );
     const updatedWorkUrls = workUrls.filter((url) =>
-      url.searchParams.get("filter")?.includes("updated_date:>")
+      url.searchParams.get("sort") === "updated_date:desc"
     );
     expect(updatedWorkUrls).toHaveLength(3);
     expect(updatedWorkUrls.every((url) => {
       const filter = url.searchParams.get("filter") ?? "";
-      return filter.includes("updated_date:>2026-07-22") &&
-        filter.includes("to_updated_date:2026-07-29") &&
+      return !filter.includes("updated_date") &&
         !filter.includes("from_publication_date") &&
         !filter.includes("to_publication_date") &&
         url.searchParams.get("sort") === "updated_date:desc";
     })).toBe(true);
+  });
+
+  it("uses the authenticated free-tier contract for updated discovery", async () => {
+    const seen: URL[] = [];
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      seen.push(new URL(String(input)));
+      return Response.json({ results: [] });
+    });
+    const adapter = new OpenAlexDiscoveryAdapter(
+      new SourceHttpClient({ fetch }), openAlexSource,
+      { laneId: "openalex:updated:alignment", mode: "updated", query: "alignment" },
+      { apiKey: "fixture-openalex-key" },
+    );
+    await adapter.collect(fixedWindow());
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.searchParams.get("api_key")).toBe("fixture-openalex-key");
+    expect(seen[0]?.searchParams.get("per_page")).toBe("100");
+    expect(seen[0]?.searchParams.has("per-page")).toBe(false);
+    expect(seen[0]?.searchParams.get("sort")).toBe("updated_date:desc");
+    expect(seen[0]?.searchParams.get("filter") ?? "").not.toMatch(/updated_date/);
   });
 
   it("discovers older OpenAlex works updated inside the reconsideration window", async () => {
@@ -911,9 +943,10 @@ describe("bibliographic discovery", () => {
         return Response.json({ results: [] });
       }
       if (url.pathname === "/works") {
-        const filter = url.searchParams.get("filter") ?? "";
         return Response.json({
-          results: filter.includes("updated_date:>") ? [updatedWork] : [],
+          results: url.searchParams.get("sort") === "updated_date:desc"
+            ? [updatedWork]
+            : [],
         });
       }
       throw new Error(`Unexpected OpenAlex URL: ${url}`);
@@ -931,6 +964,7 @@ describe("bibliographic discovery", () => {
             mode: "updated",
             query: "AI safety, alignment, and interpretability",
           },
+          { apiKey: "fixture-openalex-key" },
         ),
       ],
       enrichers: [],
@@ -957,13 +991,14 @@ describe("bibliographic discovery", () => {
       .map(([input]) => new URL(String(input)))
       .filter((url) =>
         url.pathname === "/works" &&
-        url.searchParams.get("filter")?.includes("updated_date:>")
+        url.searchParams.get("sort") === "updated_date:desc"
       );
     expect(updatedUrls).toHaveLength(1);
     expect(updatedUrls.every((url) =>
       !url.searchParams.get("filter")?.includes("from_publication_date") &&
       url.searchParams.get("sort") === "updated_date:desc" &&
-      url.searchParams.get("per-page") === "100"
+      url.searchParams.get("per_page") === "100" &&
+      url.searchParams.get("api_key") === "fixture-openalex-key"
     )).toBe(true);
   });
 
@@ -990,6 +1025,7 @@ describe("bibliographic discovery", () => {
             mode: "text",
             query: "alignment",
           },
+          { apiKey: "fixture-openalex-key" },
         ),
       ],
       enrichers: [],
@@ -1031,6 +1067,75 @@ describe("bibliographic discovery", () => {
     });
     expect(JSON.stringify(result)).not.toContain("unexpected");
   });
+
+  it("keeps arXiv papers when OpenAlex credentials are unavailable", async () => {
+    const collector = new ResearchCollector({
+      discoveryAdapters: [
+        {
+          sourceId: "arxiv",
+          collect: async () => [rawPaper()],
+        },
+        ...createPaperDiscoveryAdapters(
+          new SourceHttpClient({ fetch: vi.fn(async () => Response.json({ results: [] })) }),
+          [openAlexSource],
+        ),
+      ],
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates.map(({ externalId }) => externalId)).toEqual([
+      "arXiv:2607.00001",
+    ]);
+    expect(result.failures).toContainEqual({
+      sourceId: "openalex",
+      kind: "policy",
+    });
+    expect(JSON.stringify(result)).not.toContain("provider credential unavailable");
+  });
+
+  it.each([401, 403, 429])(
+    "settles OpenAlex HTTP %i as a sanitized fetch failure without losing healthy research",
+    async (status) => {
+      const privateBody = `private OpenAlex ${status} response`;
+      const fetch = vi.fn(async () => new Response(privateBody, { status }));
+      const collector = new ResearchCollector({
+        discoveryAdapters: [
+          {
+            sourceId: "arxiv",
+            collect: async () => [rawPaper()],
+          },
+          new OpenAlexDiscoveryAdapter(
+            new SourceHttpClient({ fetch }),
+            openAlexSource,
+            {
+              laneId: "openalex:text:alignment",
+              mode: "text",
+              query: "alignment",
+            },
+            { apiKey: "fixture-openalex-key" },
+          ),
+        ],
+        enrichers: [],
+        preferredInstitutions: [],
+      });
+
+      const result = await collector.collect(fixedWindow());
+
+      expect(result.candidates.map(({ externalId }) => externalId)).toEqual([
+        "arXiv:2607.00001",
+      ]);
+      expect(result.failures).toContainEqual({
+        sourceId: "openalex",
+        kind: "fetch",
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(result)).not.toContain(privateBody);
+      expect(JSON.stringify(result)).not.toContain("fixture-openalex-key");
+    },
+  );
 
   it.each([
     ["a huge sparse position", { HOSTILE_POSITION: [999_999] }],
@@ -1088,7 +1193,7 @@ describe("bibliographic discovery", () => {
           laneId: "openalex:hostile-index",
           mode: "text",
           query: "interpretability",
-        }),
+        }, { apiKey: "fixture-openalex-key" }),
       ],
       enrichers: [],
       preferredInstitutions: [],
@@ -1249,6 +1354,61 @@ describe("SourceHttpClient", () => {
     expect(headerValue(fetch.mock.calls[1]?.[1], "accept")).toBe(
       "application/rss+xml",
     );
+  });
+
+  it("transmits but never returns a sensitive query value", async () => {
+    const secret = "fixture-openalex-key";
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      expect(new URL(String(input)).searchParams.get("api_key")).toBe(secret);
+      return new Response("ok", { headers: { etag: '"v1"' } });
+    });
+    const response = await new SourceHttpClient({ fetch }).get(
+      openAlexSource,
+      `https://api.openalex.org/works?search=alignment&api_key=${secret}`,
+      { sensitiveQueryParameters: ["api_key"] },
+    );
+    expect(response.finalUrl).toContain("api_key=REDACTED");
+    expect(JSON.stringify(response)).not.toContain(secret);
+  });
+
+  it("rejects cross-origin redirects carrying a sensitive query", async () => {
+    const fetch = vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: "https://cdn.example.net/works" },
+    }));
+    await expect(new SourceHttpClient({ fetch }).get(
+      openAlexSource,
+      "https://api.openalex.org/works?api_key=fixture-openalex-key",
+      { sensitiveQueryParameters: ["api_key"] },
+    )).rejects.toMatchObject({ failureKind: "policy", retryable: false });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors a request-local zero-retry limit", async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 429 }));
+    const sleep = vi.fn(async () => undefined);
+    await expect(new SourceHttpClient({ fetch, sleep, maxRetries: 2 }).get(
+      openAlexSource,
+      "https://api.openalex.org/works",
+      { maxRetries: 0 },
+    )).rejects.toMatchObject({ status: 429 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("reuses validators without putting secret values in their identity", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response("first", { headers: { etag: '"v1"' } }))
+      .mockResolvedValueOnce(new Response(null, { status: 304 }));
+    const http = new SourceHttpClient({ fetch });
+    await http.get(openAlexSource, "https://api.openalex.org/works?api_key=first-fixture", {
+      sensitiveQueryParameters: ["api_key"],
+    });
+    await http.get(openAlexSource, "https://api.openalex.org/works?api_key=second-fixture", {
+      sensitiveQueryParameters: ["api_key"],
+    });
+    expect(new Headers(fetch.mock.calls[1]?.[1]?.headers).get("if-none-match"))
+      .toBe('"v1"');
   });
 
   it("sends an identifying user agent and reuses response validators", async () => {
@@ -1548,6 +1708,7 @@ describe("provider endpoint and identifier policy", () => {
           http,
           openAlexSource,
           "https://attacker.example/works",
+          { apiKey: "fixture-openalex-key" },
         ),
     ).toThrow();
   });
@@ -1577,6 +1738,7 @@ describe("provider endpoint and identifier policy", () => {
           http,
           openAlexSource,
           "https://api.openalex.org/institutions",
+          { apiKey: "fixture-openalex-key" },
         ),
     ).toThrow();
     expect(
@@ -1585,6 +1747,7 @@ describe("provider endpoint and identifier policy", () => {
           http,
           openAlexSource,
           "https://api.openalex.org/works/unintended",
+          { apiKey: "fixture-openalex-key" },
         ),
     ).toThrow();
   });

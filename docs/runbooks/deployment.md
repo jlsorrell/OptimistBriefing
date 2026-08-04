@@ -40,6 +40,26 @@ Perform a repository-safe deploy compilation. This does not upload anything:
 npx wrangler deploy --dry-run
 ```
 
+Run the repository secret gate from the repository root. The deployment
+runbook and historical implementation plan are excluded because they contain
+the detection pattern as documentation:
+
+```sh
+if git grep -n -I -P '\bsk-[A-Za-z0-9_-]{16,}|OPENALEX_API_KEY\s*=(?!=)\s*\S+' -- ':!docs/runbooks/deployment.md' ':!docs/superpowers/plans/2026-08-03-canary-discovery-reliability.md'; then
+  echo "Potential committed secret found." >&2
+  exit 1
+else
+  optimist_secret_scan_status=$?
+  if [ "$optimist_secret_scan_status" -ne 1 ]; then
+    exit "$optimist_secret_scan_status"
+  fi
+fi
+```
+
+A match makes the gate fail; git grep exit 1 means no matches and is success.
+Any exit code above 1 is an operational error and also fails the gate. Review
+every match without pasting it into a ticket, chat, log, or screenshot.
+
 Do not continue if any gate fails, if `wrangler.jsonc` still lacks `main` or
 `assets`, or if the D1 `database_id` has not been resolved before a remote
 operation.
@@ -163,6 +183,7 @@ The exact runtime contract is:
 | Name | Storage | Validation |
 | --- | --- | --- |
 | `OPENAI_API_KEY` | Encrypted Worker secret | Nonempty |
+| `OPENALEX_API_KEY` | Optional encrypted Worker secret | Trimmed nonempty free-tier key when configured |
 | `ALLOWED_EMAILS` | Encrypted Worker secret recommended | Comma-separated valid emails |
 | `SUMMARY_MODEL` | Nonsecret Worker variable | Nonempty current model ID |
 | `ASSESSMENT_MODEL` | Nonsecret Worker variable | Nonempty current model ID |
@@ -191,11 +212,37 @@ npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put ALLOWED_EMAILS
 ```
 
+The optional free OpenAlex API key enables authenticated, bounded OpenAlex
+research discovery. Optional means absent, not empty: leave the
+`OPENALEX_API_KEY` binding unset when no key is available. The blank line in
+`.dev.vars.example` is a placeholder, not a valid runtime value; remove that
+line from a copied `.dev.vars` when OpenAlex is unused. A blank configured
+binding fails runtime validation.
+
+When the binding is absent, OpenAlex lanes fail open as sanitized `policy`
+failures while healthy research lanes continue. HTTP credential rejection or
+quota responses settle as sanitized `fetch` outcomes and also leave healthy
+lanes running; topical, quality, coverage, and publication thresholds remain
+unchanged. For preview, first verify that `OPTIMIST_PREVIEW_CONFIG` resolves to
+an already-reviewed isolated preview configuration with the intended Worker,
+D1 database, and Workflow. Then store the value only through Wrangler's hidden
+interactive prompt:
+
+```sh
+npx wrangler secret put OPENALEX_API_KEY --config "$OPTIMIST_PREVIEW_CONFIG"
+```
+
+The key value must never appear in command arguments, Git, D1, logs, audits, or
+screenshots. Do not copy prompt input or Wrangler secret-management output into
+the launch record. Secret creation and deployment remain separate approval
+checkpoints.
+
 Set the remaining names as nonsecret Variables in Worker Settings. Because they
 are deliberately absent from `wrangler.jsonc`, production deploy commands must
-use `--keep-vars` or they may remove dashboard-managed variables. Confirm all
-eleven bindings by name before proceeding. Never commit a populated
-`.dev.vars`.
+use `--keep-vars` or they may remove dashboard-managed variables. Preview
+deploys must also retain `--keep-vars` after the reviewed config path. Confirm
+the eleven required bindings and the optional OpenAlex binding by name before
+proceeding. Never commit a populated `.dev.vars`.
 
 ## 9. Apply remote migrations
 

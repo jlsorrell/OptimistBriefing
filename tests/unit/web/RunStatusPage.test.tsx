@@ -204,7 +204,7 @@ describe("RunStatusPage", () => {
     expect(document.body.textContent).not.toContain("private provider detail");
   });
 
-  it("renders only bounded discovery counts and sanitized labels", async () => {
+  it("renders bounded discovery rejection labels without private fields", async () => {
     const run: WorkflowRun = {
       id: "run-1",
       editionDate: "2026-08-02",
@@ -231,6 +231,20 @@ describe("RunStatusPage", () => {
         triaged: 3,
         assessed: 2,
         outcome: "success",
+        rejectionCounts: {
+          unchanged_observation: 2,
+          capacity_limited: 1,
+        },
+      }, {
+        laneId: "arxiv:empty",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        discovered: 1,
+        deduplicated: 1,
+        triaged: 1,
+        assessed: 1,
+        outcome: "success",
+        rejectionCounts: {},
       }],
       rejectedSummaryReasons: [],
       publishedAt: null,
@@ -258,11 +272,18 @@ describe("RunStatusPage", () => {
       "Deduplicated",
       "Triaged",
       "Assessed",
+      "Rejections",
       "Outcome",
     ]);
-    expect(within(table).getByText("arxiv:oversight-governance")).toBeTruthy();
+    const laneRow = within(table).getByText("arxiv:oversight-governance")
+      .closest("tr");
+    expect(laneRow).not.toBeNull();
+    expect(within(laneRow!).getByText(
+      "Unchanged observation: 2; Capacity limited: 1",
+    )).toBeTruthy();
+    expect(within(table).getByText("None")).toBeTruthy();
     for (const value of ["7", "5", "3", "2", "success"]) {
-      expect(within(table).getByText(value)).toBeTruthy();
+      expect(within(laneRow!).getByText(value)).toBeTruthy();
     }
     await waitFor(() => {
       expect(document.body.textContent).not.toContain("do-not-render");
