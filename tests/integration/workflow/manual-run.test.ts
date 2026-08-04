@@ -205,7 +205,7 @@ function rawOfficialPublicationCandidate(
   const sourceId = section === "technology" ? "nist" : "federal-register";
   const title = section === "technology"
     ? `NIST launches AI software capability ${id}`
-    : `Federal Register adopts AI regulatory oversight standard ${id}`;
+    : `Federal Register adopts AI governance oversight standard ${id}`;
   return {
     kind: "publication",
     sourceId,
