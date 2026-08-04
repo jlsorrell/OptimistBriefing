@@ -36,11 +36,15 @@ transient fetch errors use bounded retries and finish with the sanitized
 collection semantics only: failures never lower topical, technical-quality,
 grounding, coverage, or publication thresholds and never authorize filler.
 
-OpenAlex uses the optional encrypted `OPENALEX_API_KEY`. A missing, blank,
-rejected, or quota-limited key produces a bounded sanitized failure for that
-OpenAlex lane with no unauthenticated fallback, pagination, or retry. Other
-research collectors still settle independently, so credential trouble cannot
-abort healthy arXiv, publication, or commentary lanes.
+OpenAlex uses the optional encrypted `OPENALEX_API_KEY`. When the binding is
+unset and an adapter has no credential, that lane records a sanitized `policy`
+failure. A blank configured binding is invalid runtime configuration; it is not
+equivalent to omission and does not become a lane-level failure. HTTP `401`,
+`403`, and quota `429` responses settle as sanitized `fetch` outcomes. OpenAlex
+requests use no unauthenticated fallback, pagination, or retry for these
+credential outcomes. In every lane-level failure, other research collectors
+still settle independently, so credential trouble cannot abort healthy arXiv,
+publication, or commentary lanes.
 
 Each run scans a 36-hour fresh window and a rolling seven-day reconsideration
 window. Work older than 36 hours is reconsidered only when its content or

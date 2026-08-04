@@ -40,6 +40,26 @@ Perform a repository-safe deploy compilation. This does not upload anything:
 npx wrangler deploy --dry-run
 ```
 
+Run the repository secret gate from the repository root. The deployment
+runbook and historical implementation plan are excluded because they contain
+the detection pattern as documentation:
+
+```sh
+if git grep -n -I -P '\bsk-[A-Za-z0-9_-]{16,}|OPENALEX_API_KEY\s*=(?!=)\s*\S+' -- ':!docs/runbooks/deployment.md' ':!docs/superpowers/plans/2026-08-03-canary-discovery-reliability.md'; then
+  echo "Potential committed secret found." >&2
+  exit 1
+else
+  optimist_secret_scan_status=$?
+  if [ "$optimist_secret_scan_status" -ne 1 ]; then
+    exit "$optimist_secret_scan_status"
+  fi
+fi
+```
+
+A match makes the gate fail; git grep exit 1 means no matches and is success.
+Any exit code above 1 is an operational error and also fails the gate. Review
+every match without pasting it into a ticket, chat, log, or screenshot.
+
 Do not continue if any gate fails, if `wrangler.jsonc` still lacks `main` or
 `assets`, or if the D1 `database_id` has not been resolved before a remote
 operation.
@@ -193,12 +213,20 @@ npx wrangler secret put ALLOWED_EMAILS
 ```
 
 The optional free OpenAlex API key enables authenticated, bounded OpenAlex
-research discovery. Without it, OpenAlex lanes fail open as sanitized `policy`
-failures while healthy research lanes continue; topical, quality, coverage, and
-publication thresholds remain unchanged. For preview, first verify that
-`OPTIMIST_PREVIEW_CONFIG` resolves to an already-reviewed isolated preview
-configuration with the intended Worker, D1 database, and Workflow. Then store
-the value only through Wrangler's hidden interactive prompt:
+research discovery. Optional means absent, not empty: leave the
+`OPENALEX_API_KEY` binding unset when no key is available. The blank line in
+`.dev.vars.example` is a placeholder, not a valid runtime value; remove that
+line from a copied `.dev.vars` when OpenAlex is unused. A blank configured
+binding fails runtime validation.
+
+When the binding is absent, OpenAlex lanes fail open as sanitized `policy`
+failures while healthy research lanes continue. HTTP credential rejection or
+quota responses settle as sanitized `fetch` outcomes and also leave healthy
+lanes running; topical, quality, coverage, and publication thresholds remain
+unchanged. For preview, first verify that `OPTIMIST_PREVIEW_CONFIG` resolves to
+an already-reviewed isolated preview configuration with the intended Worker,
+D1 database, and Workflow. Then store the value only through Wrangler's hidden
+interactive prompt:
 
 ```sh
 npx wrangler secret put OPENALEX_API_KEY --config "$OPTIMIST_PREVIEW_CONFIG"

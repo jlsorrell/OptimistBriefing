@@ -1096,6 +1096,47 @@ describe("bibliographic discovery", () => {
     expect(JSON.stringify(result)).not.toContain("provider credential unavailable");
   });
 
+  it.each([401, 403, 429])(
+    "settles OpenAlex HTTP %i as a sanitized fetch failure without losing healthy research",
+    async (status) => {
+      const privateBody = `private OpenAlex ${status} response`;
+      const fetch = vi.fn(async () => new Response(privateBody, { status }));
+      const collector = new ResearchCollector({
+        discoveryAdapters: [
+          {
+            sourceId: "arxiv",
+            collect: async () => [rawPaper()],
+          },
+          new OpenAlexDiscoveryAdapter(
+            new SourceHttpClient({ fetch }),
+            openAlexSource,
+            {
+              laneId: "openalex:text:alignment",
+              mode: "text",
+              query: "alignment",
+            },
+            { apiKey: "fixture-openalex-key" },
+          ),
+        ],
+        enrichers: [],
+        preferredInstitutions: [],
+      });
+
+      const result = await collector.collect(fixedWindow());
+
+      expect(result.candidates.map(({ externalId }) => externalId)).toEqual([
+        "arXiv:2607.00001",
+      ]);
+      expect(result.failures).toContainEqual({
+        sourceId: "openalex",
+        kind: "fetch",
+      });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(JSON.stringify(result)).not.toContain(privateBody);
+      expect(JSON.stringify(result)).not.toContain("fixture-openalex-key");
+    },
+  );
+
   it.each([
     ["a huge sparse position", { HOSTILE_POSITION: [999_999] }],
     [

@@ -115,7 +115,10 @@ models.
 ## Runtime configuration
 
 Copy `.dev.vars.example` to ignored `.dev.vars` only for an approved local
-Worker smoke test. Blank values are deliberate; never commit a populated file.
+Worker smoke test. Blank values in the example are placeholders, not valid
+runtime settings; never commit a populated file. Fill every required binding.
+If OpenAlex is unused, remove its line from `.dev.vars` so the optional binding
+is absent rather than blank.
 
 | Binding | Classification | Required value |
 | --- | --- | --- |
@@ -143,12 +146,15 @@ differ.
 The implementation plan's illustrative `MONTHLY_AI_BUDGET_USD` name is stale.
 The code contract is `MONTHLY_BUDGET_USD`.
 
-`OPENALEX_API_KEY` is optional so a missing or rejected credential cannot abort
-healthy research collectors. OpenAlex lanes instead record a sanitized policy
-failure and contribute no new candidates; arXiv, publication, commentary, and
-other configured lanes continue under the normal quality and coverage gates.
-Use an encrypted Worker secret for any live key, including the free OpenAlex
-tier. See the deployment runbook for the approved interactive command.
+`OPENALEX_API_KEY` is optional only when the binding is absent. A blank
+configured value is invalid and prevents runtime construction; leave the
+binding unset when no key is available. An adapter without a credential records
+a sanitized `policy` failure. A configured key rejected with HTTP `401` or
+`403`, or limited with `429`, records a sanitized `fetch` failure. In either
+lane-level case, arXiv, publication, commentary, and other configured lanes
+continue under the normal quality and coverage gates. Use an encrypted Worker
+secret for any live key, including the free OpenAlex tier. See the deployment
+runbook for the approved interactive command.
 
 ## Operations
 

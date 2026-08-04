@@ -47,6 +47,7 @@ describe("deployment configuration", () => {
     const devVarsExample = readFileSync(".dev.vars.example", "utf8");
 
     expect(readme).toContain("OPENALEX_API_KEY");
+    expect(readme).toMatch(/A blank\s+configured value is invalid/);
     expect(deploymentRunbook).toContain("optional free OpenAlex API key");
     expect(deploymentRunbook).toContain(
       'npx wrangler secret put OPENALEX_API_KEY --config "$OPTIMIST_PREVIEW_CONFIG"',
@@ -57,6 +58,23 @@ describe("deployment configuration", () => {
     );
     expect(deploymentRunbook).toMatch(
       /command arguments, Git, D1, logs, audits, or\s+screenshots/,
+    );
+    expect(deploymentRunbook).toMatch(
+      /leave the\s+`OPENALEX_API_KEY` binding unset/,
+    );
+    expect(deploymentRunbook).toMatch(
+      /blank line in\s+`.dev.vars.example` is a placeholder/,
+    );
+    expect(deploymentRunbook).toContain("git grep -n -I -P");
+    expect(deploymentRunbook).toContain([
+      "\\b",
+      "sk-[A-Za-z0-9_-]{16,}",
+      "|",
+      "OPENALEX_API_KEY",
+      "\\s*=(?!=)\\s*\\S+",
+    ].join(""));
+    expect(deploymentRunbook).toContain(
+      "A match makes the gate fail; git grep exit 1 means no matches and is success.",
     );
     expect(wranglerConfig).not.toContain("OPENALEX_API_KEY");
     expect(devVarsExample.split("\n")).toContain(
@@ -79,5 +97,8 @@ describe("deployment configuration", () => {
       "An empty AI Policy section is preferable to unrelated filler.",
     );
     expect(sourceHealthRunbook).toContain("AI Policy routing fails closed");
+    expect(sourceHealthRunbook).toMatch(
+      /HTTP `401`,\s+`403`, and quota `429` responses settle as sanitized `fetch` outcomes/,
+    );
   });
 });
