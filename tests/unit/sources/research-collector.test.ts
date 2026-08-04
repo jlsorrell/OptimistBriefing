@@ -1251,6 +1251,61 @@ describe("SourceHttpClient", () => {
     );
   });
 
+  it("transmits but never returns a sensitive query value", async () => {
+    const secret = "fixture-openalex-key";
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      expect(new URL(String(input)).searchParams.get("api_key")).toBe(secret);
+      return new Response("ok", { headers: { etag: '"v1"' } });
+    });
+    const response = await new SourceHttpClient({ fetch }).get(
+      openAlexSource,
+      `https://api.openalex.org/works?search=alignment&api_key=${secret}`,
+      { sensitiveQueryParameters: ["api_key"] },
+    );
+    expect(response.finalUrl).toContain("api_key=REDACTED");
+    expect(JSON.stringify(response)).not.toContain(secret);
+  });
+
+  it("rejects cross-origin redirects carrying a sensitive query", async () => {
+    const fetch = vi.fn(async () => new Response(null, {
+      status: 302,
+      headers: { location: "https://cdn.example.net/works" },
+    }));
+    await expect(new SourceHttpClient({ fetch }).get(
+      openAlexSource,
+      "https://api.openalex.org/works?api_key=fixture-openalex-key",
+      { sensitiveQueryParameters: ["api_key"] },
+    )).rejects.toMatchObject({ failureKind: "policy", retryable: false });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("honors a request-local zero-retry limit", async () => {
+    const fetch = vi.fn(async () => new Response(null, { status: 429 }));
+    const sleep = vi.fn(async () => undefined);
+    await expect(new SourceHttpClient({ fetch, sleep, maxRetries: 2 }).get(
+      openAlexSource,
+      "https://api.openalex.org/works",
+      { maxRetries: 0 },
+    )).rejects.toMatchObject({ status: 429 });
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("reuses validators without putting secret values in their identity", async () => {
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(new Response("first", { headers: { etag: '"v1"' } }))
+      .mockResolvedValueOnce(new Response(null, { status: 304 }));
+    const http = new SourceHttpClient({ fetch });
+    await http.get(openAlexSource, "https://api.openalex.org/works?api_key=first-fixture", {
+      sensitiveQueryParameters: ["api_key"],
+    });
+    await http.get(openAlexSource, "https://api.openalex.org/works?api_key=second-fixture", {
+      sensitiveQueryParameters: ["api_key"],
+    });
+    expect(new Headers(fetch.mock.calls[1]?.[1]?.headers).get("if-none-match"))
+      .toBe('"v1"');
+  });
+
   it("sends an identifying user agent and reuses response validators", async () => {
     const fetch = vi
       .fn()
