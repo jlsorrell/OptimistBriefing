@@ -1,7 +1,7 @@
 # Canary Discovery Reliability and Policy Precision Design
 
 **Date:** 2026-08-03  
-**Status:** Pending written-spec review
+**Status:** Approved for implementation planning
 
 ## Problem
 
