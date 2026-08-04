@@ -2156,6 +2156,41 @@ describe("manual editorial run", () => {
     expect(factoryCalls).toEqual([{ runId, editionDate: "2033-03-01" }]);
   });
 
+  it("sends the runtime OpenAlex key without persisting it in discovery diagnostics", async () => {
+    await env.DB.prepare(
+      "UPDATE sources SET enabled = CASE WHEN id = 'openalex' THEN 1 ELSE 0 END",
+    ).run();
+    const sourceFetch = vi.fn(async (_input: string | URL | Request) =>
+      Response.json({ results: [] })
+    );
+    vi.stubGlobal("fetch", sourceFetch);
+    try {
+      const launcher = createD1WorkflowLauncher(
+        env.DB,
+        (async () => ({
+          providers: {
+            summary: new FakeModelProvider(),
+            assessment: new FakeModelProvider(),
+          },
+          openAlexApiKey: "fixture-openalex-key",
+        })) as Parameters<typeof createD1WorkflowLauncher>[1],
+      );
+
+      const { runId } = await launcher.start({ editionDate: "2033-03-02" });
+      const urls = sourceFetch.mock.calls.map(([input]) => new URL(String(input)));
+
+      expect(urls).not.toHaveLength(0);
+      expect(urls.every((url) =>
+        url.searchParams.get("api_key") === "fixture-openalex-key"
+      )).toBe(true);
+      expect(JSON.stringify(
+        await new D1BriefingRepository(env.DB).getWorkflowRunDetail(runId),
+      )).not.toContain("fixture-openalex-key");
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("runs paid research assessments sequentially", async () => {
     const assessment = new ConcurrencyTrackingAssessmentProvider();
     const context = createProductionPipelineContext({

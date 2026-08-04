@@ -872,6 +872,7 @@ export type PipelineProviders = {
 export type PipelineRuntime = {
   providers: PipelineProviders;
   budgetPolicy?: BudgetPolicy;
+  openAlexApiKey?: string;
 };
 
 export type PipelineRuntimeFactory = (input: {
@@ -895,6 +896,7 @@ export type ProductionPipelineContextOptions = {
   loadSourceFailures?: PipelineContext["loadSourceFailures"];
   checkpointExecutor?: PipelineContext["checkpointExecutor"];
   budgetPolicy?: BudgetPolicy;
+  openAlexApiKey?: string;
   cleanupTerminalReservations?: PipelineContext["cleanupTerminalReservations"];
   researchRepository?: Pick<
     BriefingRepository,
@@ -2178,6 +2180,7 @@ export function createD1ProductionPipelineContext(
     ProductionPipelineContextOptions,
     | "checkpointExecutor"
     | "budgetPolicy"
+    | "openAlexApiKey"
     | "preferences"
     | "cleanupTerminalReservations"
   > = {},
@@ -2223,13 +2226,22 @@ export function createD1ProductionPipelineContext(
           arxivSource,
           semanticScholarSource,
           openAlexSource,
-        ]),
+        ], options.openAlexApiKey === undefined
+          ? {}
+          : { openAlexApiKey: options.openAlexApiKey }),
         enrichers: [
           ...(semanticScholarSource.enabled
             ? [new SemanticScholarAdapter(http, semanticScholarSource)]
             : []),
           ...(openAlexSource.enabled
-            ? [new OpenAlexAdapter(http, openAlexSource)]
+            ? [new OpenAlexAdapter(
+              http,
+              openAlexSource,
+              undefined,
+              options.openAlexApiKey === undefined
+                ? {}
+                : { apiKey: options.openAlexApiKey },
+            )]
             : []),
         ],
         preferredInstitutions: READER_PROFILE.preferredInstitutions,
@@ -2339,9 +2351,15 @@ export function createD1WorkflowLauncher(
           input.editionDate,
           runId,
           configured.providers,
-          configured.budgetPolicy === undefined
-            ? { preferences }
-            : { budgetPolicy: configured.budgetPolicy, preferences },
+          {
+            preferences,
+            ...(configured.openAlexApiKey === undefined
+              ? {}
+              : { openAlexApiKey: configured.openAlexApiKey }),
+            ...(configured.budgetPolicy === undefined
+              ? {}
+              : { budgetPolicy: configured.budgetPolicy }),
+          },
         ));
       } catch (error) {
         await store.audit(
@@ -2375,9 +2393,15 @@ export function createD1WorkflowLauncher(
         run.editionDate,
         run.id,
         configured.providers,
-        configured.budgetPolicy === undefined
-          ? { preferences }
-          : { budgetPolicy: configured.budgetPolicy, preferences },
+        {
+          preferences,
+          ...(configured.openAlexApiKey === undefined
+            ? {}
+            : { openAlexApiKey: configured.openAlexApiKey }),
+          ...(configured.budgetPolicy === undefined
+            ? {}
+            : { budgetPolicy: configured.budgetPolicy }),
+        },
       ));
     },
   };

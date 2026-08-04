@@ -175,7 +175,12 @@ async function collectorWithFixtures() {
       ],
       enrichers: [
         new SemanticScholarAdapter(http, semanticScholarSource),
-        new OpenAlexAdapter(http, openAlexSource),
+        new OpenAlexAdapter(
+          http,
+          openAlexSource,
+          undefined,
+          { apiKey: "fixture-openalex-key" },
+        ),
       ],
       preferredInstitutions: READER_PROFILE.preferredInstitutions,
       preferredLabs: READER_PROFILE.preferredLabs,
@@ -785,6 +790,7 @@ describe("bibliographic discovery", () => {
         now: () => new Date("2026-07-29T08:30:00.000Z"),
       }),
       [openAlexSource],
+      { openAlexApiKey: "fixture-openalex-key" },
     );
     const collector = new ResearchCollector({
       discoveryAdapters,
@@ -842,7 +848,10 @@ describe("bibliographic discovery", () => {
     )).toBe(true);
     expect(workUrls).toHaveLength(7);
     expect(workUrls.every(
-      (url) => url.searchParams.get("per-page") === "100",
+      (url) => url.searchParams.get("per_page") === "100",
+    )).toBe(true);
+    expect(urls.every(
+      (url) => url.searchParams.get("api_key") === "fixture-openalex-key",
     )).toBe(true);
     expect(workUrls.every(
       (url) =>
@@ -860,17 +869,36 @@ describe("bibliographic discovery", () => {
       6,
     );
     const updatedWorkUrls = workUrls.filter((url) =>
-      url.searchParams.get("filter")?.includes("updated_date:>")
+      url.searchParams.get("sort") === "updated_date:desc"
     );
     expect(updatedWorkUrls).toHaveLength(3);
     expect(updatedWorkUrls.every((url) => {
       const filter = url.searchParams.get("filter") ?? "";
-      return filter.includes("updated_date:>2026-07-22") &&
-        filter.includes("to_updated_date:2026-07-29") &&
+      return !filter.includes("updated_date") &&
         !filter.includes("from_publication_date") &&
         !filter.includes("to_publication_date") &&
         url.searchParams.get("sort") === "updated_date:desc";
     })).toBe(true);
+  });
+
+  it("uses the authenticated free-tier contract for updated discovery", async () => {
+    const seen: URL[] = [];
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      seen.push(new URL(String(input)));
+      return Response.json({ results: [] });
+    });
+    const adapter = new OpenAlexDiscoveryAdapter(
+      new SourceHttpClient({ fetch }), openAlexSource,
+      { laneId: "openalex:updated:alignment", mode: "updated", query: "alignment" },
+      { apiKey: "fixture-openalex-key" },
+    );
+    await adapter.collect(fixedWindow());
+    expect(seen).toHaveLength(1);
+    expect(seen[0]?.searchParams.get("api_key")).toBe("fixture-openalex-key");
+    expect(seen[0]?.searchParams.get("per_page")).toBe("100");
+    expect(seen[0]?.searchParams.has("per-page")).toBe(false);
+    expect(seen[0]?.searchParams.get("sort")).toBe("updated_date:desc");
+    expect(seen[0]?.searchParams.get("filter") ?? "").not.toMatch(/updated_date/);
   });
 
   it("discovers older OpenAlex works updated inside the reconsideration window", async () => {
@@ -911,9 +939,10 @@ describe("bibliographic discovery", () => {
         return Response.json({ results: [] });
       }
       if (url.pathname === "/works") {
-        const filter = url.searchParams.get("filter") ?? "";
         return Response.json({
-          results: filter.includes("updated_date:>") ? [updatedWork] : [],
+          results: url.searchParams.get("sort") === "updated_date:desc"
+            ? [updatedWork]
+            : [],
         });
       }
       throw new Error(`Unexpected OpenAlex URL: ${url}`);
@@ -931,6 +960,7 @@ describe("bibliographic discovery", () => {
             mode: "updated",
             query: "AI safety, alignment, and interpretability",
           },
+          { apiKey: "fixture-openalex-key" },
         ),
       ],
       enrichers: [],
@@ -957,13 +987,14 @@ describe("bibliographic discovery", () => {
       .map(([input]) => new URL(String(input)))
       .filter((url) =>
         url.pathname === "/works" &&
-        url.searchParams.get("filter")?.includes("updated_date:>")
+        url.searchParams.get("sort") === "updated_date:desc"
       );
     expect(updatedUrls).toHaveLength(1);
     expect(updatedUrls.every((url) =>
       !url.searchParams.get("filter")?.includes("from_publication_date") &&
       url.searchParams.get("sort") === "updated_date:desc" &&
-      url.searchParams.get("per-page") === "100"
+      url.searchParams.get("per_page") === "100" &&
+      url.searchParams.get("api_key") === "fixture-openalex-key"
     )).toBe(true);
   });
 
@@ -990,6 +1021,7 @@ describe("bibliographic discovery", () => {
             mode: "text",
             query: "alignment",
           },
+          { apiKey: "fixture-openalex-key" },
         ),
       ],
       enrichers: [],
@@ -1030,6 +1062,34 @@ describe("bibliographic discovery", () => {
       kind: "parse",
     });
     expect(JSON.stringify(result)).not.toContain("unexpected");
+  });
+
+  it("keeps arXiv papers when OpenAlex credentials are unavailable", async () => {
+    const collector = new ResearchCollector({
+      discoveryAdapters: [
+        {
+          sourceId: "arxiv",
+          collect: async () => [rawPaper()],
+        },
+        ...createPaperDiscoveryAdapters(
+          new SourceHttpClient({ fetch: vi.fn(async () => Response.json({ results: [] })) }),
+          [openAlexSource],
+        ),
+      ],
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates.map(({ externalId }) => externalId)).toEqual([
+      "arXiv:2607.00001",
+    ]);
+    expect(result.failures).toContainEqual({
+      sourceId: "openalex",
+      kind: "policy",
+    });
+    expect(JSON.stringify(result)).not.toContain("provider credential unavailable");
   });
 
   it.each([
@@ -1088,7 +1148,7 @@ describe("bibliographic discovery", () => {
           laneId: "openalex:hostile-index",
           mode: "text",
           query: "interpretability",
-        }),
+        }, { apiKey: "fixture-openalex-key" }),
       ],
       enrichers: [],
       preferredInstitutions: [],
@@ -1603,6 +1663,7 @@ describe("provider endpoint and identifier policy", () => {
           http,
           openAlexSource,
           "https://attacker.example/works",
+          { apiKey: "fixture-openalex-key" },
         ),
     ).toThrow();
   });
@@ -1632,6 +1693,7 @@ describe("provider endpoint and identifier policy", () => {
           http,
           openAlexSource,
           "https://api.openalex.org/institutions",
+          { apiKey: "fixture-openalex-key" },
         ),
     ).toThrow();
     expect(
@@ -1640,6 +1702,7 @@ describe("provider endpoint and identifier policy", () => {
           http,
           openAlexSource,
           "https://api.openalex.org/works/unintended",
+          { apiKey: "fixture-openalex-key" },
         ),
     ).toThrow();
   });
