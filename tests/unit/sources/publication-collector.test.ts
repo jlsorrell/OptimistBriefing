@@ -453,6 +453,18 @@ describe("RssAdapter feed normalization", () => {
     ]);
   });
 
+  it("reports a parse failure when all otherwise-normalized entries fail final safety validation", async () => {
+    const unsafeTitle = "A".repeat(501);
+    const noSafeEntries = await rssAdapterFor(
+      rssSource({ id: "lesswrong-curated" }),
+      `<?xml version="1.0"?><rss><channel><item><title>${unsafeTitle}</title><link>https://www.alignmentforum.org/posts/example/unsafe-result</link></item></channel></rss>`,
+    ).collect(window);
+
+    expect(noSafeEntries.failures).toEqual([
+      { sourceId: "lesswrong-curated", kind: "parse" },
+    ]);
+  });
+
   it("keeps a valid feed successful when its entries fall outside the collection window", async () => {
     const outOfWindow = await rssAdapterFor(
       rssSource(),

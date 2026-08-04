@@ -227,14 +227,8 @@ export class RssAdapter {
                 );
                 const title = normalizeWhitespace(entry.title);
                 if (title.length === 0) return [];
-                interpretableEntries += 1;
-                if (
-                  publishedAt !== null &&
-                  (publishedAt < validWindow.from ||
-                    publishedAt > validWindow.to)
-                ) return [];
                 const identifier = entry.identifier ?? originalUrl;
-                return [RawItemSchema.parse({
+                const candidate = RawItemSchema.parse({
                   kind: "blog",
                   sourceId: source.id,
                   sourceName: source.canonicalName,
@@ -254,7 +248,14 @@ export class RssAdapter {
                     `${originalUrl} ${rawDescription}`,
                   ),
                   metadata: { feedUrl },
-                })];
+                });
+                interpretableEntries += 1;
+                if (
+                  publishedAt !== null &&
+                  (publishedAt < validWindow.from ||
+                    publishedAt > validWindow.to)
+                ) return [];
+                return [candidate];
               } catch {
                 return [];
               }
