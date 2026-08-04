@@ -799,13 +799,13 @@ describe("catalog-driven news collection", () => {
           results: [
             {
               document_number: "2026-12345",
-              title: "Secure evaluation requirements",
+              title: "Secure foundation model evaluation standard",
               html_url:
                 "https://www.federalregister.gov/documents/2026/07/29/2026-12345/secure-evaluation-requirements",
               publication_date: "2026-07-29",
               type: "Notice",
               abstract:
-                "The agency published secure evaluation requirements.",
+                "The agency published a secure foundation model evaluation standard.",
             },
           ],
         });
@@ -848,7 +848,7 @@ describe("catalog-driven news collection", () => {
       kind: "document",
       sourceRole: "primary",
       canCorroborateFacts: true,
-      title: "Secure evaluation requirements",
+      title: "Secure foundation model evaluation standard",
       originalUrl:
         "https://www.federalregister.gov/documents/2026/07/29/2026-12345/secure-evaluation-requirements",
       metadata: {
@@ -1113,6 +1113,60 @@ describe("catalog-driven news collection", () => {
         sourceCase.expected,
       );
       expect(result[0]?.metadata.primarySection).not.toBe("ai_policy");
+    },
+  );
+
+  it.each([
+    "National Center for Advancing Translational Sciences; Notice of Meeting",
+    "Formations of, Acquisitions by, and Mergers of Bank Holding Companies",
+  ])(
+    "does not let preferredSection ai_policy route %s without policy evidence",
+    async (title) => {
+      const host = "ai-policy-source.example.com";
+      const fetch = vi.fn(async () =>
+        new Response(
+          `<article><h2><a href=\"/story\">${title}</a></h2><time datetime=\"2026-07-29T08:00:00.000Z\"></time><p>Reported details.</p></article>`,
+          { headers: { "content-type": "text/html" } },
+        ),
+      );
+      const collector = createNewsCollectorFromCatalog({
+        http: new SourceHttpClient({
+          fetch,
+          now: () => new Date("2026-07-29T10:00:00.000Z"),
+        }),
+        sources: [
+          catalogSource({
+            id: "ai-policy-source",
+            canonicalName: "AI Policy Source",
+            canonicalUrl: `https://${host}/`,
+            role: "reporting",
+            discoveryMechanism: "page",
+            sectionEligibility: ["world", "technology", "ai_policy"],
+            restrictions: {
+              bodyRetrieval: "forbidden",
+              paywall: "none",
+              contentUse: "metadata-only",
+              preferredSection: "ai_policy",
+              pageUrl: `https://${host}/news`,
+              urlPolicy: policy(host, ["/"]),
+              listing: {
+                itemSelector: "article",
+                linkSelector: "h2 a",
+                titleSelector: "h2",
+                dateSelector: "time",
+                dateAttribute: "datetime",
+                summarySelector: "p",
+                maxItems: 10,
+                maxBodyFetches: 0,
+              },
+            },
+          }),
+        ],
+      });
+
+      const { candidates } = await collector.collect(fixedWindow());
+
+      expect(candidates[0]?.metadata.primarySection).toBe("world");
     },
   );
 
