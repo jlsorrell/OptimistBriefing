@@ -3536,6 +3536,7 @@ describe("manual editorial run", () => {
             }],
           }),
         },
+        { openAlexApiKey: "fixture-openalex-key" },
       );
 
       await expect(runEditorialPipeline(firstContext)).rejects.toThrow(
@@ -3565,6 +3566,7 @@ describe("manual editorial run", () => {
           summary: resumedSummary,
           assessment: new FakeModelProvider(),
         },
+        { openAlexApiKey: "fixture-openalex-key" },
       );
       await expect(runEditorialPipeline(resumedContext)).resolves.toMatchObject({
         status: "published",
