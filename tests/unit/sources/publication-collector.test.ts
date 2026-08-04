@@ -10,6 +10,7 @@ import { PapersWithCodeAdapter } from "../../../src/sources/papers-with-code";
 import {
   createPublicationCollectorFromCatalog,
 } from "../../../src/sources/publication-collector";
+import { RssAdapter } from "../../../src/sources/rss";
 import { ResearchSourceRecordSchema, type CollectionWindow } from "../../../src/sources/types";
 
 const fixturePath = (name: string) =>
@@ -51,6 +52,46 @@ function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
 
 function article(title: string): string {
   return `<!doctype html><html><body><nav>Discard navigation</nav><article><h1>${title}</h1><p>We report a bounded study and method for interpretable AI debate.</p><script>discard()</script></article></body></html>`;
+}
+
+function rssSource(overrides: Partial<SourceRecord> = {}): SourceRecord {
+  return source({
+    id: "alignment-forum",
+    canonicalName: "Alignment Forum",
+    canonicalUrl: "https://www.alignmentforum.org/",
+    restrictions: {
+      bodyRetrieval: "permitted",
+      paywall: "none",
+      contentUse: "ephemeral-summarization",
+      feedUrl: "https://www.alignmentforum.org/feed.xml",
+      urlPolicy: {
+        allowedHosts: ["www.alignmentforum.org"],
+        allowedPorts: [""],
+        allowedPathPrefixes: ["/feed.xml", "/posts/"],
+      },
+    },
+    discoveryMechanism: "rss",
+    sectionEligibility: ["research", "research_radar"],
+    ...overrides,
+  });
+}
+
+function rssAdapterFor(feed: SourceRecord, body: string): RssAdapter {
+  const urlPolicy = feed.restrictions.urlPolicy!;
+  return new RssAdapter(
+    new SourceHttpClient({
+      fetch: vi.fn(async () => new Response(body, {
+        headers: { "content-type": "application/rss+xml" },
+      })),
+      now: () => new Date("2026-08-02T12:00:00.000Z"),
+    }),
+    [{
+      source: ResearchSourceRecordSchema.parse(feed),
+      feedUrl: feed.restrictions.feedUrl,
+      feedUrlPolicy: urlPolicy,
+      articleUrlPolicy: urlPolicy,
+    }],
+  );
 }
 
 describe("PublicationCollector", () => {
@@ -354,6 +395,72 @@ describe("PublicationCollector", () => {
 
     expect(result.candidates).toHaveLength(1);
     expect(result.candidates[0]).toMatchObject({ title: "Fallback research result" });
+  });
+});
+
+describe("RssAdapter feed normalization", () => {
+  it("keeps an interpretable structured-link RSS entry when a malformed sibling is skipped", async () => {
+    const rssResult = await rssAdapterFor(
+      rssSource(),
+      await loadFixture("alignment-forum-feed.xml"),
+    ).collect(window);
+
+    expect(rssResult.failures).toEqual([]);
+    expect(rssResult.candidates).toHaveLength(1);
+    expect(rssResult.candidates[0]).toMatchObject({
+      title: "A valid alignment result",
+      authors: ["Researcher Example"],
+    });
+  });
+
+  it("normalizes Atom entries with href links and structured authors", async () => {
+    const atomResult = await rssAdapterFor(
+      rssSource({
+        id: "lesswrong-curated",
+        canonicalName: "LessWrong Curated",
+        canonicalUrl: "https://www.lesswrong.com/",
+        restrictions: {
+          bodyRetrieval: "permitted",
+          paywall: "none",
+          contentUse: "ephemeral-summarization",
+          feedUrl: "https://www.lesswrong.com/feed.xml",
+          urlPolicy: {
+            allowedHosts: ["www.lesswrong.com"],
+            allowedPorts: [""],
+            allowedPathPrefixes: ["/feed.xml", "/posts/"],
+          },
+        },
+      }),
+      await loadFixture("atom-research-feed.xml"),
+    ).collect(window);
+
+    expect(atomResult.failures).toEqual([]);
+    expect(atomResult.candidates).toHaveLength(1);
+    expect(atomResult.candidates[0]).toMatchObject({
+      externalId: "urn:example:atom-result",
+      publishedAt: "2026-08-02T12:00:00.000Z",
+    });
+  });
+
+  it("reports a parse failure when a nonempty feed has no interpretable entries", async () => {
+    const noValidEntries = await rssAdapterFor(
+      rssSource({ id: "lesswrong-curated" }),
+      "<?xml version=\"1.0\"?><rss><channel><item><title>Malformed item</title><link rel=\"alternate\" /></item></channel></rss>",
+    ).collect(window);
+
+    expect(noValidEntries.failures).toEqual([
+      { sourceId: "lesswrong-curated", kind: "parse" },
+    ]);
+  });
+
+  it("keeps a valid feed successful when its entries fall outside the collection window", async () => {
+    const outOfWindow = await rssAdapterFor(
+      rssSource(),
+      "<?xml version=\"1.0\"?><rss><channel><item><title>Older result</title><link>https://www.alignmentforum.org/posts/example/older-result</link><pubDate>Sat, 01 Aug 2020 12:00:00 GMT</pubDate></item></channel></rss>",
+    ).collect(window);
+
+    expect(outOfWindow.failures).toEqual([]);
+    expect(outOfWindow.candidates).toEqual([]);
   });
 });
 
