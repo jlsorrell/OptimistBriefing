@@ -163,6 +163,7 @@ The exact runtime contract is:
 | Name | Storage | Validation |
 | --- | --- | --- |
 | `OPENAI_API_KEY` | Encrypted Worker secret | Nonempty |
+| `OPENALEX_API_KEY` | Optional encrypted Worker secret | Trimmed nonempty free-tier key when configured |
 | `ALLOWED_EMAILS` | Encrypted Worker secret recommended | Comma-separated valid emails |
 | `SUMMARY_MODEL` | Nonsecret Worker variable | Nonempty current model ID |
 | `ASSESSMENT_MODEL` | Nonsecret Worker variable | Nonempty current model ID |
@@ -191,11 +192,29 @@ npx wrangler secret put OPENAI_API_KEY
 npx wrangler secret put ALLOWED_EMAILS
 ```
 
+The optional free OpenAlex API key enables authenticated, bounded OpenAlex
+research discovery. Without it, OpenAlex lanes fail open as sanitized `policy`
+failures while healthy research lanes continue; topical, quality, coverage, and
+publication thresholds remain unchanged. For preview, first verify that
+`OPTIMIST_PREVIEW_CONFIG` resolves to an already-reviewed isolated preview
+configuration with the intended Worker, D1 database, and Workflow. Then store
+the value only through Wrangler's hidden interactive prompt:
+
+```sh
+npx wrangler secret put OPENALEX_API_KEY --config "$OPTIMIST_PREVIEW_CONFIG"
+```
+
+The key value must never appear in command arguments, Git, D1, logs, audits, or
+screenshots. Do not copy prompt input or Wrangler secret-management output into
+the launch record. Secret creation and deployment remain separate approval
+checkpoints.
+
 Set the remaining names as nonsecret Variables in Worker Settings. Because they
 are deliberately absent from `wrangler.jsonc`, production deploy commands must
-use `--keep-vars` or they may remove dashboard-managed variables. Confirm all
-eleven bindings by name before proceeding. Never commit a populated
-`.dev.vars`.
+use `--keep-vars` or they may remove dashboard-managed variables. Preview
+deploys must also retain `--keep-vars` after the reviewed config path. Confirm
+the eleven required bindings and the optional OpenAlex binding by name before
+proceeding. Never commit a populated `.dev.vars`.
 
 ## 9. Apply remote migrations
 

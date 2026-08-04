@@ -120,6 +120,7 @@ Worker smoke test. Blank values are deliberate; never commit a populated file.
 | Binding | Classification | Required value |
 | --- | --- | --- |
 | `OPENAI_API_KEY` | Secret | Provider API key |
+| `OPENALEX_API_KEY` | Optional encrypted secret | Free OpenAlex API key; omission disables only OpenAlex lanes |
 | `SUMMARY_MODEL` | Nonsecret | Verified generation model identifier |
 | `ASSESSMENT_MODEL` | Nonsecret | Verified assessment model identifier |
 | `EMBEDDING_MODEL` | Nonsecret | Verified embedding model identifier |
@@ -141,6 +142,13 @@ differ.
 
 The implementation plan's illustrative `MONTHLY_AI_BUDGET_USD` name is stale.
 The code contract is `MONTHLY_BUDGET_USD`.
+
+`OPENALEX_API_KEY` is optional so a missing or rejected credential cannot abort
+healthy research collectors. OpenAlex lanes instead record a sanitized policy
+failure and contribute no new candidates; arXiv, publication, commentary, and
+other configured lanes continue under the normal quality and coverage gates.
+Use an encrypted Worker secret for any live key, including the free OpenAlex
+tier. See the deployment runbook for the approved interactive command.
 
 ## Operations
 

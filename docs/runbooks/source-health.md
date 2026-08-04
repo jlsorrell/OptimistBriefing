@@ -36,6 +36,12 @@ transient fetch errors use bounded retries and finish with the sanitized
 collection semantics only: failures never lower topical, technical-quality,
 grounding, coverage, or publication thresholds and never authorize filler.
 
+OpenAlex uses the optional encrypted `OPENALEX_API_KEY`. A missing, blank,
+rejected, or quota-limited key produces a bounded sanitized failure for that
+OpenAlex lane with no unauthenticated fallback, pagination, or retry. Other
+research collectors still settle independently, so credential trouble cannot
+abort healthy arXiv, publication, or commentary lanes.
+
 Each run scans a 36-hour fresh window and a rolling seven-day reconsideration
 window. Work older than 36 hours is reconsidered only when its content or
 evidence fingerprint changes, for example a revision, new code mapping, linked
@@ -56,6 +62,32 @@ For every lane, run detail records `discovered`, `deduplicated`, `triaged`, and
 the funnel (`discovered >= deduplicated >= triaged >= assessed`) for that lane.
 If they are not, preserve the run ID and escalate as a diagnostics defect; do
 not infer missing bodies or provider responses from the count mismatch.
+
+Run Status also reports bounded aggregate rejection counts using exactly these
+fixed reasons:
+
+- `out_of_window`: the candidate is outside both retained discovery windows;
+- `unchanged_observation`: reconsideration found no changed content or evidence;
+- `identity_merged`: another upstream identity consolidated into the retained
+  item;
+- `route_excluded`: normalization could not route the candidate into an allowed
+  lane;
+- `topic_mismatch`: deterministic research triage found insufficient topical
+  fit;
+- `quality_rejected`: content validity or assessment quality rules rejected it;
+  and
+- `capacity_limited`: a fixed pool, family, domain, queue, assessment, or
+  shortlist cap omitted it.
+
+These counts are observational, capped, and safe to display; they do not change
+selection decisions or ordering. They explain terminal outcomes without
+exposing candidate identities, source text, provider responses, or secrets.
+
+AI Policy routing fails closed: retained title, abstract, or content must
+contain both explicit AI evidence and explicit policy-action evidence. Preferred
+section metadata, source role, or a general government notice is not enough.
+An empty AI Policy section is preferable to unrelated filler. This precision
+rule never relaxes because another source or credential fails.
 
 ## Triage
 
