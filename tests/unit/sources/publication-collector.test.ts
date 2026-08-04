@@ -145,6 +145,7 @@ describe("PublicationCollector", () => {
       triaged: 0,
       assessed: 0,
       outcome: "success",
+      rejectionCounts: {},
     }]);
     expect(technical?.content).toContain("bounded study");
     expect(technical?.content).not.toContain("Discard navigation");
@@ -277,6 +278,7 @@ describe("PublicationCollector", () => {
       triaged: 0,
       assessed: 0,
       outcome: "fetch",
+      rejectionCounts: {},
     }]);
   });
 
@@ -304,6 +306,7 @@ describe("PublicationCollector", () => {
       triaged: 0,
       assessed: 0,
       outcome: "success",
+      rejectionCounts: {},
     }]);
   });
 

@@ -1272,6 +1272,7 @@ describe("manual editorial run", () => {
         triaged: 0,
         assessed: 0,
         outcome: "success" as const,
+        rejectionCounts: {},
       },
       {
         laneId: "arxiv:zero",
@@ -1282,6 +1283,7 @@ describe("manual editorial run", () => {
         triaged: 0,
         assessed: 0,
         outcome: "success" as const,
+        rejectionCounts: {},
       },
       {
         laneId: "papers-with-code-co:page",
@@ -1292,6 +1294,7 @@ describe("manual editorial run", () => {
         triaged: 0,
         assessed: 0,
         outcome: "success" as const,
+        rejectionCounts: {},
       },
     ];
     const repository = {
@@ -1394,12 +1397,21 @@ describe("manual editorial run", () => {
       [
         { ...initialDiagnostics[0], deduplicated: 2 },
         initialDiagnostics[1],
-        { ...initialDiagnostics[2], deduplicated: 1 },
+        {
+          ...initialDiagnostics[2],
+          deduplicated: 1,
+          rejectionCounts: { identity_merged: 1 },
+        },
       ],
       [
         { ...initialDiagnostics[0], deduplicated: 2, triaged: 2 },
         initialDiagnostics[1],
-        { ...initialDiagnostics[2], deduplicated: 1, triaged: 1 },
+        {
+          ...initialDiagnostics[2],
+          deduplicated: 1,
+          triaged: 1,
+          rejectionCounts: { identity_merged: 1 },
+        },
       ],
       [
         {
@@ -1414,6 +1426,7 @@ describe("manual editorial run", () => {
           deduplicated: 1,
           triaged: 1,
           assessed: 1,
+          rejectionCounts: { identity_merged: 1 },
         },
       ],
     ]);
@@ -1456,6 +1469,376 @@ describe("manual editorial run", () => {
 
     await resumeContext.normalize(collected);
     expect(resumedWrites).toEqual([diagnosticWrites[1]]);
+  });
+
+  it("attributes bounded discovery rejections without changing selected IDs", async () => {
+    const laneId = "arxiv:bounded-diagnostics";
+    const aliasLaneId = "arxiv:alias-diagnostics";
+    const withLane = (
+      candidate: RawResearchCandidate,
+      discoveryFamily: "arxiv" | "bibliographic" = "arxiv",
+      discoveryLaneId = laneId,
+    ): RawResearchCandidate => ({
+      ...candidate,
+      metadata: {
+        ...candidate.metadata,
+        discoveryFamily,
+        discoveryLaneIds: [discoveryLaneId],
+      },
+    });
+    const aliasA = withLane(rawResearchCandidate(
+      "2607.11111",
+      "Alias study of mechanistic interpretability",
+      20,
+    ));
+    const aliasB = withLane({
+      ...rawResearchCandidate(
+        "2607.11111",
+        "Alias study of mechanistic interpretability",
+        20,
+      ),
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      originalUrl: "https://openalex.org/works/W11111",
+    }, "bibliographic", aliasLaneId);
+    const repeated = withLane({
+      ...rawResearchCandidate(
+        "2607.22222",
+        "Repeated interpretability observation",
+      ),
+      publishedAt: "2026-07-26T09:00:00.000Z",
+    });
+    const belowFit = withLane(rawResearchCandidate(
+      "2607.33333",
+      "Irrelevant arrival below topical fit",
+    ));
+    const capacityA = withLane(rawResearchCandidate(
+      "2607.44444",
+      "Capacity candidate A for interpretability",
+      2,
+    ));
+    const capacityB = withLane(rawResearchCandidate(
+      "2607.55555",
+      "Capacity candidate B for interpretability",
+      1,
+    ));
+    const routedOut: RawPublicationCandidate = {
+      ...rawOfficialPublicationCandidate(
+        "technology",
+        "route-excluded",
+        now,
+        "A routine community bulletin without a substantive result.",
+      ),
+      sourceId: "community-bulletin",
+      sourceName: "Community Bulletin",
+      sourceRole: "blog",
+      title: "Routine community bulletin",
+      originalUrl: "https://community.example/bulletins/routine",
+      sectionEligibility: ["research", "research_radar"],
+      discoveryFamily: "commentary",
+      metadata: { discoveryLaneIds: [laneId] },
+    };
+    const candidates = [
+      aliasA,
+      aliasB,
+      repeated,
+      belowFit,
+      capacityA,
+      capacityB,
+      routedOut,
+    ];
+    const previewRepository = {
+      getDiscoveryObservations: async () => [],
+      upsertDiscoveryObservations: async () => undefined,
+      getCachedResearchAssessment: async () => null,
+      putCachedResearchAssessment: async () => undefined,
+    };
+    const previewContext = createProductionPipelineContext({
+      editionDate: "2033-01-21",
+      runId: "run-discovery-preview",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [repeated],
+      researchRepository: previewRepository,
+    });
+    const preview = await previewContext.normalize(
+      await previewContext.collect(),
+    );
+    const repeatedItem = preview[0]!;
+    const repeatedFingerprints = researchFingerprints(repeatedItem);
+    const priorObservation: DiscoveryObservation = {
+      runId: "run-discovery-prior",
+      canonicalId: canonicalResearchIdentity(repeatedItem),
+      sourceId: "arxiv",
+      discoveryFamily: "arxiv",
+      windowKind: "reconsideration",
+      publishedAt: repeatedItem.publishedAt,
+      retrievedAt: "2026-07-26T10:00:00.000Z",
+      observedAt: "2026-07-26T10:00:00.000Z",
+      ...repeatedFingerprints,
+      joinedExternalIds: ["arXiv:2607.22222"],
+      route: "research",
+      expiresAt: "2026-08-02T10:00:00.000Z",
+    };
+    const assessment = {
+      technicalQuality: 0.9,
+      novelty: 0.8,
+      strengths: ["The abstract describes a concrete method."],
+      limitations: ["Only abstract evidence was supplied."],
+      rationale: "The available abstract supports a strong assessment.",
+      accessLevel: "abstract" as const,
+    };
+    const preferences = fixturePreferences({
+      sectionBudgets: {
+        ...approvedBaselinePreferences().sectionBudgets,
+        morning_brief: 1,
+        research: 1,
+        research_radar: 0,
+      },
+    });
+    const diagnosticWrites: Array<readonly unknown[]> = [];
+    const repository = {
+      getDiscoveryObservations: async () => [priorObservation],
+      upsertDiscoveryObservations: async () => undefined,
+      getCachedResearchAssessment: async () => null,
+      putCachedResearchAssessment: async () => undefined,
+      recordDiscoveryDiagnostics: async (
+        _runId: string,
+        diagnostics: readonly unknown[],
+      ) => {
+        diagnosticWrites.push(structuredClone(diagnostics));
+      },
+    };
+    const {
+      recordDiscoveryDiagnostics: _recordDiscoveryDiagnostics,
+      ...baselineRepository
+    } = repository;
+    const runStages = async (
+      runId: string,
+      withDiagnostics: boolean,
+    ) => {
+      const context = createProductionPipelineContext({
+        editionDate: "2033-01-21",
+        runId,
+        store: new FixtureStore(),
+        now: () => now,
+        preferences,
+        providers: {
+          summary: new RelevanceFirstEmbeddingProvider(),
+          assessment: new FakeModelProvider({
+            generatedObjects: [assessment, assessment, assessment],
+          }),
+        },
+        collectCandidates: async () => candidates,
+        ...(withDiagnostics
+          ? {
+              loadDiscoveryDiagnostics: () => [{
+                laneId,
+                sourceId: "arxiv",
+                discoveryFamily: "arxiv" as const,
+                discovered: candidates.length - 1,
+                deduplicated: 0,
+                triaged: 0,
+                assessed: 0,
+                outcome: "success" as const,
+                rejectionCounts: {},
+              }, {
+                laneId: aliasLaneId,
+                sourceId: "openalex",
+                discoveryFamily: "bibliographic" as const,
+                discovered: 1,
+                deduplicated: 0,
+                triaged: 0,
+                assessed: 0,
+                outcome: "success" as const,
+                rejectionCounts: {},
+              }],
+            }
+          : {}),
+        researchRepository: withDiagnostics
+          ? repository
+          : baselineRepository,
+      });
+      const collected = await context.collect();
+      const normalized = await context.normalize(collected);
+      const enriched = await context.enrich(normalized);
+      const triaged = await context.prefilter(enriched);
+      const assessed = await context.assess(triaged);
+      const scored = await context.score(assessed);
+      const clustered = await context.cluster(scored);
+      const shortlisted = await context.shortlist(clustered);
+      return {
+        normalizedIds: normalized.map(({ id }) => id),
+        triagedIds: triaged.map(({ id }) => id),
+        assessedIds: assessed.map(({ id }) => id),
+        selectedIds: shortlisted.map(({ id }) => id),
+      };
+    };
+
+    const baseline = await runStages("run-discovery-baseline", false);
+    const observed = await runStages("run-discovery-attribution", true);
+
+    expect(observed).toEqual(baseline);
+    expect(observed.normalizedIds).toHaveLength(4);
+    expect(observed.triagedIds).toHaveLength(3);
+    expect(observed.assessedIds).toHaveLength(3);
+    expect(observed.selectedIds).toHaveLength(1);
+    const finalDiagnostics = diagnosticWrites.at(-1) as Array<{
+      laneId: string;
+      discovered: number;
+      deduplicated: number;
+      triaged: number;
+      assessed: number;
+    }>;
+    const finalDiagnostic = finalDiagnostics.find((value) =>
+      value.laneId === laneId
+    );
+    expect(finalDiagnostic).toEqual({
+      laneId,
+      sourceId: "arxiv",
+      discoveryFamily: "arxiv",
+      discovered: 6,
+      deduplicated: 4,
+      triaged: 3,
+      assessed: 3,
+      outcome: "success",
+      rejectionCounts: {
+        route_excluded: 1,
+        unchanged_observation: 1,
+        topic_mismatch: 1,
+        capacity_limited: 2,
+      },
+    });
+    expect(finalDiagnostics.find((value) =>
+      value.laneId === aliasLaneId
+    )).toEqual({
+      laneId: aliasLaneId,
+      sourceId: "openalex",
+      discoveryFamily: "bibliographic",
+      discovered: 1,
+      deduplicated: 1,
+      triaged: 1,
+      assessed: 1,
+      outcome: "success",
+      rejectionCounts: { identity_merged: 1 },
+    });
+    expect(finalDiagnostic).toMatchObject({
+      discovered: expect.any(Number),
+      deduplicated: expect.any(Number),
+      triaged: expect.any(Number),
+      assessed: expect.any(Number),
+    });
+    const funnel = finalDiagnostic!;
+    expect(funnel.discovered).toBeGreaterThanOrEqual(funnel.deduplicated);
+    expect(funnel.deduplicated).toBeGreaterThanOrEqual(funnel.triaged);
+    expect(funnel.triaged).toBeGreaterThanOrEqual(funnel.assessed);
+  });
+
+  it("attributes invalid research, access overclaims, and uncached assessment caps", async () => {
+    const laneId = "arxiv:quality-cap-diagnostics";
+    const candidate = (
+      arxivId: string,
+      abstract?: string,
+    ): RawResearchCandidate => {
+      const value = rawResearchCandidate(
+        arxivId,
+        `Assessment candidate ${arxivId} for interpretability`,
+      );
+      return {
+        ...value,
+        ...(abstract === undefined ? {} : { abstract }),
+        metadata: {
+          discoveryFamily: "arxiv",
+          discoveryLaneIds: [laneId],
+        },
+      };
+    };
+    const candidates = [
+      candidate("2607.60000", "   "),
+      candidate("2607.60001"),
+      candidate("2607.60002"),
+      candidate("2607.60003"),
+      candidate("2607.60004"),
+      candidate("2607.60005"),
+    ];
+    const writes: Array<readonly unknown[]> = [];
+    const repository = {
+      getDiscoveryObservations: async () => [],
+      upsertDiscoveryObservations: async () => undefined,
+      getCachedResearchAssessment: async () => null,
+      putCachedResearchAssessment: async () => undefined,
+      recordDiscoveryDiagnostics: async (
+        _runId: string,
+        diagnostics: readonly unknown[],
+      ) => {
+        writes.push(structuredClone(diagnostics));
+      },
+    };
+    const validAssessment = {
+      technicalQuality: 0.9,
+      novelty: 0.8,
+      strengths: ["The abstract describes a concrete method."],
+      limitations: ["Only abstract evidence was supplied."],
+      rationale: "The available abstract supports a strong assessment.",
+      accessLevel: "abstract" as const,
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-22",
+      runId: "run-quality-cap-attribution",
+      store: new FixtureStore(),
+      now: () => now,
+      budgetPolicy: {
+        state: "degraded",
+        radarSummaryTokens: 120,
+        featuredSummaryTokens: 900,
+      },
+      providers: {
+        summary: new RelevanceFirstEmbeddingProvider(),
+        assessment: new FakeModelProvider({
+          generatedObjects: [{
+            ...validAssessment,
+            accessLevel: "full_text",
+          }, validAssessment, validAssessment, validAssessment],
+        }),
+      },
+      collectCandidates: async () => candidates,
+      loadDiscoveryDiagnostics: () => [{
+        laneId,
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv",
+        discovered: candidates.length,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "success",
+        rejectionCounts: {},
+      }],
+      researchRepository: repository,
+    });
+
+    const collected = await context.collect();
+    const normalized = await context.normalize(collected);
+    const enriched = await context.enrich(normalized);
+    const triaged = await context.prefilter(enriched);
+    const assessed = await context.assess(triaged);
+
+    expect(normalized).toHaveLength(6);
+    expect(triaged).toHaveLength(5);
+    expect(assessed).toHaveLength(3);
+    expect(writes.at(-1)?.[0]).toMatchObject({
+      discovered: 6,
+      deduplicated: 6,
+      triaged: 5,
+      assessed: 3,
+      rejectionCounts: {
+        quality_rejected: 2,
+        capacity_limited: 1,
+      },
+    });
   });
 
   it("applies topic and source weights to relevance without disabling candidates", async () => {

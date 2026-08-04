@@ -1581,10 +1581,30 @@ describe("D1BriefingRepository", () => {
       outcome: "success" as const,
     };
 
-    await repo.recordDiscoveryDiagnostics("run-diagnostics", [diagnostic]);
+    await env.DB.prepare(
+      `INSERT INTO audit_events (
+        id, run_id, event_type, event_json, created_at
+      ) VALUES (?, ?, ?, ?, ?)`,
+    ).bind(
+      "discovery_diagnostics:run-diagnostics",
+      "run-diagnostics",
+      "discovery_diagnostics",
+      JSON.stringify([diagnostic]),
+      "2026-07-30T09:02:00.000Z",
+    ).run();
+    expect((await repo.getWorkflowRunDetail("run-diagnostics"))
+      ?.discoveryDiagnostics).toEqual([{
+        ...diagnostic,
+        rejectionCounts: {},
+      }]);
+
     await repo.recordDiscoveryDiagnostics("run-diagnostics", [{
       ...diagnostic,
       discovered: 4,
+      rejectionCounts: {
+        unchanged_observation: 2,
+        capacity_limited: 1,
+      },
     }]);
 
     const events = await env.DB.prepare(
@@ -1599,16 +1619,31 @@ describe("D1BriefingRepository", () => {
     expect(events.results).toEqual([{
       id: "discovery_diagnostics:run-diagnostics",
       event_type: "discovery_diagnostics",
-      event_json: JSON.stringify([{ ...diagnostic, discovered: 4 }]),
+      event_json: JSON.stringify([{
+        ...diagnostic,
+        discovered: 4,
+        rejectionCounts: {
+          unchanged_observation: 2,
+          capacity_limited: 1,
+        },
+      }]),
     }]);
     expect((await repo.getWorkflowRunDetail("run-diagnostics"))
-      ?.discoveryDiagnostics).toEqual([{ ...diagnostic, discovered: 4 }]);
+      ?.discoveryDiagnostics).toEqual([{
+        ...diagnostic,
+        discovered: 4,
+        rejectionCounts: {
+          unchanged_observation: 2,
+          capacity_limited: 1,
+        },
+      }]);
 
     await expect(repo.recordDiscoveryDiagnostics(
       "run-diagnostics",
       Array.from({ length: 65 }, (_, index) => ({
         ...diagnostic,
         laneId: `arxiv:${index}`,
+        rejectionCounts: {},
       })),
     )).rejects.toBeInstanceOf(RepositoryValidationError);
     await expect(repo.recordDiscoveryDiagnostics("run-diagnostics", [{

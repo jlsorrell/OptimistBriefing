@@ -12,6 +12,26 @@ type StartFeedback =
   | { kind: "failure"; message: string }
   | null;
 
+const REJECTION_LABELS = [
+  ["out_of_window", "Out of window"],
+  ["unchanged_observation", "Unchanged observation"],
+  ["identity_merged", "Identity merged"],
+  ["route_excluded", "Route excluded"],
+  ["topic_mismatch", "Topic mismatch"],
+  ["quality_rejected", "Quality rejected"],
+  ["capacity_limited", "Capacity limited"],
+] as const;
+
+function rejectionSummary(
+  counts: WorkflowRunDetail["discoveryDiagnostics"][number]["rejectionCounts"],
+): string {
+  const labels = REJECTION_LABELS.flatMap(([reason, label]) => {
+    const count = counts[reason] ?? 0;
+    return count === 0 ? [] : [`${label}: ${count}`];
+  });
+  return labels.length === 0 ? "None" : labels.join("; ");
+}
+
 export function localDateInputValue(date: LocalDate): string {
   const year = String(date.getFullYear()).padStart(4, "0");
   const month = String(date.getMonth() + 1).padStart(2, "0");
@@ -179,6 +199,7 @@ export function RunStatusPage() {
                 <th scope="col">Deduplicated</th>
                 <th scope="col">Triaged</th>
                 <th scope="col">Assessed</th>
+                <th scope="col">Rejections</th>
                 <th scope="col">Outcome</th>
               </tr>
             </thead>
@@ -190,6 +211,7 @@ export function RunStatusPage() {
                   <td>{diagnostic.deduplicated}</td>
                   <td>{diagnostic.triaged}</td>
                   <td>{diagnostic.assessed}</td>
+                  <td>{rejectionSummary(diagnostic.rejectionCounts)}</td>
                   <td>{diagnostic.outcome}</td>
                 </tr>
               ))}

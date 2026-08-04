@@ -500,6 +500,7 @@ describe("ResearchCollector", () => {
         triaged: 0,
         assessed: 0,
         outcome: "unknown",
+        rejectionCounts: {},
       },
       {
         laneId: "arxiv:one",
@@ -510,6 +511,7 @@ describe("ResearchCollector", () => {
         triaged: 0,
         assessed: 0,
         outcome: "success",
+        rejectionCounts: {},
       },
       {
         laneId: "arxiv:two",
@@ -520,6 +522,7 @@ describe("ResearchCollector", () => {
         triaged: 0,
         assessed: 0,
         outcome: "success",
+        rejectionCounts: {},
       },
       {
         laneId: "arxiv:zero",
@@ -530,6 +533,7 @@ describe("ResearchCollector", () => {
         triaged: 0,
         assessed: 0,
         outcome: "success",
+        rejectionCounts: {},
       },
     ]);
     expect(result.candidates).toHaveLength(1);

@@ -4,6 +4,7 @@ import type { Item } from "../../../src/contracts/editorial";
 import {
   boundResearchDiscoveryPool,
   classifyDiscoveryWindow,
+  classifyDiscoveryWindowDecision,
   researchFingerprints,
   triageResearch,
 } from "../../../src/editorial/research-triage";
@@ -234,6 +235,28 @@ describe("classifyDiscoveryWindow", () => {
       contentFingerprint: "content:new",
       evidenceFingerprint: "evidence:new",
     }), [], NOW)).toBeNull();
+  });
+
+  it("returns an out-of-window window decision outside seven days", () => {
+    const expired = researchItem("expired-decision", {
+      publishedAt: eightDaysOld,
+      contentFingerprint: "content:new",
+      evidenceFingerprint: "evidence:new",
+    });
+
+    expect(classifyDiscoveryWindowDecision(expired, [], NOW)).toEqual({
+      windowKind: null,
+      rejectionReason: "out_of_window",
+    });
+    expect(classifyDiscoveryWindow(expired, [], NOW)).toBeNull();
+  });
+
+  it("returns an unchanged-observation window decision for repeated evidence", () => {
+    expect(classifyDiscoveryWindowDecision(current, [prior], NOW)).toEqual({
+      windowKind: null,
+      rejectionReason: "unchanged_observation",
+    });
+    expect(classifyDiscoveryWindow(current, [prior], NOW)).toBeNull();
   });
 
   it.each([

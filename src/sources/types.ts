@@ -154,6 +154,36 @@ export const DiscoveryObservationSchema = z
   })
   .strict();
 
+export const DiscoveryRejectionReasonSchema = z.enum([
+  "out_of_window",
+  "unchanged_observation",
+  "identity_merged",
+  "route_excluded",
+  "topic_mismatch",
+  "quality_rejected",
+  "capacity_limited",
+]);
+export type DiscoveryRejectionReason = z.infer<
+  typeof DiscoveryRejectionReasonSchema
+>;
+
+const DiscoveryRejectionCountSchema = z.number()
+  .int()
+  .nonnegative()
+  .max(10_000);
+
+export const DiscoveryRejectionCountsSchema = z
+  .object({
+    out_of_window: DiscoveryRejectionCountSchema.optional(),
+    unchanged_observation: DiscoveryRejectionCountSchema.optional(),
+    identity_merged: DiscoveryRejectionCountSchema.optional(),
+    route_excluded: DiscoveryRejectionCountSchema.optional(),
+    topic_mismatch: DiscoveryRejectionCountSchema.optional(),
+    quality_rejected: DiscoveryRejectionCountSchema.optional(),
+    capacity_limited: DiscoveryRejectionCountSchema.optional(),
+  })
+  .strict();
+
 export const DiscoveryLaneDiagnosticSchema = z
   .object({
     laneId: z.string().min(1).max(200),
@@ -164,6 +194,7 @@ export const DiscoveryLaneDiagnosticSchema = z
     triaged: z.number().int().nonnegative().max(10_000),
     assessed: z.number().int().nonnegative().max(10_000),
     outcome: z.enum(["success", "fetch", "parse", "policy", "timeout", "unknown"]),
+    rejectionCounts: DiscoveryRejectionCountsSchema.default({}),
   })
   .strict()
   .superRefine((diagnostic, context) => {

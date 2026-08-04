@@ -394,19 +394,28 @@ export function triageResearch(
   };
 }
 
-export function classifyDiscoveryWindow(
+export type DiscoveryWindowDecision = {
+  windowKind: "fresh" | "reconsideration" | null;
+  rejectionReason: "out_of_window" | "unchanged_observation" | null;
+};
+
+export function classifyDiscoveryWindowDecision(
   input: Item,
   priorObservations: readonly DiscoveryObservation[],
   now: string,
-): "fresh" | "reconsideration" | null {
+): DiscoveryWindowDecision {
   const candidate = ItemSchema.parse(input);
   const nowMs = Date.parse(now);
   if (!Number.isFinite(nowMs)) throw new RangeError("now must be an ISO timestamp.");
   const candidateTimestamp = timestamp(candidate);
   const ageMs = nowMs - candidateTimestamp;
   const hourMs = 60 * 60 * 1_000;
-  if (ageMs < 0 || ageMs > 7 * 24 * hourMs) return null;
-  if (ageMs <= 36 * hourMs) return "fresh";
+  if (ageMs < 0 || ageMs > 7 * 24 * hourMs) {
+    return { windowKind: null, rejectionReason: "out_of_window" };
+  }
+  if (ageMs <= 36 * hourMs) {
+    return { windowKind: "fresh", rejectionReason: null };
+  }
 
   const canonicalId = canonicalResearchIdentity(candidate);
   const relevant = priorObservations.filter(
@@ -421,5 +430,16 @@ export function classifyDiscoveryWindow(
     (observation) =>
       observation.evidenceFingerprint === fingerprints.evidenceFingerprint,
   );
-  return seenContent && seenEvidence ? null : "reconsideration";
+  return seenContent && seenEvidence
+    ? { windowKind: null, rejectionReason: "unchanged_observation" }
+    : { windowKind: "reconsideration", rejectionReason: null };
+}
+
+export function classifyDiscoveryWindow(
+  input: Item,
+  priorObservations: readonly DiscoveryObservation[],
+  now: string,
+): "fresh" | "reconsideration" | null {
+  return classifyDiscoveryWindowDecision(input, priorObservations, now)
+    .windowKind;
 }
