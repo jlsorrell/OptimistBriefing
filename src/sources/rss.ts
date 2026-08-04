@@ -100,14 +100,35 @@ function links(value: unknown): FeedLink[] {
   ];
 }
 
-function normalizeFeedEntry(value: unknown): NormalizedFeedEntry | null {
+function firstSafeArticleLink(
+  value: unknown,
+  articleUrlPolicy: OutboundUrlPolicy,
+): string | undefined {
+  for (const { href, rel } of links(value)) {
+    const candidate = href.trim();
+    if (
+      !/^https?:/i.test(candidate) ||
+      (rel !== undefined && !/^(alternate|canonical)$/i.test(rel.trim()))
+    ) {
+      continue;
+    }
+    try {
+      return assertSafeOutboundUrl(candidate, articleUrlPolicy).toString();
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+function normalizeFeedEntry(
+  value: unknown,
+  articleUrlPolicy: OutboundUrlPolicy,
+): NormalizedFeedEntry | null {
   const entry = record(value);
   if (entry === null) return null;
   const title = firstString(entry.title);
-  const link = links(entry.link).find(({ href, rel }) =>
-    /^https?:/i.test(href.trim()) &&
-    (rel === undefined || /^(alternate|canonical)$/i.test(rel.trim()))
-  )?.href.trim();
+  const link = firstSafeArticleLink(entry.link, articleUrlPolicy);
   if (title === undefined || link === undefined) return null;
   const identifier = firstString(entry.guid) ?? firstString(entry.id);
   const published =
@@ -208,7 +229,7 @@ export class RssAdapter {
             const entries = feedEntries(parsedXml);
             let interpretableEntries = 0;
             const candidates = entries.flatMap((value) => {
-              const entry = normalizeFeedEntry(value);
+              const entry = normalizeFeedEntry(value, articleUrlPolicy);
               if (entry === null) return [];
               try {
                 const originalUrl = assertSafeOutboundUrl(

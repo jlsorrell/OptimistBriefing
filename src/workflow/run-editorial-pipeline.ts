@@ -2394,6 +2394,7 @@ export function createD1ProductionPipelineContext(
   const now = () => new Date().toISOString();
   const sourceFailures: string[] = [];
   const discoveryDiagnostics: DiscoveryLaneDiagnostic[] = [];
+  let discoveryDiagnosticsCollectionCompleted = false;
   return createProductionPipelineContext({
     editionDate,
     runId,
@@ -2403,7 +2404,7 @@ export function createD1ProductionPipelineContext(
     ...options,
     researchRepository: store.repository,
     loadDiscoveryDiagnostics: async () =>
-      discoveryDiagnostics.length > 0
+      discoveryDiagnosticsCollectionCompleted
         ? discoveryDiagnostics
         : (await store.repository.getDiscoveryDiagnosticsState(runId)) ?? [],
     sourceFailures,
@@ -2512,7 +2513,7 @@ export function createD1ProductionPipelineContext(
       }
       sourceFailures.push(...boundedSourceFailureLabels(collectionFailures));
       await store.saveCollectionSourceFailures(runId, sourceFailures);
-      return [
+      const candidates = [
         ...research.candidates.map((candidate) =>
           RawResearchCandidateSchema.parse(candidate),
         ),
@@ -2523,6 +2524,8 @@ export function createD1ProductionPipelineContext(
           RawPublicationCandidateSchema.parse(candidate)
         ),
       ];
+      discoveryDiagnosticsCollectionCompleted = true;
+      return candidates;
     },
   });
 }

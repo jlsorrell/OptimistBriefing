@@ -445,10 +445,34 @@ describe("RssAdapter feed normalization", () => {
     });
   });
 
+  it("uses the first policy-allowed alternate or canonical link in feed order", async () => {
+    const result = await rssAdapterFor(
+      rssSource(),
+      `<?xml version="1.0"?><feed><entry>
+        <title>Policy-aware link selection</title>
+        <link rel="alternate" href="https://off-policy.example/posts/rejected" />
+        <link rel="canonical" href="https://www.alignmentforum.org/posts/example/accepted" />
+      </entry></feed>`,
+    ).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates).toEqual([
+      expect.objectContaining({
+        title: "Policy-aware link selection",
+        originalUrl:
+          "https://www.alignmentforum.org/posts/example/accepted",
+      }),
+    ]);
+  });
+
   it("reports a parse failure when a nonempty feed has no interpretable entries", async () => {
     const noValidEntries = await rssAdapterFor(
       rssSource({ id: "lesswrong-curated" }),
-      "<?xml version=\"1.0\"?><rss><channel><item><title>Malformed item</title><link rel=\"alternate\" /></item></channel></rss>",
+      `<?xml version="1.0"?><feed><entry>
+        <title>Malformed item</title>
+        <link rel="alternate" href="javascript:alert(1)" />
+        <link rel="canonical" href="https://off-policy.example/posts/rejected" />
+      </entry></feed>`,
     ).collect(window);
 
     expect(noValidEntries.failures).toEqual([

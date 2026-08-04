@@ -3678,6 +3678,87 @@ describe("manual editorial run", () => {
     }
   });
 
+  it("replaces stale D1 diagnostics when a retry recollects zero lanes", async () => {
+    await env.DB.prepare("UPDATE sources SET enabled = 0").run();
+    const runId = "run-zero-lane-diagnostics-retry";
+    const editionDate = "2033-02-10";
+    const createdAt = new Date().toISOString();
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "failed",
+      currentStep: "publish",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt,
+      updatedAt: createdAt,
+      failureCode: "MINIMUM_COVERAGE_FAILED",
+    });
+    await store.repository.recordDiscoveryDiagnostics(runId, [{
+      laneId: "arxiv:stale",
+      sourceId: "arxiv",
+      discoveryFamily: "arxiv",
+      discovered: 1,
+      deduplicated: 1,
+      triaged: 1,
+      assessed: 1,
+      outcome: "success",
+      rejectionCounts: {},
+    }]);
+
+    const fetch = vi.fn(async () => {
+      throw new Error("disabled sources must not fetch");
+    });
+    vi.stubGlobal("fetch", fetch);
+    try {
+      const context = createD1ProductionPipelineContext(
+        store,
+        editionDate,
+        runId,
+        {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+      );
+
+      await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+        status: "failed",
+      });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(
+        (await store.repository.getDiscoveryDiagnosticsState(runId))
+          ?.diagnostics,
+      ).toEqual([]);
+      expect(
+        (await store.repository.getWorkflowRunDetail(runId))
+          ?.discoveryDiagnostics,
+      ).toEqual([]);
+
+      const freshContext = createD1ProductionPipelineContext(
+        createD1PipelineStore(env.DB),
+        editionDate,
+        runId,
+        {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+      );
+      await freshContext.normalize([]);
+      expect(
+        (await store.repository.getDiscoveryDiagnosticsState(runId))
+          ?.diagnostics,
+      ).toEqual([]);
+      expect(
+        (await store.repository.getWorkflowRunDetail(runId))
+          ?.discoveryDiagnostics,
+      ).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("uses a 36-hour production window for news and seven days for research publications", async () => {
     const enabledSources = ["alignment-forum", "reuters"];
     await env.DB.prepare(
