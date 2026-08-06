@@ -85,6 +85,7 @@ import {
   EditionEntrySchema,
   EditionMetadataSchema,
   EditionSchema,
+  EditionSectionSchema,
   ItemScoreSchema,
   ItemSchema,
   StructuredSummarySchema,
@@ -102,6 +103,7 @@ import type {
 import {
   PIPELINE_STEPS,
   CollectedCandidateSchema,
+  SummaryRejectionEventSchema,
   WorkflowItemPayloadSchema,
   WorkflowItemSchema,
   type CheckpointArtifact,
@@ -112,6 +114,7 @@ import {
   type PipelineStep,
   type PipelineStore,
   type PipelineStatus,
+  type SummaryRejectionEvent,
   type WorkflowItemPayload,
 } from "./types";
 import type { BudgetPolicy } from "../models/cost-ledger";
@@ -329,6 +332,30 @@ const CompositionSchema = z.object({
     });
   }
 });
+
+function normalizedSummaryRejectionErrors(
+  errors: readonly string[],
+): string[] {
+  return errors.map((error) =>
+    error.startsWith("UNKNOWN_SOURCE:") ? "UNKNOWN_SOURCE" : error
+  );
+}
+
+async function summaryRejectionAuditId(
+  runId: string,
+  itemId: string,
+): Promise<string> {
+  const canonical = `${runId.length}:${runId}${itemId.length}:${itemId}`;
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(canonical),
+  );
+  const hash = Array.from(
+    new Uint8Array(digest),
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return `summary_rejected:${hash}`;
+}
 
 function checkpointOutputSchema(
   step: (typeof PIPELINE_STEPS)[number],
@@ -609,6 +636,32 @@ export class D1PipelineStore implements PipelineStore {
       "preference_snapshot",
       JSON.stringify(validPreferences),
       new Date().toISOString(),
+    ).run();
+  }
+
+  async recordSummaryRejection(
+    runId: string,
+    itemId: string,
+    event: SummaryRejectionEvent,
+  ): Promise<void> {
+    const valid = SummaryRejectionEventSchema.parse({
+      ...event,
+      errors: normalizedSummaryRejectionErrors(event.errors),
+    });
+    const normalized = {
+      ...valid,
+      errors: [...new Set(valid.errors)].sort(),
+    };
+    const id = await summaryRejectionAuditId(runId, itemId);
+    await this.db.prepare(
+      `INSERT OR IGNORE INTO audit_events (
+        id, run_id, event_type, event_json, created_at
+      ) VALUES (?, ?, 'summary_rejected', ?, ?)`,
+    ).bind(
+      id,
+      runId,
+      JSON.stringify(normalized),
+      valid.createdAt,
     ).run();
   }
 
@@ -1200,6 +1253,14 @@ function newsSection(item: Item): EditionSection {
   return parsed.success ? parsed.data : item.kind === "forecast"
     ? "forecast"
     : "world";
+}
+
+function synthesisSection(item: Item): EditionSection {
+  const section = EditionSectionSchema.safeParse(item.metadata.section);
+  if (section.success) {
+    return section.data;
+  }
+  return isResearchItem(item) ? "research" : newsSection(item);
 }
 
 function sourceQuality(item: Item): number {
@@ -2237,11 +2298,19 @@ export function createProductionPipelineContext(
         preferences,
         budgets,
       );
-      const morning = selected.morningBrief.map((candidate) =>
-        "representativeItem" in candidate
-          ? { id: candidate.id, section: candidate.primarySection }
-          : { id: candidate.id, section: "research" as const }
-      );
+      const featured = selected.researchFeatured
+        .slice(0, Math.min(budgets.featuredResearch, budgets.morningBrief))
+        .map((item) => ({ id: item.id, section: "research" as const }));
+      const reservedIds = new Set(featured.map(({ id }) => id));
+      const rankedMorning = selected.morningBrief
+        .filter((candidate) => !reservedIds.has(candidate.id))
+        .map((candidate) =>
+          "representativeItem" in candidate
+            ? { id: candidate.id, section: candidate.primarySection }
+            : { id: candidate.id, section: "research" as const }
+        );
+      const morning = [...featured, ...rankedMorning]
+        .slice(0, budgets.morningBrief);
       const morningIds = new Set(morning.map(({ id }) => id));
       const radar = selected.researchRadar
         .filter((item) => !morningIds.has(item.id))
@@ -2250,7 +2319,7 @@ export function createProductionPipelineContext(
           Math.max(0, budgets.morningBrief - morning.length),
         ))
         .map((item) => ({ id: item.id, section: "research_radar" as const }));
-      const ordered = [...morning, ...radar];
+      const ordered = [...morning, ...radar].slice(0, budgets.morningBrief);
       const byId = new Map(parsed.map((item) => [item.id, item]));
       const selectedIds = new Set(ordered.map(({ id }) => id));
       await rejectDiscoveryDiagnostics(
@@ -2310,7 +2379,19 @@ export function createProductionPipelineContext(
             ),
           });
         } catch (error) {
-          if (error instanceof SummaryRejectedError) continue;
+          if (error instanceof SummaryRejectedError) {
+            if (options.store.recordSummaryRejection === undefined) {
+              throw new Error("DIAGNOSTIC_STORE_UNAVAILABLE");
+            }
+            await options.store.recordSummaryRejection(options.runId, item.id, {
+              section: synthesisSection(item),
+              errors: [
+                ...new Set(normalizedSummaryRejectionErrors(error.errors)),
+              ].slice(0, 64),
+              createdAt: options.now(),
+            });
+            continue;
+          }
           throw error;
         }
       }

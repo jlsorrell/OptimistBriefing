@@ -436,9 +436,125 @@ class WrongSourceGroundingProvider implements ModelProvider {
   }
 }
 
+class RejectionThenAcceptanceProvider implements ModelProvider {
+  async embed(
+    texts: readonly string[],
+  ): Promise<readonly (readonly number[])[]> {
+    return texts.map(() => [1, 0]);
+  }
+
+  async generateObject(input: GenerateObjectRequest): Promise<unknown> {
+    if (input.schemaName !== "structured_summary") {
+      throw new Error(`Unexpected schema: ${input.schemaName}`);
+    }
+    const sourceId = packetValue(input.sourcePacket, "source_id");
+    const title = packetValue(input.sourcePacket, "title");
+    const evidence = packetExcerpt(input.sourcePacket);
+    const accessLevel = packetAccessLevel(input.sourcePacket);
+    const provenance = { sourceIds: [sourceId], evidenceExcerpt: evidence };
+    if (title === "Rejected private item title") {
+      return {
+        title,
+        oneSentence: evidence,
+        whyItMatters: evidence,
+        uncertainty: evidence,
+        claims: [{
+          text: "Unsupported raw provider claim",
+          sourceIds: [sourceId],
+          evidenceExcerpt: "Unsupported raw provider evidence",
+        }],
+        accessLevel,
+        provenance: {
+          title: provenance,
+          oneSentence: provenance,
+          whyItMatters: provenance,
+          uncertainty: provenance,
+        },
+      };
+    }
+    return {
+      title,
+      oneSentence: evidence,
+      whyItMatters: evidence,
+      uncertainty: evidence,
+      claims: [{
+        text: evidence,
+        sourceIds: [sourceId],
+        evidenceExcerpt: evidence,
+      }],
+      accessLevel,
+      provenance: {
+        title: provenance,
+        oneSentence: provenance,
+        whyItMatters: provenance,
+        uncertainty: provenance,
+      },
+    };
+  }
+}
+
+class UnknownSourceThenAcceptanceProvider implements ModelProvider {
+  constructor(readonly unknownSourceId: string) {}
+
+  async embed(
+    texts: readonly string[],
+  ): Promise<readonly (readonly number[])[]> {
+    return texts.map(() => [1, 0]);
+  }
+
+  async generateObject(input: GenerateObjectRequest): Promise<unknown> {
+    if (input.schemaName !== "structured_summary") {
+      throw new Error(`Unexpected schema: ${input.schemaName}`);
+    }
+    const sourceId = packetValue(input.sourcePacket, "source_id");
+    const title = packetValue(input.sourcePacket, "title");
+    const evidence = packetExcerpt(input.sourcePacket);
+    const accessLevel = packetAccessLevel(input.sourcePacket);
+    const provenance = { sourceIds: [sourceId], evidenceExcerpt: evidence };
+    if (title === "Unknown-source private item") {
+      return {
+        title,
+        oneSentence: evidence,
+        whyItMatters: evidence,
+        uncertainty: evidence,
+        claims: [{
+          text: evidence,
+          sourceIds: [this.unknownSourceId],
+          evidenceExcerpt: evidence,
+        }],
+        accessLevel,
+        provenance: {
+          title: provenance,
+          oneSentence: provenance,
+          whyItMatters: provenance,
+          uncertainty: provenance,
+        },
+      };
+    }
+    return {
+      title,
+      oneSentence: evidence,
+      whyItMatters: evidence,
+      uncertainty: evidence,
+      claims: [{
+        text: evidence,
+        sourceIds: [sourceId],
+        evidenceExcerpt: evidence,
+      }],
+      accessLevel,
+      provenance: {
+        title: provenance,
+        oneSentence: provenance,
+        whyItMatters: provenance,
+        uncertainty: provenance,
+      },
+    };
+  }
+}
+
 class RankingEmbeddingProvider implements ModelProvider {
   private basis(index: number): number[] {
-    return Array.from({ length: 7 }, (_, position) =>
+    return Array.from({ length: 16 }, (_, position) =>
       position === index ? 1 : 0
     );
   }
@@ -447,6 +563,13 @@ class RankingEmbeddingProvider implements ModelProvider {
     texts: readonly string[],
   ): Promise<readonly (readonly number[])[]> {
     return texts.map((text) => {
+      const highNewsIndex = /high-news-(\d+)/.exec(text)?.[1];
+      if (highNewsIndex !== undefined) {
+        const index = Number(highNewsIndex);
+        const embedding = this.basis(index <= 4 ? 1 : 2);
+        embedding[6 + index] = 1;
+        return embedding;
+      }
       if (
         text.includes("Interpretability study") ||
         text.includes("AI safety, alignment")
@@ -475,6 +598,74 @@ class RankingEmbeddingProvider implements ModelProvider {
   async generateObject(input: GenerateObjectRequest): Promise<unknown> {
     throw new Error(`Unexpected generation request: ${input.schemaName}`);
   }
+}
+
+function rawHighScoringNewsCandidate(
+  id: string,
+  section: "technology" | "ai_policy",
+): RawNewsCandidate {
+  const sourceId = section === "technology" ? "nist" : "federal-register";
+  return {
+    ...rawNewsCandidate(sourceId, section, id),
+    title: `Source ${sourceId} ${id} adopts an evaluation standard`,
+    originalUrl: `https://${sourceId}.example.com/${id}`,
+    namedEntities: [`Entity ${id}`],
+    eventFamilies: [`evaluation-standard-${id}`],
+  };
+}
+
+const researchAssessment = {
+  technicalQuality: 0.9,
+  novelty: 0.8,
+  strengths: ["The abstract describes a concrete method."],
+  limitations: ["Only abstract evidence was supplied."],
+  rationale: "The available abstract supports a strong assessment.",
+  accessLevel: "abstract" as const,
+};
+
+const belowTechnicalQualityAssessment = {
+  ...researchAssessment,
+  technicalQuality: 0.4,
+};
+
+const qualifiedResearchAssessment = {
+  ...researchAssessment,
+  technicalQuality: 0.5,
+  novelty: 0,
+};
+
+function highScoringNews(): RawNewsCandidate[] {
+  return Array.from({ length: 8 }, (_, index) =>
+    rawHighScoringNewsCandidate(
+      `high-news-${index + 1}`,
+      index < 4 ? "technology" : "ai_policy",
+    )
+  );
+}
+
+async function productionShortlist(
+  candidates: readonly (RawResearchCandidate | RawNewsCandidate)[],
+  assessments: readonly typeof researchAssessment[],
+  runId: string,
+): Promise<readonly Item[]> {
+  const context = createProductionPipelineContext({
+    editionDate: "2033-01-03",
+    runId,
+    store: new FixtureStore(),
+    now: () => now,
+    providers: {
+      summary: new RankingEmbeddingProvider(),
+      assessment: new FakeModelProvider({ generatedObjects: assessments }),
+    },
+    collectCandidates: async () => candidates,
+  });
+  const normalized = await context.normalize(await context.collect());
+  const enriched = await context.enrich(normalized);
+  const prefiltered = await context.prefilter(enriched);
+  const assessed = await context.assess(prefiltered);
+  const scored = await context.score(assessed);
+  const clustered = await context.cluster(scored);
+  return context.shortlist(clustered);
 }
 
 class RelevanceFirstEmbeddingProvider implements ModelProvider {
@@ -2546,10 +2737,13 @@ describe("manual editorial run", () => {
       },
     });
     const provider = new WrongSourceGroundingProvider();
+    class AvailableDiagnosticStore extends FixtureStore {
+      async recordSummaryRejection(): Promise<void> {}
+    }
     const context = createProductionPipelineContext({
       editionDate: "2033-01-03",
       runId: "run-wrong-source-grounding",
-      store: new FixtureStore(),
+      store: new AvailableDiagnosticStore(),
       now: () => now,
       providers: { summary: provider, assessment: provider },
       collectCandidates: async () => [],
@@ -2572,6 +2766,330 @@ describe("manual editorial run", () => {
       valid: false,
       validationErrors: expect.arrayContaining(["CLAIM_EVIDENCE_NOT_EXACT"]),
     }]);
+  });
+
+  it("records bounded synthesis rejections", async () => {
+    // This fails if a rejected summary is discarded rather than audited.
+    const runId = "run-record-synthesis-rejection";
+    const privateItemId =
+      "https://identity.example/items/42?access_token=SECRET_ITEM_ID_CREDENTIAL";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2033-01-04",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const rejectedItem = ItemSchema.parse({
+      ...fixtureItem(privateItemId, "world"),
+      title: "Rejected private item title",
+      canonicalUrl: "https://private.example/SECRET_URL_MARKER",
+      normalizedText: "Private source text SECRET_REJECTION_MARKER",
+      sourceRefs: [{
+        id: "private-source",
+        name: "Private Source",
+        url: "https://private.example/SECRET_URL_MARKER",
+        role: "reporting",
+        retrievedAt: now,
+      }],
+      metadata: { workflow: { version: 1, section: "world" } },
+    });
+    const acceptedItem = ItemSchema.parse({
+      ...fixtureItem("accepted-item", "technology"),
+      metadata: { workflow: { version: 1, section: "technology" } },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-04",
+      runId,
+      store,
+      now: () => now,
+      providers: {
+        summary: new RejectionThenAcceptanceProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    const summaries = await context.synthesize([rejectedItem, acceptedItem]);
+    const events = await env.DB.prepare(
+      `SELECT event_json FROM audit_events
+       WHERE run_id = ? AND event_type = 'summary_rejected'`,
+    ).bind(runId).all<{ event_json: string }>();
+
+    expect(summaries.map(({ item }) => item.id)).toEqual([acceptedItem.id]);
+    expect(events.results).toHaveLength(1);
+    expect(JSON.parse(events.results[0]!.event_json)).toEqual({
+      section: "world",
+      errors: expect.arrayContaining(["CLAIM_EVIDENCE_NOT_EXACT"]),
+      createdAt: now,
+    });
+    const serialized = events.results[0]!.event_json;
+    expect(serialized).not.toContain(privateItemId);
+    expect(serialized).not.toContain("SECRET_ITEM_ID_CREDENTIAL");
+    expect(serialized).not.toContain(rejectedItem.title);
+    expect(serialized).not.toContain(rejectedItem.normalizedText);
+    expect(serialized).not.toContain(rejectedItem.sourceRefs[0]!.url);
+    expect(serialized).not.toContain("Unsupported raw provider claim");
+    expect(serialized).not.toContain("SECRET_REJECTION_MARKER");
+  });
+
+  it("keeps synthesis rejection events idempotent", async () => {
+    // This fails if retries create more than one rejection event for an item.
+    const runId = "run-idempotent-synthesis-rejection";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2033-01-05",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const item = ItemSchema.parse({
+      ...fixtureItem("idempotent-rejected-item", "world"),
+      title: "Rejected private item title",
+      metadata: { workflow: { version: 1, section: "world" } },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-05",
+      runId,
+      store,
+      now: () => now,
+      providers: {
+        summary: new RejectionThenAcceptanceProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    await expect(context.synthesize([item])).resolves.toEqual([]);
+    await expect(context.synthesize([item])).resolves.toEqual([]);
+    const events = await env.DB.prepare(
+      `SELECT id FROM audit_events
+       WHERE run_id = ? AND event_type = 'summary_rejected'`,
+    ).bind(runId).all<{ id: string }>();
+
+    expect(events.results).toHaveLength(1);
+    expect(events.results[0]!.id).toMatch(/^summary_rejected:[a-f0-9]{64}$/);
+  });
+
+  it("redacts model-supplied unknown source IDs from synthesis rejections", async () => {
+    // This fails if provider-controlled source IDs reach a persisted diagnostic.
+    const runId = "run-redacted-unknown-source";
+    const maliciousSourceId = [
+      "https://attacker.example/private?token=SECRET_CREDENTIAL_MARKER",
+      "x".repeat(115),
+    ].join("&payload=");
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2033-01-08",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const rejectedItem = ItemSchema.parse({
+      ...fixtureItem("redacted-unknown-source", "world"),
+      title: "Unknown-source private item",
+      metadata: { section: "world", workflow: { version: 1 } },
+    });
+    const acceptedItem = ItemSchema.parse({
+      ...fixtureItem("accepted-after-unknown-source", "technology"),
+      metadata: { section: "technology", workflow: { version: 1 } },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-08",
+      runId,
+      store,
+      now: () => now,
+      providers: {
+        summary: new UnknownSourceThenAcceptanceProvider(maliciousSourceId),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    await expect(
+      context.synthesize([rejectedItem, acceptedItem]),
+    ).resolves.toMatchObject([{ item: { id: acceptedItem.id } }]);
+    const event = await env.DB.prepare(
+      `SELECT event_json FROM audit_events
+       WHERE run_id = ? AND event_type = 'summary_rejected'`,
+    ).bind(runId).first<{ event_json: string }>();
+
+    expect(event).not.toBeNull();
+    expect(JSON.parse(event!.event_json)).toMatchObject({
+      errors: expect.arrayContaining(["UNKNOWN_SOURCE"]),
+    });
+    expect(event!.event_json).not.toContain(maliciousSourceId);
+    expect(event!.event_json).not.toContain(
+      encodeURIComponent(maliciousSourceId),
+    );
+    expect(event!.event_json).not.toContain("SECRET_CREDENTIAL_MARKER");
+  });
+
+  it("uses collision-safe IDs for ambiguous summary rejection run and item pairs", async () => {
+    // This fails if delimiter-containing run/item pairs share one audit row.
+    const store = createD1PipelineStore(env.DB);
+    const pairs = [
+      { runId: "run", itemId: "item:other", editionDate: "2033-01-09" },
+      { runId: "run:item", itemId: "other", editionDate: "2033-01-10" },
+    ];
+    for (const pair of pairs) {
+      await store.createRun({
+        id: pair.runId,
+        editionDate: pair.editionDate,
+        status: "running",
+        currentStep: "synthesize",
+        retryable: false,
+        attemptCount: 0,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+        failureCode: null,
+      });
+      await store.recordSummaryRejection(pair.runId, pair.itemId, {
+        section: "world",
+        errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
+        createdAt: now,
+      });
+    }
+    const events = await env.DB.prepare(
+      `SELECT id FROM audit_events WHERE event_type = 'summary_rejected'
+       ORDER BY id`,
+    ).all<{ id: string }>();
+
+    expect(events.results).toHaveLength(2);
+    expect(new Set(events.results.map(({ id }) => id)).size).toBe(2);
+    expect(events.results.map(({ id }) => id)).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^summary_rejected:[a-f0-9]{64}$/),
+      ]),
+    );
+  });
+
+  it("rejects malformed synthesis rejection events before writing SQL", async () => {
+    // This fails if malformed diagnostics reach the audit table.
+    const runId = "run-bounded-synthesis-rejection";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2033-01-07",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const recorder = store as unknown as {
+      recordSummaryRejection: (
+        id: string,
+        itemId: string,
+        event: unknown,
+      ) => Promise<void>;
+    };
+    const invalidEvents = [
+      {
+        section: "not-a-section",
+        errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
+        createdAt: now,
+      },
+      {
+        section: "world",
+        errors: Array.from(
+          { length: 65 },
+          () => "CLAIM_EVIDENCE_NOT_EXACT",
+        ),
+        createdAt: now,
+      },
+      {
+        section: "world",
+        errors: [`SCHEMA_INVALID:${"a".repeat(186)}`],
+        createdAt: now,
+      },
+    ];
+
+    for (const event of invalidEvents) {
+      await expect(
+        recorder.recordSummaryRejection(runId, "transient-item-id", event),
+      ).rejects.toBeDefined();
+    }
+    const events = await env.DB.prepare(
+      `SELECT id FROM audit_events
+       WHERE run_id = ? AND event_type = 'summary_rejected'`,
+    ).bind(runId).all<{ id: string }>();
+    expect(events.results).toEqual([]);
+  });
+
+  it("fails closed when recording a synthesis rejection fails", async () => {
+    // This fails if the synthesis catch block swallows diagnostic storage errors.
+    class DiagnosticFailureStore extends FixtureStore {
+      async recordSummaryRejection(): Promise<void> {
+        throw new Error("DIAGNOSTIC_WRITE_FAILED");
+      }
+    }
+    const item = ItemSchema.parse({
+      ...fixtureItem("diagnostic-failure-item", "world"),
+      title: "Rejected private item title",
+      metadata: { workflow: { version: 1, section: "world" } },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-06",
+      runId: "run-diagnostic-write-failure",
+      store: new DiagnosticFailureStore(),
+      now: () => now,
+      providers: {
+        summary: new RejectionThenAcceptanceProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    await expect(context.synthesize([item])).rejects.toThrow(
+      "DIAGNOSTIC_WRITE_FAILED",
+    );
+  });
+
+  it("fails closed when a synthesis rejection recorder is unavailable", async () => {
+    // This fails if optional chaining silently drops a required diagnostic.
+    const item = ItemSchema.parse({
+      ...fixtureItem("missing-diagnostic-recorder", "world"),
+      title: "Rejected private item title",
+      metadata: { workflow: { version: 1, section: "world" } },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-11",
+      runId: "run-missing-diagnostic-recorder",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new RejectionThenAcceptanceProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    await expect(context.synthesize([item])).rejects.toThrow(
+      "DIAGNOSTIC_STORE_UNAVAILABLE",
+    );
   });
 
   it("keeps ephemeral article bodies out of collection checkpoints and D1", async () => {
@@ -3274,6 +3792,91 @@ describe("manual editorial run", () => {
     );
     expect(shortlisted.map((item) => item.metadata.section))
       .not.toContain("research_radar");
+  });
+
+  it("reserves qualified featured research ahead of higher-scoring news", async () => {
+    // This fails if the production shortlist lets globally ranked news consume
+    // all morning-brief capacity before the qualified featured research is kept.
+    const clustered = [
+      rawResearchCandidate(
+        "2607.30001",
+        "Interpretability study Alpha for oversight",
+        0,
+      ),
+      rawResearchCandidate(
+        "2607.30002",
+        "Interpretability study Beta for oversight",
+        0,
+      ),
+      rawResearchCandidate(
+        "2607.30003",
+        "Interpretability study Gamma for oversight",
+        0,
+      ),
+      rawResearchCandidate(
+        "2607.30004",
+        "Interpretability study Delta for oversight",
+        0,
+      ),
+      ...highScoringNews(),
+    ];
+
+    const shortlisted = await productionShortlist(
+      clustered,
+      Array.from({ length: 4 }, () => qualifiedResearchAssessment),
+      "reserved-featured-forward",
+    );
+    const reversed = await productionShortlist(
+      [...clustered].reverse(),
+      Array.from({ length: 4 }, () => qualifiedResearchAssessment),
+      "reserved-featured-reverse",
+    );
+
+    expect(shortlisted).toHaveLength(8);
+    expect(shortlisted.filter(
+      (item) => item.kind === "paper" || item.kind === "blog",
+    )).toHaveLength(3);
+    expect(shortlisted.slice(0, 3).map((item) => item.metadata.section))
+      .toEqual(["research", "research", "research"]);
+    expect(new Set(shortlisted.map(({ id }) => id)).size).toBe(8);
+    expect(shortlisted.map(({ id }) => id))
+      .toEqual(reversed.map(({ id }) => id));
+  });
+
+  it.each([
+    { qualified: 0, expectedResearch: 0 },
+    { qualified: 1, expectedResearch: 1 },
+    { qualified: 2, expectedResearch: 2 },
+  ])("reserves only $expectedResearch qualified research slots", async ({
+    qualified,
+    expectedResearch,
+  }) => {
+    // This fails if a qualifying featured paper is displaced by higher-ranked
+    // news, or if research below the technical-quality gate is retained.
+    const papers = qualified === 0
+      ? [rawResearchCandidate(
+          "2607.31000",
+          "Interpretability study below technical quality",
+          0,
+        )]
+      : Array.from({ length: qualified }, (_, index) => rawResearchCandidate(
+          `2607.3100${index + 1}`,
+          `Interpretability study qualified ${index + 1}`,
+          0,
+        ));
+    const clustered = qualified === 0 ? papers : [...papers, ...highScoringNews()];
+    const shortlisted = await productionShortlist(
+      clustered,
+      qualified === 0
+        ? [belowTechnicalQualityAssessment]
+        : Array.from({ length: qualified }, () => qualifiedResearchAssessment),
+      `reserved-featured-${qualified}`,
+    );
+    const isResearchFixture = (item: Item) =>
+      item.kind === "paper" || item.kind === "blog";
+
+    expect(shortlisted.filter(isResearchFixture)).toHaveLength(expectedResearch);
+    expect(shortlisted.length).toBeLessThanOrEqual(8);
   });
 
   it("persists normalized production items before clustered-news publication and does not re-persist them on resume", async () => {

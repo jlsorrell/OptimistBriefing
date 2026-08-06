@@ -7,6 +7,7 @@ import type { EditionEntry, Item } from "../../../src/contracts/editorial";
 import { READER_PROFILE } from "../../../src/config/reader-profile";
 import { D1BriefingRepository } from "../../../src/db/d1-repository";
 import { coordinateScheduledBriefing } from "../../../src/workflow/schedule";
+import { createD1PipelineStore } from "../../../src/workflow/run-editorial-pipeline";
 import worker, { type Env } from "../../../src/worker";
 
 const inlineLauncherCalls = vi.hoisted(() => ({ count: 0 }));
@@ -850,7 +851,7 @@ describe("reader controls API", () => {
     }
   });
 
-  it("lists run checkpoints, attempts, failures, rejections, publish time, and monthly cost without packets or secrets", async () => {
+  it("redacts private diagnostics while listing run checkpoints, attempts, failures, rejections, publish time, and monthly cost", async () => {
     const runId = "task-10-private-run";
     await env.DB.prepare(
       `INSERT INTO workflow_runs (
@@ -913,6 +914,37 @@ describe("reader controls API", () => {
         "2034-02-01T08:59:00.000Z",
       ),
       env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        "task-10-summary-rejection",
+        runId,
+        "summary_rejected",
+        JSON.stringify({
+          section: "world",
+          errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
+          createdAt: "2034-02-01T09:01:00.000Z",
+        }),
+        "2034-02-01T09:01:00.000Z",
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        "task-10-malformed-summary-rejection",
+        runId,
+        "summary_rejected",
+        JSON.stringify({
+          section: "world",
+          errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
+          createdAt: "2034-02-01T09:02:00.000Z",
+          title: "title-must-not-leak",
+          sourceText: "source-text-must-not-leak",
+          url: "https://private.example/must-not-leak",
+          rawOutput: "raw-output-must-not-leak",
+          secret: "secret-must-not-leak",
+        }),
+        "2034-02-01T09:02:00.000Z",
+      ),
+      env.DB.prepare(
         `INSERT INTO editions (
           id, edition_date, run_id, status, reading_minutes, published_at,
           created_at, metadata_json
@@ -949,6 +981,11 @@ describe("reader controls API", () => {
     expect(text).not.toContain("sk_live");
     expect(text).not.toContain("Bearer");
     expect(text).not.toContain("api-key");
+    expect(text).not.toContain("item-id");
+    expect(text).not.toContain("title-must-not-leak");
+    expect(text).not.toContain("source-text-must-not-leak");
+    expect(text).not.toContain("private.example");
+    expect(text).not.toContain("raw-output-must-not-leak");
     expect(JSON.parse(text)).toMatchObject({
       id: runId,
       checkpoints: [
@@ -967,9 +1004,94 @@ describe("reader controls API", () => {
       rejectedSummaryReasons: [
         "REDACTED_REJECTION",
         "unsupported_claim",
+        "world:CLAIM_EVIDENCE_NOT_EXACT",
       ],
       publishedAt: "2034-02-01T09:45:00.000Z",
       estimatedMonthlyCostUsd: 1.25,
+    });
+  });
+
+  it("keeps raw synthesis item identities out of D1 and authenticated Run Status", async () => {
+    const runId = "task-10-private-summary-identity";
+    const privateItemId =
+      "https://identity.example/items/42?api_key=sk_live_ITEM_ID_MUST_NOT_LEAK";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-02-03",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: "2034-02-03T09:00:00.000Z",
+      updatedAt: "2034-02-03T09:00:00.000Z",
+      failureCode: null,
+    });
+    await store.recordSummaryRejection(runId, privateItemId, {
+      section: "world",
+      errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
+      createdAt: "2034-02-03T09:01:00.000Z",
+    });
+
+    const persisted = await env.DB.prepare(
+      `SELECT id, event_json FROM audit_events
+       WHERE run_id = ? AND event_type = 'summary_rejected'`,
+    ).bind(runId).first<{ id: string; event_json: string }>();
+    expect(persisted?.id).toMatch(/^summary_rejected:[a-f0-9]{64}$/);
+    expect(persisted?.event_json).not.toContain(privateItemId);
+    expect(persisted?.event_json).not.toContain("ITEM_ID_MUST_NOT_LEAK");
+
+    const response = await app().request(`/api/runs/${runId}`, {
+      headers: authenticated,
+    });
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).not.toContain(privateItemId);
+    expect(text).not.toContain("ITEM_ID_MUST_NOT_LEAK");
+    expect(JSON.parse(text)).toMatchObject({
+      rejectedSummaryReasons: ["world:CLAIM_EVIDENCE_NOT_EXACT"],
+    });
+  });
+
+  it("redacts syntactically malformed summary rejection audit JSON", async () => {
+    const runId = "task-10-invalid-summary-rejection-json";
+    await env.DB.prepare(
+      `INSERT INTO workflow_runs (
+        id, edition_date, status, current_step, retryable, attempt_count,
+        failure_code, estimated_cost_usd, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      runId,
+      "2034-02-01",
+      "running",
+      "validate",
+      0,
+      1,
+      null,
+      0,
+      "2034-02-01T09:00:00.000Z",
+      "2034-02-01T09:01:00.000Z",
+    ).run();
+    await env.DB.prepare(
+      "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind(
+      "task-10-invalid-summary-rejection-json",
+      runId,
+      "summary_rejected",
+      "not json",
+      "2034-02-01T09:02:00.000Z",
+    ).run();
+
+    const response = await app().request(`/api/runs/${runId}`, {
+      headers: authenticated,
+    });
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).not.toContain("not json");
+    expect(JSON.parse(text)).toMatchObject({
+      id: runId,
+      rejectedSummaryReasons: ["REDACTED_REJECTION"],
     });
   });
 });
