@@ -333,6 +333,30 @@ const CompositionSchema = z.object({
   }
 });
 
+function normalizedSummaryRejectionErrors(
+  errors: readonly string[],
+): string[] {
+  return errors.map((error) =>
+    error.startsWith("UNKNOWN_SOURCE:") ? "UNKNOWN_SOURCE" : error
+  );
+}
+
+async function summaryRejectionAuditId(
+  runId: string,
+  itemId: string,
+): Promise<string> {
+  const canonical = `${runId.length}:${runId}${itemId.length}:${itemId}`;
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(canonical),
+  );
+  const hash = Array.from(
+    new Uint8Array(digest),
+    (byte) => byte.toString(16).padStart(2, "0"),
+  ).join("");
+  return `summary_rejected:${hash}`;
+}
+
 function checkpointOutputSchema(
   step: (typeof PIPELINE_STEPS)[number],
 ): z.ZodType<unknown, z.ZodTypeDef, unknown> {
@@ -619,17 +643,21 @@ export class D1PipelineStore implements PipelineStore {
     runId: string,
     event: SummaryRejectionEvent,
   ): Promise<void> {
-    const valid = SummaryRejectionEventSchema.parse(event);
+    const valid = SummaryRejectionEventSchema.parse({
+      ...event,
+      errors: normalizedSummaryRejectionErrors(event.errors),
+    });
     const normalized = {
       ...valid,
       errors: [...new Set(valid.errors)].sort(),
     };
+    const id = await summaryRejectionAuditId(runId, valid.itemId);
     await this.db.prepare(
       `INSERT OR IGNORE INTO audit_events (
         id, run_id, event_type, event_json, created_at
       ) VALUES (?, ?, 'summary_rejected', ?, ?)`,
     ).bind(
-      `summary_rejected:${runId}:${valid.itemId}`,
+      id,
       runId,
       JSON.stringify(normalized),
       valid.createdAt,
@@ -2354,7 +2382,9 @@ export function createProductionPipelineContext(
             await options.store.recordSummaryRejection?.(options.runId, {
               itemId: item.id,
               section: synthesisSection(item),
-              errors: [...new Set(error.errors)].slice(0, 64),
+              errors: [
+                ...new Set(normalizedSummaryRejectionErrors(error.errors)),
+              ].slice(0, 64),
               createdAt: options.now(),
             });
             continue;

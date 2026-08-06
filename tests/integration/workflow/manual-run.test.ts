@@ -493,6 +493,65 @@ class RejectionThenAcceptanceProvider implements ModelProvider {
   }
 }
 
+class UnknownSourceThenAcceptanceProvider implements ModelProvider {
+  constructor(readonly unknownSourceId: string) {}
+
+  async embed(
+    texts: readonly string[],
+  ): Promise<readonly (readonly number[])[]> {
+    return texts.map(() => [1, 0]);
+  }
+
+  async generateObject(input: GenerateObjectRequest): Promise<unknown> {
+    if (input.schemaName !== "structured_summary") {
+      throw new Error(`Unexpected schema: ${input.schemaName}`);
+    }
+    const sourceId = packetValue(input.sourcePacket, "source_id");
+    const title = packetValue(input.sourcePacket, "title");
+    const evidence = packetExcerpt(input.sourcePacket);
+    const accessLevel = packetAccessLevel(input.sourcePacket);
+    const provenance = { sourceIds: [sourceId], evidenceExcerpt: evidence };
+    if (title === "Unknown-source private item") {
+      return {
+        title,
+        oneSentence: evidence,
+        whyItMatters: evidence,
+        uncertainty: evidence,
+        claims: [{
+          text: evidence,
+          sourceIds: [this.unknownSourceId],
+          evidenceExcerpt: evidence,
+        }],
+        accessLevel,
+        provenance: {
+          title: provenance,
+          oneSentence: provenance,
+          whyItMatters: provenance,
+          uncertainty: provenance,
+        },
+      };
+    }
+    return {
+      title,
+      oneSentence: evidence,
+      whyItMatters: evidence,
+      uncertainty: evidence,
+      claims: [{
+        text: evidence,
+        sourceIds: [sourceId],
+        evidenceExcerpt: evidence,
+      }],
+      accessLevel,
+      provenance: {
+        title: provenance,
+        oneSentence: provenance,
+        whyItMatters: provenance,
+        uncertainty: provenance,
+      },
+    };
+  }
+}
+
 class RankingEmbeddingProvider implements ModelProvider {
   private basis(index: number): number[] {
     return Array.from({ length: 16 }, (_, position) =>
@@ -2814,9 +2873,110 @@ describe("manual editorial run", () => {
        WHERE run_id = ? AND event_type = 'summary_rejected'`,
     ).bind(runId).all<{ id: string }>();
 
-    expect(events.results).toEqual([{
-      id: `summary_rejected:${runId}:${item.id}`,
-    }]);
+    expect(events.results).toHaveLength(1);
+    expect(events.results[0]!.id).toMatch(/^summary_rejected:[a-f0-9]{64}$/);
+  });
+
+  it("redacts model-supplied unknown source IDs from synthesis rejections", async () => {
+    // This fails if provider-controlled source IDs reach a persisted diagnostic.
+    const runId = "run-redacted-unknown-source";
+    const maliciousSourceId = [
+      "https://attacker.example/private?token=SECRET_CREDENTIAL_MARKER",
+      "x".repeat(115),
+    ].join("&payload=");
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2033-01-08",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const rejectedItem = ItemSchema.parse({
+      ...fixtureItem("redacted-unknown-source", "world"),
+      title: "Unknown-source private item",
+      metadata: { section: "world", workflow: { version: 1 } },
+    });
+    const acceptedItem = ItemSchema.parse({
+      ...fixtureItem("accepted-after-unknown-source", "technology"),
+      metadata: { section: "technology", workflow: { version: 1 } },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-08",
+      runId,
+      store,
+      now: () => now,
+      providers: {
+        summary: new UnknownSourceThenAcceptanceProvider(maliciousSourceId),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    await expect(
+      context.synthesize([rejectedItem, acceptedItem]),
+    ).resolves.toMatchObject([{ item: { id: acceptedItem.id } }]);
+    const event = await env.DB.prepare(
+      `SELECT event_json FROM audit_events
+       WHERE run_id = ? AND event_type = 'summary_rejected'`,
+    ).bind(runId).first<{ event_json: string }>();
+
+    expect(event).not.toBeNull();
+    expect(JSON.parse(event!.event_json)).toMatchObject({
+      itemId: rejectedItem.id,
+      errors: expect.arrayContaining(["UNKNOWN_SOURCE"]),
+    });
+    expect(event!.event_json).not.toContain(maliciousSourceId);
+    expect(event!.event_json).not.toContain(
+      encodeURIComponent(maliciousSourceId),
+    );
+    expect(event!.event_json).not.toContain("SECRET_CREDENTIAL_MARKER");
+  });
+
+  it("uses collision-safe IDs for ambiguous summary rejection run and item pairs", async () => {
+    // This fails if delimiter-containing run/item pairs share one audit row.
+    const store = createD1PipelineStore(env.DB);
+    const pairs = [
+      { runId: "run", itemId: "item:other", editionDate: "2033-01-09" },
+      { runId: "run:item", itemId: "other", editionDate: "2033-01-10" },
+    ];
+    for (const pair of pairs) {
+      await store.createRun({
+        id: pair.runId,
+        editionDate: pair.editionDate,
+        status: "running",
+        currentStep: "synthesize",
+        retryable: false,
+        attemptCount: 0,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+        failureCode: null,
+      });
+      await store.recordSummaryRejection(pair.runId, {
+        itemId: pair.itemId,
+        section: "world",
+        errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
+        createdAt: now,
+      });
+    }
+    const events = await env.DB.prepare(
+      `SELECT id FROM audit_events WHERE event_type = 'summary_rejected'
+       ORDER BY id`,
+    ).all<{ id: string }>();
+
+    expect(events.results).toHaveLength(2);
+    expect(new Set(events.results.map(({ id }) => id)).size).toBe(2);
+    expect(events.results.map(({ id }) => id)).toEqual(
+      expect.arrayContaining([
+        expect.stringMatching(/^summary_rejected:[a-f0-9]{64}$/),
+      ]),
+    );
   });
 
   it("rejects malformed synthesis rejection events before writing SQL", async () => {
@@ -2860,7 +3020,7 @@ describe("manual editorial run", () => {
       {
         itemId: "too-long-error",
         section: "world",
-        errors: [`UNKNOWN_SOURCE:${"a".repeat(186)}`],
+        errors: [`SCHEMA_INVALID:${"a".repeat(186)}`],
         createdAt: now,
       },
     ];

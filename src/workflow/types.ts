@@ -162,7 +162,7 @@ export type ValidatedSummaryCandidate = SummaryCandidate & {
 export const SummaryRejectionCodeSchema = z.string()
   .min(1)
   .max(200)
-  .regex(/^(?:SCHEMA_INVALID:[A-Za-z0-9_.-]+|UNKNOWN_SOURCE:[A-Za-z0-9%._~-]+|EMPTY_EVIDENCE:\d+|EVIDENCE_NOT_FOUND:\d+|CLAIM_EVIDENCE_NOT_EXACT|UNGROUNDED_CLAIM:\d+|PRIMARY_RESEARCH_SOURCE_REQUIRED:\d+|ACCESS_LEVEL_OVERCLAIM|UNGROUNDED_PROSE:(?:title|oneSentence|whyItMatters|uncertainty)|EMPTY_UNCERTAINTY|FORECAST_LABEL_MISSING)$/);
+  .regex(/^(?:SCHEMA_INVALID:[A-Za-z0-9_.-]+|UNKNOWN_SOURCE|EMPTY_EVIDENCE:\d+|EVIDENCE_NOT_FOUND:\d+|CLAIM_EVIDENCE_NOT_EXACT|UNGROUNDED_CLAIM:\d+|PRIMARY_RESEARCH_SOURCE_REQUIRED:\d+|ACCESS_LEVEL_OVERCLAIM|UNGROUNDED_PROSE:(?:title|oneSentence|whyItMatters|uncertainty)|EMPTY_UNCERTAINTY|FORECAST_LABEL_MISSING)$/);
 
 export const SummaryRejectionEventSchema = z.object({
   itemId: z.string().min(1).max(200),
