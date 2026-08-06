@@ -1723,6 +1723,84 @@ describe("D1BriefingRepository", () => {
     );
   });
 
+  it("surfaces unique sanitized summary rejection codes without audit payloads", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    await env.DB.prepare(
+      `INSERT INTO workflow_runs (
+        id, edition_date, status, current_step, retryable, attempt_count,
+        failure_code, estimated_cost_usd, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      "run-summary-rejections",
+      "2026-08-04",
+      "running",
+      "validate",
+      0,
+      1,
+      null,
+      0,
+      "2026-08-04T09:00:00.000Z",
+      "2026-08-04T09:01:00.000Z",
+    ).run();
+    await env.DB.batch([
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        "summary-rejection-malformed",
+        "run-summary-rejections",
+        "summary_rejected",
+        JSON.stringify({
+          itemId: "item-must-not-leak",
+          section: "world",
+          errors: ["secret-must-not-leak"],
+          createdAt: "2026-08-04T09:02:00.000Z",
+          rawOutput: "must-not-leak",
+        }),
+        "2026-08-04T09:02:00.000Z",
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        "summary-rejection-claim",
+        "run-summary-rejections",
+        "summary_rejected",
+        JSON.stringify({
+          itemId: "private-item-claim",
+          section: "world",
+          errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
+          createdAt: "2026-08-04T09:03:00.000Z",
+        }),
+        "2026-08-04T09:03:00.000Z",
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        "summary-rejection-duplicate",
+        "run-summary-rejections",
+        "summary_rejected",
+        JSON.stringify({
+          itemId: "private-item-prose",
+          section: "world",
+          errors: [
+            "CLAIM_EVIDENCE_NOT_EXACT",
+            "UNGROUNDED_PROSE:whyItMatters",
+          ],
+          createdAt: "2026-08-04T09:04:00.000Z",
+        }),
+        "2026-08-04T09:04:00.000Z",
+      ),
+    ]);
+
+    const detail = await repo.getWorkflowRunDetail("run-summary-rejections");
+    expect(detail?.rejectedSummaryReasons).toEqual([
+      "REDACTED_REJECTION",
+      "world:CLAIM_EVIDENCE_NOT_EXACT",
+      "world:UNGROUNDED_PROSE:whyItMatters",
+    ]);
+    expect(JSON.stringify(detail)).not.toContain("must-not-leak");
+    expect(JSON.stringify(detail)).not.toContain("private-item");
+  });
+
   it("rejects malformed stored workflow booleans instead of normalizing them", async () => {
     const repo = new D1BriefingRepository(env.DB);
     await env.DB.prepare("PRAGMA ignore_check_constraints = ON").run();

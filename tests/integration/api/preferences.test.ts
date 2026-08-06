@@ -850,7 +850,7 @@ describe("reader controls API", () => {
     }
   });
 
-  it("lists run checkpoints, attempts, failures, rejections, publish time, and monthly cost without packets or secrets", async () => {
+  it("redacts private diagnostics while listing run checkpoints, attempts, failures, rejections, publish time, and monthly cost", async () => {
     const runId = "task-10-private-run";
     await env.DB.prepare(
       `INSERT INTO workflow_runs (
@@ -913,6 +913,39 @@ describe("reader controls API", () => {
         "2034-02-01T08:59:00.000Z",
       ),
       env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        "task-10-summary-rejection",
+        runId,
+        "summary_rejected",
+        JSON.stringify({
+          itemId: "item-id-must-not-leak",
+          section: "world",
+          errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
+          createdAt: "2034-02-01T09:01:00.000Z",
+        }),
+        "2034-02-01T09:01:00.000Z",
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
+        "task-10-malformed-summary-rejection",
+        runId,
+        "summary_rejected",
+        JSON.stringify({
+          itemId: "item-id-must-not-leak",
+          section: "world",
+          errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
+          createdAt: "2034-02-01T09:02:00.000Z",
+          title: "title-must-not-leak",
+          sourceText: "source-text-must-not-leak",
+          url: "https://private.example/must-not-leak",
+          rawOutput: "raw-output-must-not-leak",
+          secret: "secret-must-not-leak",
+        }),
+        "2034-02-01T09:02:00.000Z",
+      ),
+      env.DB.prepare(
         `INSERT INTO editions (
           id, edition_date, run_id, status, reading_minutes, published_at,
           created_at, metadata_json
@@ -949,6 +982,11 @@ describe("reader controls API", () => {
     expect(text).not.toContain("sk_live");
     expect(text).not.toContain("Bearer");
     expect(text).not.toContain("api-key");
+    expect(text).not.toContain("item-id");
+    expect(text).not.toContain("title-must-not-leak");
+    expect(text).not.toContain("source-text-must-not-leak");
+    expect(text).not.toContain("private.example");
+    expect(text).not.toContain("raw-output-must-not-leak");
     expect(JSON.parse(text)).toMatchObject({
       id: runId,
       checkpoints: [
@@ -967,6 +1005,7 @@ describe("reader controls API", () => {
       rejectedSummaryReasons: [
         "REDACTED_REJECTION",
         "unsupported_claim",
+        "world:CLAIM_EVIDENCE_NOT_EXACT",
       ],
       publishedAt: "2034-02-01T09:45:00.000Z",
       estimatedMonthlyCostUsd: 1.25,

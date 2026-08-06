@@ -77,7 +77,10 @@ import {
   type DiscoveryObservation,
   type DiscoveryLaneDiagnostic,
 } from "../sources/types";
-import { PIPELINE_STEPS } from "../workflow/types";
+import {
+  PIPELINE_STEPS,
+  SummaryRejectionEventSchema,
+} from "../workflow/types";
 
 const DateTimeSchema = z.string().datetime();
 const StrictResearchAssessmentSchema = ResearchAssessmentSchema.strict();
@@ -2206,7 +2209,8 @@ export class D1BriefingRepository implements BriefingRepository {
           AND event_type IN (
             'workflow_checkpoint',
             'workflow_attempt_failed',
-            'discovery_diagnostics'
+            'discovery_diagnostics',
+            'summary_rejected'
           )
         ORDER BY created_at, id`,
       )
@@ -2263,6 +2267,22 @@ export class D1BriefingRepository implements BriefingRepository {
             ),
           });
         }
+        continue;
+      }
+      if (event.event_type === "summary_rejected") {
+        const rejection = SummaryRejectionEventSchema.safeParse(parsed);
+        if (!rejection.success) {
+          rejectedSummaryReasons.push("REDACTED_REJECTION");
+          continue;
+        }
+        rejectedSummaryReasons.push(
+          ...rejection.data.errors.map((reason) =>
+            publicLabel(
+              `${rejection.data.section}:${reason}`,
+              "REDACTED_REJECTION",
+            ),
+          ),
+        );
         continue;
       }
       const checkpoint = z.object({
