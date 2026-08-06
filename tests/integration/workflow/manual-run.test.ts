@@ -438,7 +438,7 @@ class WrongSourceGroundingProvider implements ModelProvider {
 
 class RankingEmbeddingProvider implements ModelProvider {
   private basis(index: number): number[] {
-    return Array.from({ length: 7 }, (_, position) =>
+    return Array.from({ length: 16 }, (_, position) =>
       position === index ? 1 : 0
     );
   }
@@ -447,6 +447,13 @@ class RankingEmbeddingProvider implements ModelProvider {
     texts: readonly string[],
   ): Promise<readonly (readonly number[])[]> {
     return texts.map((text) => {
+      const highNewsIndex = /high-news-(\d+)/.exec(text)?.[1];
+      if (highNewsIndex !== undefined) {
+        const index = Number(highNewsIndex);
+        const embedding = this.basis(index <= 4 ? 1 : 2);
+        embedding[6 + index] = 1;
+        return embedding;
+      }
       if (
         text.includes("Interpretability study") ||
         text.includes("AI safety, alignment")
@@ -475,6 +482,74 @@ class RankingEmbeddingProvider implements ModelProvider {
   async generateObject(input: GenerateObjectRequest): Promise<unknown> {
     throw new Error(`Unexpected generation request: ${input.schemaName}`);
   }
+}
+
+function rawHighScoringNewsCandidate(
+  id: string,
+  section: "technology" | "ai_policy",
+): RawNewsCandidate {
+  const sourceId = section === "technology" ? "nist" : "federal-register";
+  return {
+    ...rawNewsCandidate(sourceId, section, id),
+    title: `Source ${sourceId} ${id} adopts an evaluation standard`,
+    originalUrl: `https://${sourceId}.example.com/${id}`,
+    namedEntities: [`Entity ${id}`],
+    eventFamilies: [`evaluation-standard-${id}`],
+  };
+}
+
+const researchAssessment = {
+  technicalQuality: 0.9,
+  novelty: 0.8,
+  strengths: ["The abstract describes a concrete method."],
+  limitations: ["Only abstract evidence was supplied."],
+  rationale: "The available abstract supports a strong assessment.",
+  accessLevel: "abstract" as const,
+};
+
+const belowTechnicalQualityAssessment = {
+  ...researchAssessment,
+  technicalQuality: 0.4,
+};
+
+const qualifiedResearchAssessment = {
+  ...researchAssessment,
+  technicalQuality: 0.5,
+  novelty: 0,
+};
+
+function highScoringNews(): RawNewsCandidate[] {
+  return Array.from({ length: 8 }, (_, index) =>
+    rawHighScoringNewsCandidate(
+      `high-news-${index + 1}`,
+      index < 4 ? "technology" : "ai_policy",
+    )
+  );
+}
+
+async function productionShortlist(
+  candidates: readonly (RawResearchCandidate | RawNewsCandidate)[],
+  assessments: readonly typeof researchAssessment[],
+  runId: string,
+): Promise<readonly Item[]> {
+  const context = createProductionPipelineContext({
+    editionDate: "2033-01-03",
+    runId,
+    store: new FixtureStore(),
+    now: () => now,
+    providers: {
+      summary: new RankingEmbeddingProvider(),
+      assessment: new FakeModelProvider({ generatedObjects: assessments }),
+    },
+    collectCandidates: async () => candidates,
+  });
+  const normalized = await context.normalize(await context.collect());
+  const enriched = await context.enrich(normalized);
+  const prefiltered = await context.prefilter(enriched);
+  const assessed = await context.assess(prefiltered);
+  const scored = await context.score(assessed);
+  const clustered = await context.cluster(scored);
+  return context.shortlist(clustered);
 }
 
 class RelevanceFirstEmbeddingProvider implements ModelProvider {
@@ -3274,6 +3349,91 @@ describe("manual editorial run", () => {
     );
     expect(shortlisted.map((item) => item.metadata.section))
       .not.toContain("research_radar");
+  });
+
+  it("reserves qualified featured research ahead of higher-scoring news", async () => {
+    // This fails if the production shortlist lets globally ranked news consume
+    // all morning-brief capacity before the qualified featured research is kept.
+    const clustered = [
+      rawResearchCandidate(
+        "2607.30001",
+        "Interpretability study Alpha for oversight",
+        0,
+      ),
+      rawResearchCandidate(
+        "2607.30002",
+        "Interpretability study Beta for oversight",
+        0,
+      ),
+      rawResearchCandidate(
+        "2607.30003",
+        "Interpretability study Gamma for oversight",
+        0,
+      ),
+      rawResearchCandidate(
+        "2607.30004",
+        "Interpretability study Delta for oversight",
+        0,
+      ),
+      ...highScoringNews(),
+    ];
+
+    const shortlisted = await productionShortlist(
+      clustered,
+      Array.from({ length: 4 }, () => qualifiedResearchAssessment),
+      "reserved-featured-forward",
+    );
+    const reversed = await productionShortlist(
+      [...clustered].reverse(),
+      Array.from({ length: 4 }, () => qualifiedResearchAssessment),
+      "reserved-featured-reverse",
+    );
+
+    expect(shortlisted).toHaveLength(8);
+    expect(shortlisted.filter(
+      (item) => item.kind === "paper" || item.kind === "blog",
+    )).toHaveLength(3);
+    expect(shortlisted.slice(0, 3).map((item) => item.metadata.section))
+      .toEqual(["research", "research", "research"]);
+    expect(new Set(shortlisted.map(({ id }) => id)).size).toBe(8);
+    expect(shortlisted.map(({ id }) => id))
+      .toEqual(reversed.map(({ id }) => id));
+  });
+
+  it.each([
+    { qualified: 0, expectedResearch: 0 },
+    { qualified: 1, expectedResearch: 1 },
+    { qualified: 2, expectedResearch: 2 },
+  ])("reserves only $expectedResearch qualified research slots", async ({
+    qualified,
+    expectedResearch,
+  }) => {
+    // This fails if a qualifying featured paper is displaced by higher-ranked
+    // news, or if research below the technical-quality gate is retained.
+    const papers = qualified === 0
+      ? [rawResearchCandidate(
+          "2607.31000",
+          "Interpretability study below technical quality",
+          0,
+        )]
+      : Array.from({ length: qualified }, (_, index) => rawResearchCandidate(
+          `2607.3100${index + 1}`,
+          `Interpretability study qualified ${index + 1}`,
+          0,
+        ));
+    const clustered = qualified === 0 ? papers : [...papers, ...highScoringNews()];
+    const shortlisted = await productionShortlist(
+      clustered,
+      qualified === 0
+        ? [belowTechnicalQualityAssessment]
+        : Array.from({ length: qualified }, () => qualifiedResearchAssessment),
+      `reserved-featured-${qualified}`,
+    );
+    const isResearchFixture = (item: Item) =>
+      item.kind === "paper" || item.kind === "blog";
+
+    expect(shortlisted.filter(isResearchFixture)).toHaveLength(expectedResearch);
+    expect(shortlisted.length).toBeLessThanOrEqual(8);
   });
 
   it("persists normalized production items before clustered-news publication and does not re-persist them on resume", async () => {
