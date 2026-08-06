@@ -85,6 +85,7 @@ import {
   EditionEntrySchema,
   EditionMetadataSchema,
   EditionSchema,
+  EditionSectionSchema,
   ItemScoreSchema,
   ItemSchema,
   StructuredSummarySchema,
@@ -102,6 +103,7 @@ import type {
 import {
   PIPELINE_STEPS,
   CollectedCandidateSchema,
+  SummaryRejectionEventSchema,
   WorkflowItemPayloadSchema,
   WorkflowItemSchema,
   type CheckpointArtifact,
@@ -112,6 +114,7 @@ import {
   type PipelineStep,
   type PipelineStore,
   type PipelineStatus,
+  type SummaryRejectionEvent,
   type WorkflowItemPayload,
 } from "./types";
 import type { BudgetPolicy } from "../models/cost-ledger";
@@ -609,6 +612,27 @@ export class D1PipelineStore implements PipelineStore {
       "preference_snapshot",
       JSON.stringify(validPreferences),
       new Date().toISOString(),
+    ).run();
+  }
+
+  async recordSummaryRejection(
+    runId: string,
+    event: SummaryRejectionEvent,
+  ): Promise<void> {
+    const valid = SummaryRejectionEventSchema.parse(event);
+    const normalized = {
+      ...valid,
+      errors: [...new Set(valid.errors)].sort(),
+    };
+    await this.db.prepare(
+      `INSERT OR IGNORE INTO audit_events (
+        id, run_id, event_type, event_json, created_at
+      ) VALUES (?, ?, 'summary_rejected', ?, ?)`,
+    ).bind(
+      `summary_rejected:${runId}:${valid.itemId}`,
+      runId,
+      JSON.stringify(normalized),
+      valid.createdAt,
     ).run();
   }
 
@@ -1200,6 +1224,14 @@ function newsSection(item: Item): EditionSection {
   return parsed.success ? parsed.data : item.kind === "forecast"
     ? "forecast"
     : "world";
+}
+
+function synthesisSection(item: Item): EditionSection {
+  const section = EditionSectionSchema.safeParse(item.metadata.section);
+  if (section.success) {
+    return section.data;
+  }
+  return isResearchItem(item) ? "research" : newsSection(item);
 }
 
 function sourceQuality(item: Item): number {
@@ -2318,7 +2350,15 @@ export function createProductionPipelineContext(
             ),
           });
         } catch (error) {
-          if (error instanceof SummaryRejectedError) continue;
+          if (error instanceof SummaryRejectedError) {
+            await options.store.recordSummaryRejection?.(options.runId, {
+              itemId: item.id,
+              section: synthesisSection(item),
+              errors: [...new Set(error.errors)].slice(0, 64),
+              createdAt: options.now(),
+            });
+            continue;
+          }
           throw error;
         }
       }

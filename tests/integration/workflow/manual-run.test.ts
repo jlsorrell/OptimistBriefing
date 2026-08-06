@@ -436,6 +436,63 @@ class WrongSourceGroundingProvider implements ModelProvider {
   }
 }
 
+class RejectionThenAcceptanceProvider implements ModelProvider {
+  async embed(
+    texts: readonly string[],
+  ): Promise<readonly (readonly number[])[]> {
+    return texts.map(() => [1, 0]);
+  }
+
+  async generateObject(input: GenerateObjectRequest): Promise<unknown> {
+    if (input.schemaName !== "structured_summary") {
+      throw new Error(`Unexpected schema: ${input.schemaName}`);
+    }
+    const sourceId = packetValue(input.sourcePacket, "source_id");
+    const title = packetValue(input.sourcePacket, "title");
+    const evidence = packetExcerpt(input.sourcePacket);
+    const accessLevel = packetAccessLevel(input.sourcePacket);
+    const provenance = { sourceIds: [sourceId], evidenceExcerpt: evidence };
+    if (title === "Rejected private item title") {
+      return {
+        title,
+        oneSentence: evidence,
+        whyItMatters: evidence,
+        uncertainty: evidence,
+        claims: [{
+          text: "Unsupported raw provider claim",
+          sourceIds: [sourceId],
+          evidenceExcerpt: "Unsupported raw provider evidence",
+        }],
+        accessLevel,
+        provenance: {
+          title: provenance,
+          oneSentence: provenance,
+          whyItMatters: provenance,
+          uncertainty: provenance,
+        },
+      };
+    }
+    return {
+      title,
+      oneSentence: evidence,
+      whyItMatters: evidence,
+      uncertainty: evidence,
+      claims: [{
+        text: evidence,
+        sourceIds: [sourceId],
+        evidenceExcerpt: evidence,
+      }],
+      accessLevel,
+      provenance: {
+        title: provenance,
+        oneSentence: provenance,
+        whyItMatters: provenance,
+        uncertainty: provenance,
+      },
+    };
+  }
+}
+
 class RankingEmbeddingProvider implements ModelProvider {
   private basis(index: number): number[] {
     return Array.from({ length: 16 }, (_, position) =>
@@ -2647,6 +2704,204 @@ describe("manual editorial run", () => {
       valid: false,
       validationErrors: expect.arrayContaining(["CLAIM_EVIDENCE_NOT_EXACT"]),
     }]);
+  });
+
+  it("records bounded synthesis rejections", async () => {
+    // This fails if a rejected summary is discarded rather than audited.
+    const runId = "run-record-synthesis-rejection";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2033-01-04",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const rejectedItem = ItemSchema.parse({
+      ...fixtureItem("rejected-private-item", "world"),
+      title: "Rejected private item title",
+      canonicalUrl: "https://private.example/SECRET_URL_MARKER",
+      normalizedText: "Private source text SECRET_REJECTION_MARKER",
+      sourceRefs: [{
+        id: "private-source",
+        name: "Private Source",
+        url: "https://private.example/SECRET_URL_MARKER",
+        role: "reporting",
+        retrievedAt: now,
+      }],
+      metadata: { workflow: { version: 1, section: "world" } },
+    });
+    const acceptedItem = ItemSchema.parse({
+      ...fixtureItem("accepted-item", "technology"),
+      metadata: { workflow: { version: 1, section: "technology" } },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-04",
+      runId,
+      store,
+      now: () => now,
+      providers: {
+        summary: new RejectionThenAcceptanceProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    const summaries = await context.synthesize([rejectedItem, acceptedItem]);
+    const events = await env.DB.prepare(
+      `SELECT event_json FROM audit_events
+       WHERE run_id = ? AND event_type = 'summary_rejected'`,
+    ).bind(runId).all<{ event_json: string }>();
+
+    expect(summaries.map(({ item }) => item.id)).toEqual([acceptedItem.id]);
+    expect(events.results).toHaveLength(1);
+    expect(JSON.parse(events.results[0]!.event_json)).toEqual({
+      itemId: rejectedItem.id,
+      section: "world",
+      errors: expect.arrayContaining(["CLAIM_EVIDENCE_NOT_EXACT"]),
+      createdAt: now,
+    });
+    const serialized = events.results[0]!.event_json;
+    expect(serialized).not.toContain(rejectedItem.title);
+    expect(serialized).not.toContain(rejectedItem.normalizedText);
+    expect(serialized).not.toContain(rejectedItem.sourceRefs[0]!.url);
+    expect(serialized).not.toContain("Unsupported raw provider claim");
+    expect(serialized).not.toContain("SECRET_REJECTION_MARKER");
+  });
+
+  it("keeps synthesis rejection events idempotent", async () => {
+    // This fails if retries create more than one rejection event for an item.
+    const runId = "run-idempotent-synthesis-rejection";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2033-01-05",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const item = ItemSchema.parse({
+      ...fixtureItem("idempotent-rejected-item", "world"),
+      title: "Rejected private item title",
+      metadata: { workflow: { version: 1, section: "world" } },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-05",
+      runId,
+      store,
+      now: () => now,
+      providers: {
+        summary: new RejectionThenAcceptanceProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    await expect(context.synthesize([item])).resolves.toEqual([]);
+    await expect(context.synthesize([item])).resolves.toEqual([]);
+    const events = await env.DB.prepare(
+      `SELECT id FROM audit_events
+       WHERE run_id = ? AND event_type = 'summary_rejected'`,
+    ).bind(runId).all<{ id: string }>();
+
+    expect(events.results).toEqual([{
+      id: `summary_rejected:${runId}:${item.id}`,
+    }]);
+  });
+
+  it("rejects malformed synthesis rejection events before writing SQL", async () => {
+    // This fails if malformed diagnostics reach the audit table.
+    const runId = "run-bounded-synthesis-rejection";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2033-01-07",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const recorder = store as unknown as {
+      recordSummaryRejection: (
+        id: string,
+        event: unknown,
+      ) => Promise<void>;
+    };
+    const invalidEvents = [
+      {
+        itemId: "invalid-section",
+        section: "not-a-section",
+        errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
+        createdAt: now,
+      },
+      {
+        itemId: "too-many-errors",
+        section: "world",
+        errors: Array.from(
+          { length: 65 },
+          () => "CLAIM_EVIDENCE_NOT_EXACT",
+        ),
+        createdAt: now,
+      },
+      {
+        itemId: "too-long-error",
+        section: "world",
+        errors: [`UNKNOWN_SOURCE:${"a".repeat(186)}`],
+        createdAt: now,
+      },
+    ];
+
+    for (const event of invalidEvents) {
+      await expect(recorder.recordSummaryRejection(runId, event)).rejects.toBeDefined();
+    }
+    const events = await env.DB.prepare(
+      `SELECT id FROM audit_events
+       WHERE run_id = ? AND event_type = 'summary_rejected'`,
+    ).bind(runId).all<{ id: string }>();
+    expect(events.results).toEqual([]);
+  });
+
+  it("fails closed when recording a synthesis rejection fails", async () => {
+    // This fails if the synthesis catch block swallows diagnostic storage errors.
+    class DiagnosticFailureStore extends FixtureStore {
+      async recordSummaryRejection(): Promise<void> {
+        throw new Error("DIAGNOSTIC_WRITE_FAILED");
+      }
+    }
+    const item = ItemSchema.parse({
+      ...fixtureItem("diagnostic-failure-item", "world"),
+      title: "Rejected private item title",
+      metadata: { workflow: { version: 1, section: "world" } },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-06",
+      runId: "run-diagnostic-write-failure",
+      store: new DiagnosticFailureStore(),
+      now: () => now,
+      providers: {
+        summary: new RejectionThenAcceptanceProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    await expect(context.synthesize([item])).rejects.toThrow(
+      "DIAGNOSTIC_WRITE_FAILED",
+    );
   });
 
   it("keeps ephemeral article bodies out of collection checkpoints and D1", async () => {
