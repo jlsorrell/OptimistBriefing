@@ -2237,6 +2237,9 @@ export class D1BriefingRepository implements BriefingRepository {
       try {
         parsed = JSON.parse(event.event_json);
       } catch {
+        if (event.event_type === "summary_rejected") {
+          rejectedSummaryReasons.push("REDACTED_REJECTION");
+        }
         continue;
       }
       if (event.event_type === "discovery_diagnostics") {

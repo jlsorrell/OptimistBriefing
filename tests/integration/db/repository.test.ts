@@ -1801,6 +1801,42 @@ describe("D1BriefingRepository", () => {
     expect(JSON.stringify(detail)).not.toContain("private-item");
   });
 
+  it("redacts syntactically malformed summary rejection audit JSON", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    await env.DB.prepare(
+      `INSERT INTO workflow_runs (
+        id, edition_date, status, current_step, retryable, attempt_count,
+        failure_code, estimated_cost_usd, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      "run-invalid-summary-rejection-json",
+      "2026-08-04",
+      "running",
+      "validate",
+      0,
+      1,
+      null,
+      0,
+      "2026-08-04T09:00:00.000Z",
+      "2026-08-04T09:01:00.000Z",
+    ).run();
+    await env.DB.prepare(
+      "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind(
+      "summary-rejection-invalid-json",
+      "run-invalid-summary-rejection-json",
+      "summary_rejected",
+      "not json",
+      "2026-08-04T09:02:00.000Z",
+    ).run();
+
+    const detail = await repo.getWorkflowRunDetail(
+      "run-invalid-summary-rejection-json",
+    );
+    expect(detail?.rejectedSummaryReasons).toEqual(["REDACTED_REJECTION"]);
+    expect(JSON.stringify(detail)).not.toContain("not json");
+  });
+
   it("rejects malformed stored workflow booleans instead of normalizing them", async () => {
     const repo = new D1BriefingRepository(env.DB);
     await env.DB.prepare("PRAGMA ignore_check_constraints = ON").run();

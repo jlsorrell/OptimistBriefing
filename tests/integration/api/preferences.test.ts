@@ -1011,4 +1011,45 @@ describe("reader controls API", () => {
       estimatedMonthlyCostUsd: 1.25,
     });
   });
+
+  it("redacts syntactically malformed summary rejection audit JSON", async () => {
+    const runId = "task-10-invalid-summary-rejection-json";
+    await env.DB.prepare(
+      `INSERT INTO workflow_runs (
+        id, edition_date, status, current_step, retryable, attempt_count,
+        failure_code, estimated_cost_usd, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      runId,
+      "2034-02-01",
+      "running",
+      "validate",
+      0,
+      1,
+      null,
+      0,
+      "2034-02-01T09:00:00.000Z",
+      "2034-02-01T09:01:00.000Z",
+    ).run();
+    await env.DB.prepare(
+      "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+    ).bind(
+      "task-10-invalid-summary-rejection-json",
+      runId,
+      "summary_rejected",
+      "not json",
+      "2034-02-01T09:02:00.000Z",
+    ).run();
+
+    const response = await app().request(`/api/runs/${runId}`, {
+      headers: authenticated,
+    });
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).not.toContain("not json");
+    expect(JSON.parse(text)).toMatchObject({
+      id: runId,
+      rejectedSummaryReasons: ["REDACTED_REJECTION"],
+    });
+  });
 });
