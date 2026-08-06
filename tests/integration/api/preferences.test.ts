@@ -7,6 +7,7 @@ import type { EditionEntry, Item } from "../../../src/contracts/editorial";
 import { READER_PROFILE } from "../../../src/config/reader-profile";
 import { D1BriefingRepository } from "../../../src/db/d1-repository";
 import { coordinateScheduledBriefing } from "../../../src/workflow/schedule";
+import { createD1PipelineStore } from "../../../src/workflow/run-editorial-pipeline";
 import worker, { type Env } from "../../../src/worker";
 
 const inlineLauncherCalls = vi.hoisted(() => ({ count: 0 }));
@@ -919,7 +920,6 @@ describe("reader controls API", () => {
         runId,
         "summary_rejected",
         JSON.stringify({
-          itemId: "item-id-must-not-leak",
           section: "world",
           errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
           createdAt: "2034-02-01T09:01:00.000Z",
@@ -933,7 +933,6 @@ describe("reader controls API", () => {
         runId,
         "summary_rejected",
         JSON.stringify({
-          itemId: "item-id-must-not-leak",
           section: "world",
           errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
           createdAt: "2034-02-01T09:02:00.000Z",
@@ -1009,6 +1008,49 @@ describe("reader controls API", () => {
       ],
       publishedAt: "2034-02-01T09:45:00.000Z",
       estimatedMonthlyCostUsd: 1.25,
+    });
+  });
+
+  it("keeps raw synthesis item identities out of D1 and authenticated Run Status", async () => {
+    const runId = "task-10-private-summary-identity";
+    const privateItemId =
+      "https://identity.example/items/42?api_key=sk_live_ITEM_ID_MUST_NOT_LEAK";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-02-03",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 0,
+      estimatedCostUsd: 0,
+      createdAt: "2034-02-03T09:00:00.000Z",
+      updatedAt: "2034-02-03T09:00:00.000Z",
+      failureCode: null,
+    });
+    await store.recordSummaryRejection(runId, privateItemId, {
+      section: "world",
+      errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
+      createdAt: "2034-02-03T09:01:00.000Z",
+    });
+
+    const persisted = await env.DB.prepare(
+      `SELECT id, event_json FROM audit_events
+       WHERE run_id = ? AND event_type = 'summary_rejected'`,
+    ).bind(runId).first<{ id: string; event_json: string }>();
+    expect(persisted?.id).toMatch(/^summary_rejected:[a-f0-9]{64}$/);
+    expect(persisted?.event_json).not.toContain(privateItemId);
+    expect(persisted?.event_json).not.toContain("ITEM_ID_MUST_NOT_LEAK");
+
+    const response = await app().request(`/api/runs/${runId}`, {
+      headers: authenticated,
+    });
+    expect(response.status).toBe(200);
+    const text = await response.text();
+    expect(text).not.toContain(privateItemId);
+    expect(text).not.toContain("ITEM_ID_MUST_NOT_LEAK");
+    expect(JSON.parse(text)).toMatchObject({
+      rejectedSummaryReasons: ["world:CLAIM_EVIDENCE_NOT_EXACT"],
     });
   });
 

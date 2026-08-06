@@ -641,6 +641,7 @@ export class D1PipelineStore implements PipelineStore {
 
   async recordSummaryRejection(
     runId: string,
+    itemId: string,
     event: SummaryRejectionEvent,
   ): Promise<void> {
     const valid = SummaryRejectionEventSchema.parse({
@@ -651,7 +652,7 @@ export class D1PipelineStore implements PipelineStore {
       ...valid,
       errors: [...new Set(valid.errors)].sort(),
     };
-    const id = await summaryRejectionAuditId(runId, valid.itemId);
+    const id = await summaryRejectionAuditId(runId, itemId);
     await this.db.prepare(
       `INSERT OR IGNORE INTO audit_events (
         id, run_id, event_type, event_json, created_at
@@ -2379,8 +2380,10 @@ export function createProductionPipelineContext(
           });
         } catch (error) {
           if (error instanceof SummaryRejectedError) {
-            await options.store.recordSummaryRejection?.(options.runId, {
-              itemId: item.id,
+            if (options.store.recordSummaryRejection === undefined) {
+              throw new Error("DIAGNOSTIC_STORE_UNAVAILABLE");
+            }
+            await options.store.recordSummaryRejection(options.runId, item.id, {
               section: synthesisSection(item),
               errors: [
                 ...new Set(normalizedSummaryRejectionErrors(error.errors)),

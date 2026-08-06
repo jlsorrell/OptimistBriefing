@@ -2427,7 +2427,8 @@ export class D1BriefingRepository implements BriefingRepository {
               'workflow_attempt_failed',
               'preference_snapshot',
               'collection_source_failures',
-              'discovery_diagnostics'
+              'discovery_diagnostics',
+              'summary_rejected'
             )`,
         )
         .bind(runCutoff),
@@ -2480,7 +2481,8 @@ export class D1BriefingRepository implements BriefingRepository {
               'workflow_attempt_failed',
               'preference_snapshot',
               'collection_source_failures',
-              'discovery_diagnostics'
+              'discovery_diagnostics',
+              'summary_rejected'
             )`,
         )
         .bind(runCutoff),

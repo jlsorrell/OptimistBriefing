@@ -85,15 +85,16 @@ will continue fail-open for that individual item as it does today. Before
 continuing, the production context will record a bounded audit event containing:
 
 - the run ID;
-- the item ID;
 - the assigned edition section;
 - a deduplicated, bounded list of existing validation codes; and
 - the event timestamp.
 
 The event will not contain prompts, source excerpts, generated model output,
-API credentials, URLs, titles, or unrestricted exception text. The record will
-use a deterministic run-and-item identity so a workflow retry does not multiply
-the same rejection event.
+API credentials, URLs, titles, raw item IDs, or unrestricted exception text.
+The raw item ID is used only transiently with the run ID to derive a
+collision-safe deterministic SHA-256 audit key; D1 retains only that digest and
+never serializes the raw item ID. The deterministic key prevents a workflow
+retry from multiplying the same rejection event.
 
 The repository's Run Status detail reader will accept these events in addition
 to validation-stage checkpoint rejections. It will apply the existing public
@@ -128,6 +129,7 @@ grounding requirements. Diagnostics explain failures; they do not override them.
   or malformed values use the existing generic redacted label.
 - Event arrays and strings remain bounded by schemas before persistence.
 - Duplicate events for the same run and item are ignored deterministically.
+- Raw item identity is absent from both persisted event JSON and Run Status.
 - A rejected item remains absent from validation, composition, and publication.
 - A run with insufficient surviving coverage remains an unpublished draft.
 - Model-budget reservation reconciliation and terminal cleanup remain unchanged.
@@ -147,9 +149,13 @@ Focused regression tests will prove that:
 5. A `SummaryRejectedError` records one bounded event and synthesis continues to
    the next item.
 6. Retrying the same run and item does not create duplicate rejection events.
-7. Run Status includes sanitized, section-qualified rejection codes and never
+7. Credential- and URL-shaped raw item IDs are absent from persisted event JSON
+   and authenticated Run Status output.
+8. Rejection diagnostics are counted and deleted with 90-day workflow artifacts.
+9. A missing diagnostic recorder fails closed only after a summary rejection.
+10. Run Status includes sanitized, section-qualified rejection codes and never
    exposes raw model output or source text.
-8. Existing editorial, workflow, repository, API, Worker, and build suites remain
+11. Existing editorial, workflow, repository, API, Worker, and build suites remain
    green.
 
 ## Rollout

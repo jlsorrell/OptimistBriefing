@@ -136,6 +136,7 @@ export type PipelineStore = {
   invalidateFrom(runId: string, step: PipelineStep): Promise<void>;
   recordSummaryRejection?(
     runId: string,
+    itemId: string,
     event: SummaryRejectionEvent,
   ): Promise<void>;
   createDraft(edition: Edition): Promise<void>;
@@ -165,7 +166,6 @@ export const SummaryRejectionCodeSchema = z.string()
   .regex(/^(?:SCHEMA_INVALID:[A-Za-z0-9_.-]+|UNKNOWN_SOURCE|EMPTY_EVIDENCE:\d+|EVIDENCE_NOT_FOUND:\d+|CLAIM_EVIDENCE_NOT_EXACT|UNGROUNDED_CLAIM:\d+|PRIMARY_RESEARCH_SOURCE_REQUIRED:\d+|ACCESS_LEVEL_OVERCLAIM|UNGROUNDED_PROSE:(?:title|oneSentence|whyItMatters|uncertainty)|EMPTY_UNCERTAINTY|FORECAST_LABEL_MISSING)$/);
 
 export const SummaryRejectionEventSchema = z.object({
-  itemId: z.string().min(1).max(200),
   section: EditionSectionSchema,
   errors: z.array(SummaryRejectionCodeSchema).min(1).max(64),
   createdAt: z.string().datetime(),

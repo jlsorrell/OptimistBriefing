@@ -2737,10 +2737,13 @@ describe("manual editorial run", () => {
       },
     });
     const provider = new WrongSourceGroundingProvider();
+    class AvailableDiagnosticStore extends FixtureStore {
+      async recordSummaryRejection(): Promise<void> {}
+    }
     const context = createProductionPipelineContext({
       editionDate: "2033-01-03",
       runId: "run-wrong-source-grounding",
-      store: new FixtureStore(),
+      store: new AvailableDiagnosticStore(),
       now: () => now,
       providers: { summary: provider, assessment: provider },
       collectCandidates: async () => [],
@@ -2768,6 +2771,8 @@ describe("manual editorial run", () => {
   it("records bounded synthesis rejections", async () => {
     // This fails if a rejected summary is discarded rather than audited.
     const runId = "run-record-synthesis-rejection";
+    const privateItemId =
+      "https://identity.example/items/42?access_token=SECRET_ITEM_ID_CREDENTIAL";
     const store = createD1PipelineStore(env.DB);
     await store.createRun({
       id: runId,
@@ -2782,7 +2787,7 @@ describe("manual editorial run", () => {
       failureCode: null,
     });
     const rejectedItem = ItemSchema.parse({
-      ...fixtureItem("rejected-private-item", "world"),
+      ...fixtureItem(privateItemId, "world"),
       title: "Rejected private item title",
       canonicalUrl: "https://private.example/SECRET_URL_MARKER",
       normalizedText: "Private source text SECRET_REJECTION_MARKER",
@@ -2820,12 +2825,13 @@ describe("manual editorial run", () => {
     expect(summaries.map(({ item }) => item.id)).toEqual([acceptedItem.id]);
     expect(events.results).toHaveLength(1);
     expect(JSON.parse(events.results[0]!.event_json)).toEqual({
-      itemId: rejectedItem.id,
       section: "world",
       errors: expect.arrayContaining(["CLAIM_EVIDENCE_NOT_EXACT"]),
       createdAt: now,
     });
     const serialized = events.results[0]!.event_json;
+    expect(serialized).not.toContain(privateItemId);
+    expect(serialized).not.toContain("SECRET_ITEM_ID_CREDENTIAL");
     expect(serialized).not.toContain(rejectedItem.title);
     expect(serialized).not.toContain(rejectedItem.normalizedText);
     expect(serialized).not.toContain(rejectedItem.sourceRefs[0]!.url);
@@ -2928,7 +2934,6 @@ describe("manual editorial run", () => {
 
     expect(event).not.toBeNull();
     expect(JSON.parse(event!.event_json)).toMatchObject({
-      itemId: rejectedItem.id,
       errors: expect.arrayContaining(["UNKNOWN_SOURCE"]),
     });
     expect(event!.event_json).not.toContain(maliciousSourceId);
@@ -2958,8 +2963,7 @@ describe("manual editorial run", () => {
         updatedAt: now,
         failureCode: null,
       });
-      await store.recordSummaryRejection(pair.runId, {
-        itemId: pair.itemId,
+      await store.recordSummaryRejection(pair.runId, pair.itemId, {
         section: "world",
         errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
         createdAt: now,
@@ -2998,18 +3002,17 @@ describe("manual editorial run", () => {
     const recorder = store as unknown as {
       recordSummaryRejection: (
         id: string,
+        itemId: string,
         event: unknown,
       ) => Promise<void>;
     };
     const invalidEvents = [
       {
-        itemId: "invalid-section",
         section: "not-a-section",
         errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
         createdAt: now,
       },
       {
-        itemId: "too-many-errors",
         section: "world",
         errors: Array.from(
           { length: 65 },
@@ -3018,7 +3021,6 @@ describe("manual editorial run", () => {
         createdAt: now,
       },
       {
-        itemId: "too-long-error",
         section: "world",
         errors: [`SCHEMA_INVALID:${"a".repeat(186)}`],
         createdAt: now,
@@ -3026,7 +3028,9 @@ describe("manual editorial run", () => {
     ];
 
     for (const event of invalidEvents) {
-      await expect(recorder.recordSummaryRejection(runId, event)).rejects.toBeDefined();
+      await expect(
+        recorder.recordSummaryRejection(runId, "transient-item-id", event),
+      ).rejects.toBeDefined();
     }
     const events = await env.DB.prepare(
       `SELECT id FROM audit_events
@@ -3061,6 +3065,30 @@ describe("manual editorial run", () => {
 
     await expect(context.synthesize([item])).rejects.toThrow(
       "DIAGNOSTIC_WRITE_FAILED",
+    );
+  });
+
+  it("fails closed when a synthesis rejection recorder is unavailable", async () => {
+    // This fails if optional chaining silently drops a required diagnostic.
+    const item = ItemSchema.parse({
+      ...fixtureItem("missing-diagnostic-recorder", "world"),
+      title: "Rejected private item title",
+      metadata: { workflow: { version: 1, section: "world" } },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-11",
+      runId: "run-missing-diagnostic-recorder",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new RejectionThenAcceptanceProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    await expect(context.synthesize([item])).rejects.toThrow(
+      "DIAGNOSTIC_STORE_UNAVAILABLE",
     );
   });
 

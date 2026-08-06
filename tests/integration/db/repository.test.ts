@@ -1382,6 +1382,15 @@ describe("D1BriefingRepository", () => {
       env.DB.prepare(
         "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
       ).bind(
+        "old-summary-rejection",
+        "old-artifact-run",
+        "summary_rejected",
+        "{\"section\":\"world\",\"errors\":[\"CLAIM_EVIDENCE_NOT_EXACT\"],\"createdAt\":\"2026-04-01T00:00:00.000Z\"}",
+        "2026-04-01T00:00:00.000Z",
+      ),
+      env.DB.prepare(
+        "INSERT INTO audit_events (id, run_id, event_type, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
+      ).bind(
         "old-orphan-checkpoint", null, "workflow_checkpoint",
         "{\"step\":\"collect\",\"artifact\":{\"payload\":\"orphaned private payload\"}}",
         "2026-04-01T00:00:00.000Z",
@@ -1422,7 +1431,7 @@ describe("D1BriefingRepository", () => {
     expect(report).toEqual({
       deletedUnselectedCandidates: 0,
       deletedWorkflowRuns: 1,
-      deletedWorkflowArtifacts: 6,
+      deletedWorkflowArtifacts: 7,
       deletedDiagnosticLogs: 1,
       deletedDiscoveryObservations: 0,
       deletedResearchAssessmentCacheEntries: 0,
@@ -1750,7 +1759,6 @@ describe("D1BriefingRepository", () => {
         "run-summary-rejections",
         "summary_rejected",
         JSON.stringify({
-          itemId: "item-must-not-leak",
           section: "world",
           errors: ["secret-must-not-leak"],
           createdAt: "2026-08-04T09:02:00.000Z",
@@ -1765,7 +1773,6 @@ describe("D1BriefingRepository", () => {
         "run-summary-rejections",
         "summary_rejected",
         JSON.stringify({
-          itemId: "private-item-claim",
           section: "world",
           errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
           createdAt: "2026-08-04T09:03:00.000Z",
@@ -1779,7 +1786,6 @@ describe("D1BriefingRepository", () => {
         "run-summary-rejections",
         "summary_rejected",
         JSON.stringify({
-          itemId: "private-item-prose",
           section: "world",
           errors: [
             "CLAIM_EVIDENCE_NOT_EXACT",
@@ -1798,7 +1804,7 @@ describe("D1BriefingRepository", () => {
       "world:UNGROUNDED_PROSE:whyItMatters",
     ]);
     expect(JSON.stringify(detail)).not.toContain("must-not-leak");
-    expect(JSON.stringify(detail)).not.toContain("private-item");
+    expect(JSON.stringify(detail)).not.toContain("rawOutput");
   });
 
   it("redacts syntactically malformed summary rejection audit JSON", async () => {

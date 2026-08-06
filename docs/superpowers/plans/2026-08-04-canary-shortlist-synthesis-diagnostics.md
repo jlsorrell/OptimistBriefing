@@ -14,7 +14,8 @@
 - Preserve the three-item featured-research maximum and eight-item morning-brief maximum.
 - Preserve all source-policy, grounding, coverage, publication, and model-budget gates.
 - Do not add a summary fallback, model retry, token-budget increase, migration, or public API shape change.
-- Persist no prompt, source excerpt, generated output, credential, URL, title, or unrestricted exception text in rejection diagnostics.
+- Persist no prompt, source excerpt, generated output, credential, URL, title, raw item ID, or unrestricted exception text in rejection diagnostics.
+- Use the raw item ID only transiently to derive the collision-safe deterministic audit digest; retain item identity only through the digest-backed key and keep it out of event JSON.
 - Preview deployment, a paid canary, and production promotion each remain separately approval-gated.
 
 ## File Map
@@ -139,7 +140,7 @@ git commit -m "fix: reserve featured research in briefing shortlist"
 - Test: `tests/integration/workflow/manual-run.test.ts:2510-2585`
 
 **Interfaces:**
-- Produces: `SummaryRejectionCodeSchema`, `SummaryRejectionEventSchema`, `SummaryRejectionEvent`, and optional `PipelineStore.recordSummaryRejection(runId, event): Promise<void>`.
+- Produces: `SummaryRejectionCodeSchema`, digest-only `SummaryRejectionEventSchema`, `SummaryRejectionEvent`, and optional `PipelineStore.recordSummaryRejection(runId, itemId, event): Promise<void>` whose raw `itemId` argument is transient only.
 - Consumes: `SummaryRejectedError.errors`, the item section, and existing `audit_events`.
 
 - [ ] **Step 1: Write failing persistence, continuation, and privacy tests**
@@ -149,14 +150,15 @@ Use a real `D1PipelineStore` and a provider that rejects one item after repair b
 ```ts
 expect(summaries.map(({ item }) => item.id)).toEqual([acceptedItem.id]);
 expect(JSON.parse(events.results[0]!.event_json)).toEqual({
-  itemId: rejectedItem.id,
   section: "world",
   errors: expect.arrayContaining(["CLAIM_EVIDENCE_NOT_EXACT"]),
   createdAt: now,
 });
 ```
 
-Assert serialized event text excludes the item title, source text, URL, raw provider output, and a seeded secret marker.
+Assert serialized event text excludes the raw item ID—including URL- and
+credential-shaped IDs—the item title, source text, URL, raw provider output,
+and a seeded secret marker.
 
 - [ ] **Step 2: Write failing idempotency and bounds tests**
 
@@ -165,6 +167,10 @@ Run synthesis twice for the same run/item and expect one `summary_rejected` row.
 Add a fixture store whose `recordSummaryRejection` rejects with
 `DIAGNOSTIC_WRITE_FAILED`; assert `context.synthesize` rejects with that error
 instead of silently dropping the diagnostic failure.
+
+Add a store without `recordSummaryRejection`; after a `SummaryRejectedError`,
+assert synthesis rejects with the bounded constant
+`DIAGNOSTIC_STORE_UNAVAILABLE`. Normal non-rejection paths remain unchanged.
 
 - [ ] **Step 3: Run focused tests to verify RED**
 
@@ -185,7 +191,6 @@ export const SummaryRejectionCodeSchema = z.string()
   .regex(/^(?:SCHEMA_INVALID:[A-Za-z0-9_.-]+|UNKNOWN_SOURCE:[A-Za-z0-9%._~-]+|EMPTY_EVIDENCE:\d+|EVIDENCE_NOT_FOUND:\d+|CLAIM_EVIDENCE_NOT_EXACT|UNGROUNDED_CLAIM:\d+|PRIMARY_RESEARCH_SOURCE_REQUIRED:\d+|ACCESS_LEVEL_OVERCLAIM|UNGROUNDED_PROSE:(?:title|oneSentence|whyItMatters|uncertainty)|EMPTY_UNCERTAINTY|FORECAST_LABEL_MISSING)$/);
 
 export const SummaryRejectionEventSchema = z.object({
-  itemId: z.string().min(1).max(200),
   section: EditionSectionSchema,
   errors: z.array(SummaryRejectionCodeSchema).min(1).max(64),
   createdAt: z.string().datetime(),
@@ -196,11 +201,15 @@ export type SummaryRejectionEvent = z.infer<
 >;
 ```
 
-Extend `PipelineStore` with optional `recordSummaryRejection(runId, event)` so focused in-memory stores remain compatible.
+Extend `PipelineStore` with optional `recordSummaryRejection(runId, itemId,
+event)` so focused in-memory stores remain compatible. The `itemId` parameter
+must never become part of `SummaryRejectionEventSchema` or persisted JSON.
 
 - [ ] **Step 5: Implement D1 persistence**
 
-Parse with `SummaryRejectionEventSchema`, deduplicate and sort errors, and insert with deterministic ID `summary_rejected:${runId}:${itemId}`:
+Parse the digest-only payload with `SummaryRejectionEventSchema`, deduplicate and
+sort errors, derive a collision-safe SHA-256 key transiently from length-prefixed
+run and item IDs, and insert only the digest-backed key and digest-only JSON:
 
 ```ts
 await this.db.prepare(
@@ -208,14 +217,15 @@ await this.db.prepare(
     id, run_id, event_type, event_json, created_at
   ) VALUES (?, ?, 'summary_rejected', ?, ?)`,
 ).bind(
-  `summary_rejected:${runId}:${valid.itemId}`,
+  await summaryRejectionAuditId(runId, itemId),
   runId,
   JSON.stringify({ ...valid, errors: [...new Set(valid.errors)].sort() }),
   valid.createdAt,
 ).run();
 ```
 
-Do not catch D1 errors; diagnostic persistence failure must fail closed.
+Do not catch D1 errors; diagnostic persistence failure must fail closed. The
+raw item ID must not be serialized into or otherwise retained by D1.
 
 - [ ] **Step 6: Record rejection codes from synthesis**
 
@@ -223,8 +233,10 @@ Derive section from shortlisted `metadata.section`, with `research` or `newsSect
 
 ```ts
 if (error instanceof SummaryRejectedError) {
-  await options.store.recordSummaryRejection?.(options.runId, {
-    itemId: item.id,
+  if (options.store.recordSummaryRejection === undefined) {
+    throw new Error("DIAGNOSTIC_STORE_UNAVAILABLE");
+  }
+  await options.store.recordSummaryRejection(options.runId, item.id, {
     section: synthesisSection(item),
     errors: [...new Set(error.errors)].slice(0, 64),
     createdAt: options.now(),
@@ -281,7 +293,10 @@ Also assert no seeded secret appears in serialized detail.
 
 - [ ] **Step 2: Write the failing authenticated API test**
 
-Extend the existing run-detail redaction fixture with `summary_rejected`. Assert `/api/runs/:runId` includes the safe code but excludes item ID, title, source text, URL, raw output, and secret markers.
+Extend the existing run-detail redaction fixture with digest-only
+`summary_rejected`. Assert `/api/runs/:runId` includes the safe code but excludes
+raw item identity—including URL- and credential-shaped IDs—title, source text,
+URL, raw output, and secret markers.
 
 - [ ] **Step 3: Run focused tests to verify RED**
 
@@ -313,6 +328,12 @@ if (event.event_type === "summary_rejected") {
 ```
 
 Retain checkpoint rejection parsing and final `uniqueStrings` sanitization. Never return `itemId`.
+
+- [ ] **Step 4a: Include rejection events in workflow-artifact retention**
+
+Add `summary_rejected` to both 90-day workflow-artifact count/delete event-type
+lists. Extend the workflow-artifact retention integration fixture and assert the
+event is included in `deletedWorkflowArtifacts` and absent after pruning.
 
 - [ ] **Step 5: Run repository, API, and UI tests to verify GREEN**
 
