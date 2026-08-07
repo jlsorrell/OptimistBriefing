@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  boundProviderTextDetailed,
   decodeProviderTextEntities,
   normalizeProviderText,
   normalizeProviderTextDetailed,
+  truncateProviderTextAtCodePointBoundary,
 } from "../../../src/sources/provider-text";
 
 describe("provider text normalization", () => {
@@ -96,5 +98,28 @@ describe("provider text normalization", () => {
 
     expect(normalized.value).toHaveLength(100_000);
     expect(normalized.truncated).toBe(true);
+  });
+
+  it("bounds undecoded provider text after NFKC expansion", () => {
+    const bounded = boundProviderTextDetailed("ﬃ".repeat(500), {
+      maxCharacters: 500,
+    });
+
+    expect(bounded.value).toHaveLength(500);
+    expect(bounded.truncated).toBe(true);
+  });
+
+  it("safely truncates assessment text without decoding entities", () => {
+    for (const maximum of [4_000, 100_000]) {
+      const value = `${"a".repeat(maximum - 1)}😀tail &amp;`;
+      const truncated = truncateProviderTextAtCodePointBoundary(
+        value,
+        maximum,
+      );
+
+      expect(truncated).toHaveLength(maximum - 1);
+      expect(truncated).not.toMatch(/[\uD800-\uDFFF]/u);
+      expect(truncated).not.toContain("&");
+    }
   });
 });

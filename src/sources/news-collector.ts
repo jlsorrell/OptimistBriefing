@@ -25,10 +25,12 @@ import {
   type OutboundUrlPolicy,
 } from "./outbound-url";
 import { PolymarketAdapter } from "./polymarket";
-import { normalizeProviderText } from "./provider-text";
+import { boundProviderText, normalizeProviderText } from "./provider-text";
 import {
   bodyRetrievalPermitted,
   CollectionWindowSchema,
+  MAX_PROVIDER_EVIDENCE_CHARACTERS,
+  MAX_PROVIDER_TITLE_CHARACTERS,
   RawNewsCandidateSchema,
   ResearchSourceRecordSchema,
   type CollectionBatch,
@@ -190,8 +192,11 @@ function catalogInputMayBeNews(source: SourceRecord): boolean {
   return source.enabled && isNewsCatalogSource(source);
 }
 
-function normalizedText(value: string | null | undefined): string | null {
-  return normalizeProviderText(value);
+function normalizedText(
+  value: string | null | undefined,
+  maxCharacters = MAX_PROVIDER_TITLE_CHARACTERS,
+): string | null {
+  return boundProviderText(value, { maxCharacters });
 }
 
 function listingDate(value: string): string | null {
@@ -304,6 +309,7 @@ class DirectPageAdapter implements NewsSourceAdapter {
                   item,
                   this.listing.summarySelector,
                 )?.textContent,
+                MAX_PROVIDER_EVIDENCE_CHARACTERS,
               );
         return [{ title, originalUrl, publishedAt, summary }];
       });
@@ -369,6 +375,14 @@ class DirectPageAdapter implements NewsSourceAdapter {
             discoveryMechanism: "page",
             listingUrl: response.finalUrl,
           };
+          const signalTitle = normalizeProviderText(item.title, {
+            maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+          }) ?? "";
+          const signalAbstract = normalizeProviderText(
+            extraction.excerpt ?? item.summary,
+            { maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS },
+          );
+          const signalContent = normalizeProviderText(extraction.text);
           return RawNewsCandidateSchema.parse({
             kind,
             sourceId: this.source.id,
@@ -390,9 +404,9 @@ class DirectPageAdapter implements NewsSourceAdapter {
             canCorroborateFacts: canCorroborateFacts(this.source.role),
             ...deriveNewsSignals({
               kind,
-              title: item.title,
-              abstract: extraction.excerpt ?? item.summary,
-              content: extraction.text,
+              title: signalTitle,
+              abstract: signalAbstract,
+              content: signalContent,
               originalUrl,
               sectionEligibility:
                 this.source.sectionEligibility ?? [],
@@ -470,11 +484,21 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
       } catch {
         return [];
       }
-      const title = normalizeProviderText(item.title);
+      const title = boundProviderText(item.title, {
+        maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+      });
       if (title === null) return [];
       const abstractPresent =
         item.abstract !== null && item.abstract !== undefined;
-      const abstract = normalizeProviderText(item.abstract);
+      const abstract = boundProviderText(item.abstract, {
+        maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS,
+      });
+      const signalTitle = normalizeProviderText(title, {
+        maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+      }) ?? "";
+      const signalAbstract = normalizeProviderText(abstract, {
+        maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS,
+      });
       const metadata = {
         documentNumber: item.document_number,
         documentType: item.type ?? null,
@@ -496,14 +520,14 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
             abstractPresent ? "secondary" : "metadata",
           authors: [],
           institutions: [],
-          abstract,
+          abstract: signalAbstract === null ? null : abstract,
           content: null,
           relatedPaperIds: [],
           canCorroborateFacts: canCorroborateFacts(this.source.role),
           ...deriveNewsSignals({
             kind: "document",
-            title,
-            abstract,
+            title: signalTitle,
+            abstract: signalAbstract,
             content: null,
             originalUrl,
             sectionEligibility:
@@ -620,6 +644,13 @@ export class NewsCollector {
                   paywall,
                   retention: "ephemeral-only",
                 };
+                const signalTitle = normalizeProviderText(item.title, {
+                  maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+                }) ?? "";
+                const signalAbstract = normalizeProviderText(item.abstract, {
+                  maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS,
+                });
+                const signalContent = normalizeProviderText(extraction.text);
                 return RawNewsCandidateSchema.parse({
                   ...item,
                   kind,
@@ -630,9 +661,9 @@ export class NewsCollector {
                   ),
                   ...deriveNewsSignals({
                     kind,
-                    title: item.title,
-                    abstract: item.abstract,
-                    content: extraction.text,
+                    title: signalTitle,
+                    abstract: signalAbstract,
+                    content: signalContent,
                     originalUrl: item.originalUrl,
                     sectionEligibility: source.sectionEligibility ?? [],
                     metadata,

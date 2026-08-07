@@ -5,6 +5,7 @@ import { Readability } from "@mozilla/readability";
 import { describe, expect, it, vi } from "vitest";
 
 import type { SourceRecord } from "../../../src/db/repository";
+import { normalizeCandidate } from "../../../src/editorial/normalize";
 import {
   extractReadableArticle,
 } from "../../../src/sources/article-extractor";
@@ -165,6 +166,61 @@ async function newsCollectorWithFixtures() {
 }
 
 describe("NewsCollector", () => {
+  it("keeps triple-encoded GDELT text inert after central normalization", async () => {
+    const adapter = new GdeltAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({
+          articles: [{
+            url: "https://news.example.com/artificial-intelligence-rule",
+            title:
+              "artificial intelligence regulation&amp;amp;#8217;s advance",
+            seendate: "20260729T081500Z",
+            domain: "news.example.com",
+            language: "English",
+            sourcecountry: "United States",
+          }],
+        })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      gdeltSource,
+      { query: "AI policy", maxRecords: 1 },
+    );
+
+    const candidate = (await adapter.collect(fixedWindow()))[0]!;
+    const item = normalizeCandidate(candidate);
+
+    expect(item.title).toBe(
+      "artificial intelligence regulation&#8217;s advance",
+    );
+    expect(item.metadata.primarySection).toBe("ai_policy");
+  });
+
+  it("bounds GDELT titles after NFKC expansion", async () => {
+    const adapter = new GdeltAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({
+          articles: [{
+            url: "https://news.example.com/expanded-title",
+            title: "ﬃ".repeat(200),
+            seendate: "20260729T081500Z",
+            domain: "news.example.com",
+            language: "English",
+            sourcecountry: "United States",
+          }],
+        })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      gdeltSource,
+      { query: "AI policy", maxRecords: 1 },
+    );
+
+    const candidate = (await adapter.collect(fixedWindow()))[0]!;
+
+    expect(candidate.title).toHaveLength(500);
+    expect(candidate.title).not.toMatch(/[\uD800-\uDFFF]/u);
+  });
+
+
   it("decodes GDELT provider text before deriving news signals", async () => {
     const adapter = new GdeltAdapter(
       new SourceHttpClient({
@@ -187,6 +243,9 @@ describe("NewsCollector", () => {
     const candidate = (await adapter.collect(fixedWindow()))[0]!;
 
     expect(candidate.title).toBe(
+      "artificial&#32;intelligence regulation advances",
+    );
+    expect(normalizeCandidate(candidate).title).toBe(
       "artificial intelligence regulation advances",
     );
     expect(candidate.metadata.primarySection).toBe("ai_policy");
@@ -293,11 +352,13 @@ describe("NewsCollector", () => {
 
     const candidate = (await adapter.collect(fixedWindow()))[0]!;
 
-    expect(candidate.title).toBe(
+    expect(candidate.title).toBe(encodedQuestion);
+    const normalized = normalizeCandidate(candidate);
+    expect(normalized.title).toBe(
       "Will artificial intelligence regulation advance in 2026?",
     );
     expect(candidate.sectionEligibility).toContain("ai_policy");
-    expect(hasExplicitAiPolicyEvidence([candidate.title])).toBe(true);
+    expect(hasExplicitAiPolicyEvidence([normalized.title])).toBe(true);
     expect(candidate.metadata.primarySection).toBe("forecast");
   });
 
@@ -974,13 +1035,13 @@ describe("catalog-driven news collection", () => {
         fetch: vi.fn(async () => Response.json({
           results: [{
             document_number: "2026-encoded",
-            title: "artificial&#32;intelligence regulation notice",
+            title:
+              "artificial intelligence regulation&amp;amp;#8217;s notice",
             html_url:
               "https://www.federalregister.gov/documents/2026/07/29/2026-encoded/ai-regulation",
             publication_date: "2026-07-29",
             type: "Notice",
-            abstract:
-              "The agency&amp;#8217;s artificial intelligence regulation applies nationally.",
+            abstract: "ﬃ".repeat(2_000),
           }],
         })),
         now: () => new Date("2026-07-29T08:30:00.000Z"),
@@ -1012,10 +1073,13 @@ describe("catalog-driven news collection", () => {
     const candidate = (await collector.collect(fixedWindow())).candidates[0]!;
 
     expect(candidate).toMatchObject({
-      title: "artificial intelligence regulation notice",
-      abstract:
-        "The agency’s artificial intelligence regulation applies nationally.",
+      title:
+        "artificial intelligence regulation&amp;amp;#8217;s notice",
       metadata: { primarySection: "ai_policy" },
+    });
+    expect(candidate.abstract).toHaveLength(4_000);
+    expect(normalizeCandidate(candidate)).toMatchObject({
+      title: "artificial intelligence regulation&#8217;s notice",
     });
   });
 
@@ -1316,10 +1380,12 @@ describe("catalog-driven news collection", () => {
 
     const candidate = (await collector.collect(fixedWindow())).candidates[0];
     expect(candidate).toMatchObject({
-      title: "WAMU’s entity update",
+      title: "WAMU&#8217;s entity update",
       abstract: "“quoted” summary",
     });
-    expect(JSON.stringify(candidate)).not.toMatch(/&#(?:x[0-9a-f]+|[0-9]+);/i);
+    expect(normalizeCandidate(candidate).title).toBe(
+      "WAMU’s entity update",
+    );
   });
 
   it.each([

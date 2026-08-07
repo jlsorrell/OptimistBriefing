@@ -7,9 +7,11 @@ import { SourceFetchError, SourceHttpClient } from "./http-client";
 import { transientExtractionPermitted } from "./news-collector";
 import { assertSafeOutboundUrl, type OutboundUrlPolicy } from "./outbound-url";
 import { relatedArxivIds } from "./rss";
-import { normalizeProviderText } from "./provider-text";
+import { boundProviderText } from "./provider-text";
 import {
   CollectionWindowSchema,
+  MAX_PROVIDER_EVIDENCE_CHARACTERS,
+  MAX_PROVIDER_TITLE_CHARACTERS,
   RawPublicationCandidateSchema,
   type CollectionWindow,
   type RawPublicationCandidate,
@@ -37,9 +39,12 @@ type ListingItem = {
   summary: string | null;
 };
 
-function text(value: unknown): string | null {
+function text(
+  value: unknown,
+  maxCharacters = MAX_PROVIDER_TITLE_CHARACTERS,
+): string | null {
   if (typeof value !== "string") return null;
-  return normalizeProviderText(value, { stripHtml: true });
+  return boundProviderText(value, { stripHtml: true, maxCharacters });
 }
 
 function rawText(value: unknown): string | null {
@@ -166,7 +171,7 @@ export class PublicationPageAdapter {
         const url = schemaUrl(entry);
         const publishedAt = date(entry.datePublished ?? entry.dateCreated);
         if (title === null || url === null || publishedAt === null) return [];
-        const item = this.permittedItem({ title, url, publishedAt, authors: authorNames(entry.author), summary: text(entry.description) }, response.finalUrl);
+        const item = this.permittedItem({ title, url, publishedAt, authors: authorNames(entry.author), summary: text(entry.description, MAX_PROVIDER_EVIDENCE_CHARACTERS) }, response.finalUrl);
         return item === null ? [] : [item];
       });
     let discovered = jsonLd;
@@ -178,7 +183,7 @@ export class PublicationPageAdapter {
         const dateElement = nested(item, this.listing!.dateSelector);
         const publishedAt = date(this.listing!.dateAttribute === undefined ? dateElement?.textContent : dateElement?.getAttribute(this.listing!.dateAttribute));
         if (href === null || href === undefined || title === null || publishedAt === null) return [];
-        const found = this.permittedItem({ title, url: href, publishedAt, authors: [], summary: this.listing!.summarySelector === undefined ? null : text(nested(item, this.listing!.summarySelector)?.textContent) }, response.finalUrl);
+        const found = this.permittedItem({ title, url: href, publishedAt, authors: [], summary: this.listing!.summarySelector === undefined ? null : text(nested(item, this.listing!.summarySelector)?.textContent, MAX_PROVIDER_EVIDENCE_CHARACTERS) }, response.finalUrl);
         return found === null ? [] : [found];
       });
     }
@@ -190,7 +195,7 @@ export class PublicationPageAdapter {
         const time = item.querySelector("time");
         const publishedAt = date(time?.getAttribute("datetime") ?? time?.textContent);
         if (href === null || href === undefined || title === null || publishedAt === null) return [];
-        const found = this.permittedItem({ title, url: href, publishedAt, authors: [], summary: text(item.querySelector("p")?.textContent) }, response.finalUrl);
+        const found = this.permittedItem({ title, url: href, publishedAt, authors: [], summary: text(item.querySelector("p")?.textContent, MAX_PROVIDER_EVIDENCE_CHARACTERS) }, response.finalUrl);
         return found === null ? [] : [found];
       });
     }

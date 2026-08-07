@@ -16,7 +16,12 @@ import {
   boundedSourceFailureMetadata,
 } from "../sources/collection-settlement";
 import { durableCollectedCandidate } from "../sources/durable-evidence";
-import { normalizeCandidate } from "../editorial/normalize";
+import {
+  isPreparedRawCandidate,
+  markPreparedRawCandidate,
+  normalizePreparedCandidate,
+  prepareRawCandidateForPipeline,
+} from "../editorial/normalize";
 import { routePublication } from "../editorial/route-publication";
 import {
   deduplicateItems,
@@ -32,7 +37,10 @@ import {
   researchFingerprints,
   triageResearch,
 } from "../editorial/research-triage";
-import { CONFIGURED_RESEARCH_TOPIC_IDS } from "../editorial/research-topics";
+import {
+  CONFIGURED_RESEARCH_TOPIC_IDS,
+  mapResearchTopicIds,
+} from "../editorial/research-topics";
 import {
   summarizeItem,
   SummaryRejectedError,
@@ -65,9 +73,13 @@ import { createPaperDiscoveryAdapters } from "../sources/paper-discovery";
 import { SemanticScholarAdapter } from "../sources/semantic-scholar";
 import { OpenAlexAdapter } from "../sources/openalex";
 import { ResearchCollector } from "../sources/research-collector";
-import { normalizeProviderText } from "../sources/provider-text";
+import {
+  normalizeProviderText,
+  truncateProviderTextAtCodePointBoundary,
+} from "../sources/provider-text";
 import {
   MAX_PROVIDER_ARRAY_ITEMS,
+  MAX_PROVIDER_EVIDENCE_CHARACTERS,
   MAX_PROVIDER_TITLE_CHARACTERS,
   RawNewsCandidateSchema,
   RawPublicationCandidateSchema,
@@ -107,6 +119,7 @@ import type {
 import {
   PIPELINE_STEPS,
   PROVIDER_TEXT_NORMALIZATION_VERSION,
+  PROVIDER_TEXT_PREPARATION_VERSION,
   CollectedCandidateSchema,
   SummaryRejectionEventSchema,
   WorkflowItemPayloadSchema,
@@ -397,6 +410,7 @@ const ARTIFACT_KEYS = new Set([
   "itemCount",
   "estimatedCostUsd",
   "providerTextNormalizationVersion",
+  "providerTextPreparationVersion",
 ]);
 const REQUIRED_ARTIFACT_KEYS = [
   "output",
@@ -427,9 +441,20 @@ function parseCheckpointArtifact(
       : z.literal(PROVIDER_TEXT_NORMALIZATION_VERSION).parse(
           record.providerTextNormalizationVersion,
         );
+  const providerTextPreparationVersion =
+    record.providerTextPreparationVersion === undefined
+      ? undefined
+      : z.literal(PROVIDER_TEXT_PREPARATION_VERSION).parse(
+          record.providerTextPreparationVersion,
+        );
   if (step === "collect" && providerTextNormalizationVersion !== undefined) {
     throw new TypeError(
       "Collect checkpoint artifacts cannot be marked provider-text normalized.",
+    );
+  }
+  if (step !== "collect" && providerTextPreparationVersion !== undefined) {
+    throw new TypeError(
+      "Only collect checkpoint artifacts can be marked provider-text prepared.",
     );
   }
   return {
@@ -441,6 +466,9 @@ function parseCheckpointArtifact(
     ...(providerTextNormalizationVersion === undefined
       ? {}
       : { providerTextNormalizationVersion }),
+    ...(providerTextPreparationVersion === undefined
+      ? {}
+      : { providerTextPreparationVersion }),
   };
 }
 
@@ -869,7 +897,9 @@ export class D1PipelineStore implements PipelineStore {
         artifacts.some(
           (artifact) =>
             artifact.providerTextNormalizationVersion !==
-            first.providerTextNormalizationVersion,
+              first.providerTextNormalizationVersion ||
+            artifact.providerTextPreparationVersion !==
+              first.providerTextPreparationVersion,
         )
       ) {
         throw new Error(`INVALID_CHECKPOINT_CHUNKS:${step}`);
@@ -1162,34 +1192,43 @@ function normalizedCandidate(candidate: CollectedCandidate): Item | null {
   if (storedItem.success) {
     return normalizedStoredWorkflowItem(storedItem.data, true);
   }
-  const publication = RawPublicationCandidateSchema.safeParse(candidate);
+  const prepared = isPreparedRawCandidate(candidate)
+    ? candidate
+    : prepareRawCandidateForPipeline(candidate);
+  const publication = RawPublicationCandidateSchema.safeParse(prepared);
   const routed = publication.success
     ? routePublication(publication.data)
-    : candidate;
+    : prepared;
   if (routed === null) return null;
-  if (!isRawCollectedCandidate(routed)) return null;
   const research = RawResearchCandidateSchema.safeParse(routed);
-  const normalized = normalizeCandidate(routed);
+  const news = RawNewsCandidateSchema.safeParse(routed);
+  if (!research.success && !news.success) return null;
+  const routedCandidate: RawResearchCandidate | RawNewsCandidate =
+    research.success ? research.data : news.success ? news.data : (() => {
+      throw new TypeError("Routed candidate did not match a raw schema.");
+    })();
+  const preparedRouted = markPreparedRawCandidate(routedCandidate);
+  const normalized = normalizePreparedCandidate(preparedRouted);
   const directFamily = DiscoveryFamilySchema.safeParse(
-    routed.metadata.discoveryFamily,
+    preparedRouted.metadata.discoveryFamily,
   );
   const discoveryFamily: DiscoveryFamily = directFamily.success
     ? directFamily.data
-    : routed.sourceId === "arxiv"
+    : preparedRouted.sourceId === "arxiv"
       ? "arxiv"
-      : routed.sourceRole === "blog" || routed.kind === "blog"
+      : preparedRouted.sourceRole === "blog" || preparedRouted.kind === "blog"
         ? "commentary"
-        : routed.sourceId === "openalex" ||
-            routed.sourceId === "semantic-scholar"
+        : preparedRouted.sourceId === "openalex" ||
+            preparedRouted.sourceId === "semantic-scholar"
           ? "bibliographic"
           : "official-publication";
   const discoveryLineage = itemStringArray(
-    routed.metadata.discoveryLaneIds,
+    preparedRouted.metadata.discoveryLaneIds,
   ).slice(0, 64).map((laneId) => JSON.stringify([
     laneId,
-    routed.sourceId,
+    preparedRouted.sourceId,
     discoveryFamily,
-    upstreamCandidateIdentity(routed, normalized.id),
+    upstreamCandidateIdentity(preparedRouted, normalized.id),
   ]));
   const normalizedWithLineage = ItemSchema.parse({
     ...normalized,
@@ -1215,6 +1254,14 @@ function normalizedStoredDisplay(value: string): string {
   return normalizeProviderText(value, {
     maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
   }) ?? "";
+}
+
+function normalizedStoredAuthorKey(value: string): string {
+  return value.normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/[\p{P}\p{S}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function normalizedStoredArray(value: unknown): string[] {
@@ -1266,14 +1313,68 @@ function normalizedStoredItem(item: Item): Item {
       };
     });
   }
+  if (Array.isArray(metadata.attachedCommentary)) {
+    metadata.attachedCommentary = metadata.attachedCommentary.map((entry) => {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        return entry;
+      }
+      const normalized = { ...(entry as Record<string, unknown>) };
+      for (const key of ["title", "sourceName", "displaySourceName"] as const) {
+        if (typeof normalized[key] === "string") {
+          normalized[key] = normalizedStoredDisplay(normalized[key] as string);
+        }
+      }
+      if (typeof normalized.excerpt === "string") {
+        normalized.excerpt = normalizeProviderText(normalized.excerpt, {
+          maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS,
+        }) ?? "";
+      }
+      return normalized;
+    });
+  }
+  if (Array.isArray(metadata.editorialSignals)) {
+    metadata.editorialSignals = metadata.editorialSignals.map((entry) => {
+      if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
+        return entry;
+      }
+      const signal = entry as Record<string, unknown>;
+      return typeof signal.sourceName === "string"
+        ? { ...signal, sourceName: normalizedStoredDisplay(signal.sourceName) }
+        : signal;
+    });
+  }
+  const title = normalizedStoredDisplay(item.title);
+  const normalizedText = normalizeProviderText(item.normalizedText) ?? "";
+  const authors = itemStringArray(metadata.authors);
+  if (Array.isArray(metadata.authors)) {
+    metadata.authors = authors;
+    metadata.normalizedAuthors = [...new Set(
+      authors.map(normalizedStoredAuthorKey).filter(
+        (author) => author.length > 0,
+      ),
+    )].sort((left, right) => left.localeCompare(right));
+  }
+  const research = item.kind === "paper" || item.kind === "blog";
+  const configuredTopics = research
+    ? mapResearchTopicIds([
+        title,
+        ...itemStringArray(metadata.providerTopics),
+        ...itemStringArray(metadata.topics),
+        normalizedText,
+      ])
+    : [];
+  if (research) metadata.configuredTopics = configuredTopics;
+  const primaryTopic = configuredTopics[0] ??
+    normalizedStoredDisplay(item.primaryTopic);
   return ItemSchema.parse({
     ...item,
-    title: normalizedStoredDisplay(item.title),
+    title,
+    primaryTopic,
     sourceRefs: item.sourceRefs.map((source) => ({
       ...source,
       name: normalizedStoredDisplay(source.name),
     })),
-    normalizedText: normalizeProviderText(item.normalizedText) ?? "",
+    normalizedText,
     metadata,
   });
 }
@@ -1371,12 +1472,18 @@ function assessmentCandidate(
     case "secondary":
       return RawResearchCandidateSchema.parse({
         ...compact,
-        content: evidence.slice(0, 100_000) || null,
+        content: truncateProviderTextAtCodePointBoundary(
+          evidence,
+          100_000,
+        ) || null,
       });
     case "abstract":
       return RawResearchCandidateSchema.parse({
         ...compact,
-        abstract: evidence.slice(0, 4_000) || null,
+        abstract: truncateProviderTextAtCodePointBoundary(
+          evidence,
+          4_000,
+        ) || null,
       });
     case "metadata":
       return compact;
@@ -1930,13 +2037,19 @@ export function createProductionPipelineContext(
       ? {}
       : { cleanupTerminalReservations: options.cleanupTerminalReservations }),
     collect: async () => {
-      const collected = z.array(CollectedCandidateSchema).parse(
-        (await options.collectCandidates()).map((candidate) =>
+      const prepared = (await options.collectCandidates()).map((candidate) => {
+        if (!isRawCollectedCandidate(candidate)) return candidate;
+        const durable = durableCollectedCandidate(candidate);
+        return isPreparedRawCandidate(candidate)
+          ? markPreparedRawCandidate(durable)
+          : prepareRawCandidateForPipeline(durable);
+      });
+      const collected = z.array(CollectedCandidateSchema).parse(prepared)
+        .map((candidate) =>
           isRawCollectedCandidate(candidate)
-            ? durableCollectedCandidate(candidate)
-            : candidate,
-        ),
-      );
+            ? markPreparedRawCandidate(candidate)
+            : candidate
+        );
       await recordDiscoveryDiagnostics();
       return collected;
     },
@@ -2923,12 +3036,37 @@ function restoredCheckpointOutput<T>(
 ): T {
   const parsed = schema.parse(artifact.output);
   if (
+    step === "collect" &&
+    artifact.providerTextPreparationVersion ===
+      PROVIDER_TEXT_PREPARATION_VERSION &&
+    Array.isArray(parsed)
+  ) {
+    return parsed.map((candidate) =>
+      isRawCollectedCandidate(candidate as CollectedCandidate)
+        ? markPreparedRawCandidate(candidate as object)
+        : candidate
+    ) as T;
+  }
+  if (
     artifact.providerTextNormalizationVersion ===
     PROVIDER_TEXT_NORMALIZATION_VERSION
   ) {
     return parsed;
   }
   return schema.parse(normalizedRestoredCheckpointOutput(step, parsed));
+}
+
+function checkpointHasPreparedProviderText(
+  step: PipelineStep,
+  output: unknown,
+): boolean {
+  return step === "collect" && Array.isArray(output) && output.some(
+    (candidate) => isPreparedRawCandidate(candidate),
+  ) && output.every(
+    (candidate) =>
+      !isRawCollectedCandidate(candidate as CollectedCandidate) ||
+      isPreparedRawCandidate(candidate),
+  );
 }
 
 function checkpointHasNormalizedProviderText(step: PipelineStep): boolean {
@@ -3007,7 +3145,16 @@ async function checkpoint<T>(
     const startedAt = Date.parse(context.now());
     let output: T;
     try {
-      output = outputSchema.parse(await execute());
+      const executed = await execute();
+      output = outputSchema.parse(executed);
+      if (step === "collect" && Array.isArray(output) && Array.isArray(executed)) {
+        output = output.map((candidate, index) =>
+          isPreparedRawCandidate(executed[index]) &&
+              typeof candidate === "object" && candidate !== null
+            ? markPreparedRawCandidate(candidate)
+            : candidate
+        ) as T;
+      }
       await beforeSave?.(output);
     } catch (error) {
       await context.store.failAttempt(context.runId, step, attempt, error instanceof Error ? error.message : "PIPELINE_FAILED");
@@ -3024,6 +3171,12 @@ async function checkpoint<T>(
         ? {
             providerTextNormalizationVersion:
               PROVIDER_TEXT_NORMALIZATION_VERSION,
+          }
+        : {}),
+      ...(checkpointHasPreparedProviderText(step, output)
+        ? {
+            providerTextPreparationVersion:
+              PROVIDER_TEXT_PREPARATION_VERSION,
           }
         : {}),
     };

@@ -20,6 +20,10 @@ import {
 } from "./types";
 import type { PaperContentRetriever } from "./paper-content";
 import {
+  markPreparedRawCandidate,
+  prepareRawCandidateForPipeline,
+} from "../editorial/normalize";
+import {
   normalizeArxivIdentifier,
   normalizeDoi,
 } from "./identifiers";
@@ -447,17 +451,20 @@ export class ResearchCollector {
       );
     }
 
-    const candidates = enriched.map((candidate) => {
+    const candidates = enriched.map((rawCandidate) => {
+      const candidate = RawResearchCandidateSchema.parse(
+        prepareRawCandidateForPipeline(rawCandidate),
+      );
       const institutions = unique(
         candidate.institutions.map(normalizeInstitutionName),
       );
-      return RawResearchCandidateSchema.parse({
+      return markPreparedRawCandidate(RawResearchCandidateSchema.parse({
         ...candidate,
         institutions,
         preferredInstitutionMatches: institutions.filter((institution) =>
           this.preferredInstitutions.has(institution),
         ),
-      });
+      }));
     });
     return {
       candidates,

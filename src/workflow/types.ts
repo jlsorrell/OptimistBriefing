@@ -110,6 +110,7 @@ export type PipelineCheckpointExecutor = <T>(
 ) => Promise<T>;
 
 export const PROVIDER_TEXT_NORMALIZATION_VERSION = 1 as const;
+export const PROVIDER_TEXT_PREPARATION_VERSION = 1 as const;
 
 export type CheckpointArtifact<T = unknown> = {
   output: T;
@@ -119,6 +120,8 @@ export type CheckpointArtifact<T = unknown> = {
   estimatedCostUsd: number;
   providerTextNormalizationVersion?:
     typeof PROVIDER_TEXT_NORMALIZATION_VERSION;
+  providerTextPreparationVersion?:
+    typeof PROVIDER_TEXT_PREPARATION_VERSION;
 };
 
 export type PipelineStore = {

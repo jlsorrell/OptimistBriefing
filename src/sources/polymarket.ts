@@ -3,7 +3,7 @@ import { z } from "zod";
 import { SourceHttpClient } from "./http-client";
 import { deriveNewsSignals } from "./news-signals";
 import { assertSafeOutboundUrl } from "./outbound-url";
-import { normalizeProviderText } from "./provider-text";
+import { boundProviderText, normalizeProviderText } from "./provider-text";
 import {
   CollectionWindowSchema,
   MAX_PROVIDER_TITLE_CHARACTERS,
@@ -251,10 +251,13 @@ export class PolymarketAdapter implements NewsSourceAdapter {
       const marketUrl = assertSafeOutboundUrl(
         `https://polymarket.com/event/${market.slug}`,
       ).toString();
-      const question = normalizeProviderText(market.question, {
+      const question = boundProviderText(market.question, {
         maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
       });
       if (question === null) return [];
+      const signalQuestion = normalizeProviderText(question, {
+        maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+      }) ?? "";
       const metadata = {
         currentProbability: market.currentProbability,
         priorProbability: market.priorProbability,
@@ -290,7 +293,7 @@ export class PolymarketAdapter implements NewsSourceAdapter {
           canCorroborateFacts: false,
           ...deriveNewsSignals({
             kind: "forecast",
-            title: question,
+            title: signalQuestion,
             abstract:
               `Probability moved from ${Math.round(
                 market.priorProbability * 100,

@@ -22,6 +22,7 @@ import {
 } from "../../../src/workflow/run-editorial-pipeline";
 import {
   PROVIDER_TEXT_NORMALIZATION_VERSION,
+  PROVIDER_TEXT_PREPARATION_VERSION,
   type CheckpointArtifact,
 } from "../../../src/workflow/types";
 import { createApp, type WorkflowLauncher } from "../../../src/api/app";
@@ -43,8 +44,13 @@ import { FakeModelProvider } from "../../../src/models/fake-provider";
 import { OpenAIModelProvider } from "../../../src/models/openai-provider";
 import { clusterNews } from "../../../src/editorial/cluster";
 import { canonicalResearchIdentity } from "../../../src/editorial/research-identity";
-import { researchFingerprints } from "../../../src/editorial/research-triage";
+import {
+  researchFingerprints,
+  triageResearch,
+} from "../../../src/editorial/research-triage";
+import { CONFIGURED_RESEARCH_TOPIC_IDS } from "../../../src/editorial/research-topics";
 import { composeEdition } from "../../../src/workflow/compose-edition";
+import { sourcePacketForItem } from "../../../src/workflow/source-packet";
 import type {
   GenerateObjectRequest,
   ModelProvider,
@@ -900,6 +906,107 @@ async function publishD1FixtureEdition(
 }
 
 describe("manual editorial run", () => {
+  it("prepares publication text before routing without changing structure", async () => {
+    const publication: RawPublicationCandidate = {
+      ...rawOfficialPublicationCandidate(
+        "technology",
+        "encoded-route",
+        now,
+        "The paper reports a substantive study with bounded evidence.",
+      ),
+      title: "A study of &amp;#105;nterpretability",
+      originalUrl: "https://nist.example/publications/encoded?id=%26amp%3B",
+      externalId: "publication&#65;",
+      externalIds: ["publication&#65;"],
+      sectionEligibility: ["research", "research_radar"],
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-01",
+      runId: "run-prepare-before-route",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [publication],
+    });
+
+    const normalized = await context.normalize([publication]);
+
+    expect(normalized).toHaveLength(1);
+    expect(normalized[0]).toMatchObject({
+      kind: "blog",
+      title: "A study of interpretability",
+      canonicalUrl: "https://nist.example/publications/encoded?id=%26amp%3B",
+      publishedAt: now,
+    });
+    expect(normalized[0]?.metadata.externalIds).toContain(
+      "publication&#65;",
+    );
+    expect(normalized[0]?.metadata.configuredTopics).toContain(
+      "alignment-interpretability",
+    );
+  });
+
+  it("bounds assessment evidence without splitting astral characters", async () => {
+    const provider = new FakeModelProvider({
+      generatedObjects: [
+        researchAssessment,
+        { ...researchAssessment, accessLevel: "full_text" },
+      ],
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-01",
+      runId: "run-safe-assessment-bounds",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: { summary: new FakeModelProvider(), assessment: provider },
+      collectCandidates: async () => [],
+    });
+    const storedResearch = (
+      id: string,
+      accessLevel: "abstract" | "full_text",
+      normalizedText: string,
+    ): Item => {
+      const item = fixtureItem(id, "research");
+      return ItemSchema.parse({
+        ...item,
+        accessLevel,
+        normalizedText,
+        metadata: {
+          ...item.metadata,
+          workflow: {
+            version: 1,
+            rawResearch: {
+              ...rawResearchCandidate(`2607.${id}`, `Assessment ${id}`),
+              accessLevel,
+            },
+          },
+        },
+      });
+    };
+    const abstractItem = storedResearch(
+      "astral-abstract",
+      "abstract",
+      `${"a".repeat(3_999)}😀tail`,
+    );
+    const fullTextItem = storedResearch(
+      "astral-full",
+      "full_text",
+      `${"b".repeat(99_999)}😀tail`,
+    );
+
+    await expect(context.assess([abstractItem, fullTextItem])).resolves
+      .toHaveLength(2);
+
+    expect(provider.generateRequests).toHaveLength(2);
+    for (const request of provider.generateRequests) {
+      expect(request.sourcePacket).not.toMatch(/\\ud[89ab][0-9a-f]{2}/i);
+      expect(request.sourcePacket).not.toMatch(/\\ud[c-f][0-9a-f]{2}/i);
+    }
+  });
+
   it("collects, validates, and atomically publishes one edition", async () => {
     // This fails if the orchestrator omits validation, composition, or publication.
     const context = fixturePipelineContext();
@@ -1166,6 +1273,22 @@ describe("manual editorial run", () => {
         institutions: ["Checkpoint &#73;nstitute"],
         providerTopics: ["&#73;nterpretability"],
         provenance: [structuralProvenance],
+        attachedCommentary: [{
+          sourceId: "arxiv",
+          role: "blog",
+          title: "Attached &#67;ommentary",
+          url: legacyRaw.originalUrl,
+          retrievedAt: now,
+          accessLevel: "abstract",
+          excerpt: "Attached &#101;vidence excerpt.",
+          relatedPaperIds: [],
+        }],
+        editorialSignals: [{
+          sourceName: "Signal &#83;ource",
+          structuralValue: "keep&#65;",
+        }],
+        configuredTopics: ["stale-topic"],
+        primaryTopic: "stale-topic",
         workflow: {
           version: 1,
           rawResearch: legacyRaw,
@@ -1237,6 +1360,38 @@ describe("manual editorial run", () => {
       ...structuralProvenance,
       sourceName: "Checkpoint & Source",
     }]);
+    expect(assessed.metadata.normalizedAuthors).toEqual([
+      "checkpoint author",
+    ]);
+    expect(assessed.metadata.configuredTopics).toContain(
+      "alignment-interpretability",
+    );
+    expect(assessed.primaryTopic).toBe("alignment-interpretability");
+    expect(assessed.metadata.attachedCommentary).toEqual([
+      expect.objectContaining({
+        title: "Attached Commentary",
+        excerpt: "Attached evidence excerpt.",
+      }),
+    ]);
+    expect(assessed.metadata.editorialSignals).toEqual([
+      {
+        sourceName: "Signal Source",
+        structuralValue: "keep&#65;",
+      },
+    ]);
+    expect(JSON.stringify(sourcePacketForItem(assessed))).toContain(
+      "Attached Commentary",
+    );
+    expect(JSON.stringify(sourcePacketForItem(assessed))).toContain(
+      "Attached evidence excerpt.",
+    );
+    expect(triageResearch([assessed], {
+      maximum: 1,
+      maximumPerFamily: 1,
+      maximumPerPublisherDomain: 1,
+      configuredTopics: CONFIGURED_RESEARCH_TOPIC_IDS,
+      now,
+    }).items).toHaveLength(1);
     expect(JSON.stringify(
       (store.artifacts.get(`${context.runId}:normalize`) as
         CheckpointArtifact<readonly Item[]>).output,
@@ -1712,7 +1867,7 @@ describe("manual editorial run", () => {
     expect(observed[1]).toEqual(observed[0]);
   });
 
-  it("marks normalized checkpoints but never marks the raw collect artifact", async () => {
+  it("marks prepared collect and normalized item checkpoints separately", async () => {
     const store = new FixtureStore();
     const context = createProductionPipelineContext({
       editionDate: "2033-01-22",
@@ -1726,7 +1881,7 @@ describe("manual editorial run", () => {
       collectCandidates: async () => [
         rawResearchCandidate(
           "2607.envelope-labels",
-          "Raw &amp; collected research",
+          "Raw interpretability &amp;amp;#8217; research",
         ),
       ],
     });
@@ -1742,6 +1897,7 @@ describe("manual editorial run", () => {
       `${context.runId}:collect`,
     ) as CheckpointArtifact<unknown> & {
       providerTextNormalizationVersion?: number;
+      providerTextPreparationVersion?: number;
     };
     const normalizeArtifact = store.artifacts.get(
       `${context.runId}:normalize`,
@@ -1749,8 +1905,23 @@ describe("manual editorial run", () => {
       providerTextNormalizationVersion?: number;
     };
     expect(collectArtifact.providerTextNormalizationVersion).toBeUndefined();
-    expect(JSON.stringify(collectArtifact.output)).toContain("Raw &amp;");
+    expect(collectArtifact.providerTextPreparationVersion).toBe(
+      PROVIDER_TEXT_PREPARATION_VERSION,
+    );
+    expect(JSON.stringify(collectArtifact.output)).toContain(
+      "Raw interpretability &#8217; research",
+    );
     expect(normalizeArtifact.providerTextNormalizationVersion).toBe(1);
+    expect((normalizeArtifact.output as Item[])[0]?.title).toBe(
+      "Raw interpretability &#8217; research",
+    );
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_NORMALIZE",
+    );
+    expect((normalizeArtifact.output as Item[])[0]?.title).toBe(
+      "Raw interpretability &#8217; research",
+    );
   });
 
   it("rejects a corrupt durable composition checkpoint before publication", async () => {

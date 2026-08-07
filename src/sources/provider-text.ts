@@ -24,7 +24,7 @@ function decodePass(value: string): string {
 }
 
 export function decodeProviderTextEntities(value: string): string {
-  let decoded = truncateAtCodePointBoundary(
+  let decoded = truncateProviderTextAtCodePointBoundary(
     value,
     MAX_PROVIDER_TEXT_INPUT_CHARACTERS,
   );
@@ -46,7 +46,7 @@ export type ProviderTextNormalizationResult = {
   truncated: boolean;
 };
 
-function truncateAtCodePointBoundary(
+export function truncateProviderTextAtCodePointBoundary(
   value: string,
   maximum: number,
 ): string {
@@ -81,11 +81,50 @@ export function normalizeProviderTextDetailed(
     };
   }
   return {
-    value: truncateAtCodePointBoundary(normalized, maximum),
+    value: truncateProviderTextAtCodePointBoundary(normalized, maximum),
     truncated:
       value.length > MAX_PROVIDER_TEXT_INPUT_CHARACTERS ||
       normalized.length > maximum,
   };
+}
+
+export function boundProviderTextDetailed(
+  value: string | null | undefined,
+  options: ProviderTextOptions = {},
+): ProviderTextNormalizationResult {
+  if (value == null) return { value: null, truncated: false };
+  const maximum = options.maxCharacters ?? MAX_PROVIDER_TEXT_INPUT_CHARACTERS;
+  if (!Number.isSafeInteger(maximum) || maximum < 0 ||
+      maximum > MAX_PROVIDER_TEXT_INPUT_CHARACTERS) {
+    throw new RangeError("Provider text limit is outside the safe bound.");
+  }
+  const inspected = truncateProviderTextAtCodePointBoundary(
+    value,
+    MAX_PROVIDER_TEXT_INPUT_CHARACTERS,
+  );
+  const plain = options.stripHtml === true
+    ? inspected.replace(/<[^>]+>/g, " ")
+    : inspected;
+  const normalized = plain.normalize("NFKC").replace(/\s+/g, " ").trim();
+  if (normalized.length === 0) {
+    return {
+      value: null,
+      truncated: value.length > MAX_PROVIDER_TEXT_INPUT_CHARACTERS,
+    };
+  }
+  return {
+    value: truncateProviderTextAtCodePointBoundary(normalized, maximum),
+    truncated:
+      value.length > MAX_PROVIDER_TEXT_INPUT_CHARACTERS ||
+      normalized.length > maximum,
+  };
+}
+
+export function boundProviderText(
+  value: string | null | undefined,
+  options: ProviderTextOptions = {},
+): string | null {
+  return boundProviderTextDetailed(value, options).value;
 }
 
 export function normalizeProviderText(

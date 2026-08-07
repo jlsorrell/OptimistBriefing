@@ -3,9 +3,10 @@ import { z } from "zod";
 import { SourceHttpClient } from "./http-client";
 import { deriveNewsSignals } from "./news-signals";
 import { assertSafeOutboundUrl } from "./outbound-url";
-import { normalizeProviderText } from "./provider-text";
+import { boundProviderText, normalizeProviderText } from "./provider-text";
 import {
   CollectionWindowSchema,
+  MAX_PROVIDER_TITLE_CHARACTERS,
   RawNewsCandidateSchema,
   ResearchSourceRecordSchema,
   type CollectionWindow,
@@ -122,8 +123,13 @@ export class GdeltAdapter implements NewsSourceAdapter {
       if (seenAt < validWindow.from || seenAt > validWindow.to) {
         return [];
       }
-      const title = normalizeProviderText(article.title);
+      const title = boundProviderText(article.title, {
+        maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+      });
       if (title === null) return [];
+      const signalTitle = normalizeProviderText(title, {
+        maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+      }) ?? "";
       const metadata = {
         discoveryOnly: true,
         discoveryProvider: "GDELT",
@@ -153,7 +159,7 @@ export class GdeltAdapter implements NewsSourceAdapter {
           canCorroborateFacts: false,
           ...deriveNewsSignals({
             kind: "article",
-            title,
+            title: signalTitle,
             abstract: null,
             content: null,
             originalUrl,

@@ -4,6 +4,10 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 import type { SourceRecord } from "../../../src/db/repository";
+import {
+  normalizeCandidate,
+  prepareRawCandidateForPipeline,
+} from "../../../src/editorial/normalize";
 import { routePublication } from "../../../src/editorial/route-publication";
 import { durableCollectedCandidate } from "../../../src/sources/durable-evidence";
 import { SourceHttpClient } from "../../../src/sources/http-client";
@@ -12,7 +16,11 @@ import {
   createPublicationCollectorFromCatalog,
 } from "../../../src/sources/publication-collector";
 import { RssAdapter } from "../../../src/sources/rss";
-import { ResearchSourceRecordSchema, type CollectionWindow } from "../../../src/sources/types";
+import {
+  RawPublicationCandidateSchema,
+  ResearchSourceRecordSchema,
+  type CollectionWindow,
+} from "../../../src/sources/types";
 
 const fixturePath = (name: string) =>
   fileURLToPath(new URL(`../../fixtures/${name}`, import.meta.url));
@@ -403,6 +411,23 @@ describe("PublicationCollector", () => {
 });
 
 describe("RssAdapter feed normalization", () => {
+  it("keeps triple-encoded RSS text inert after central normalization", async () => {
+    const rssResult = await rssAdapterFor(
+      rssSource(),
+      `<?xml version="1.0"?><rss><channel><item>
+        <title><![CDATA[Interpretability&amp;amp;#8217;s frontier]]></title>
+        <link>https://www.alignmentforum.org/posts/example/triple</link>
+        <pubDate>Sat, 02 Aug 2026 12:00:00 GMT</pubDate>
+        <description><![CDATA[Evidence&amp;amp;#8217;s boundary.]]></description>
+      </item></channel></rss>`,
+    ).collect(window);
+
+    const item = normalizeCandidate(rssResult.candidates[0]!);
+
+    expect(item.title).toBe("Interpretability&#8217;s frontier");
+    expect(item.normalizedText).toBe("Evidence&#8217;s boundary.");
+  });
+
   it("decodes WAMU-style provider entities in RSS titles and descriptions", async () => {
     const rssResult = await rssAdapterFor(
       rssSource(),
@@ -416,10 +441,14 @@ describe("RssAdapter feed normalization", () => {
 
     const candidate = rssResult.candidates[0];
     expect(candidate).toMatchObject({
-      title: "WAMU’s briefing",
-      abstract: "It’s a provider update.",
+      title: "WAMU&#8217;s briefing",
+      abstract: "It&amp;#8217;s a provider update.",
     });
-    expect(JSON.stringify(candidate)).not.toMatch(/&#(?:x[0-9a-f]+|[0-9]+);/i);
+    const normalized = normalizeCandidate(candidate);
+    expect(normalized).toMatchObject({
+      title: "WAMU’s briefing",
+      normalizedText: "It’s a provider update.",
+    });
   });
 
   it("keeps an interpretable structured-link RSS entry when a malformed sibling is skipped", async () => {
@@ -500,16 +529,15 @@ describe("RssAdapter feed normalization", () => {
     ]);
   });
 
-  it("reports a parse failure when all otherwise-normalized entries fail final safety validation", async () => {
-    const unsafeTitle = "A".repeat(501);
+  it("bounds oversized titles before final safety validation", async () => {
+    const unsafeTitle = "ﬃ".repeat(200);
     const noSafeEntries = await rssAdapterFor(
       rssSource({ id: "lesswrong-curated" }),
       `<?xml version="1.0"?><rss><channel><item><title>${unsafeTitle}</title><link>https://www.alignmentforum.org/posts/example/unsafe-result</link></item></channel></rss>`,
     ).collect(window);
 
-    expect(noSafeEntries.failures).toEqual([
-      { sourceId: "lesswrong-curated", kind: "parse" },
-    ]);
+    expect(noSafeEntries.failures).toEqual([]);
+    expect(noSafeEntries.candidates[0]?.title).toHaveLength(500);
   });
 
   it("keeps a valid feed successful when its entries fall outside the collection window", async () => {
@@ -554,9 +582,13 @@ describe("PapersWithCodeAdapter", () => {
     );
 
     const candidate = (await adapter.collect(window))[0]!;
-    const routed = routePublication(candidate);
+    const routed = routePublication(
+      RawPublicationCandidateSchema.parse(
+        prepareRawCandidateForPipeline(candidate),
+      ),
+    );
 
-    expect(candidate.title).toBe("interpretability study results");
+    expect(candidate.title).toBe("&#105;nterpretability study results");
     expect(routed).toMatchObject({
       topics: ["alignment-interpretability"],
       metadata: { primarySection: "research" },

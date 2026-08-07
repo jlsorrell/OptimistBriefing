@@ -8,6 +8,7 @@ import {
   normalizeArxivIdentifier,
   normalizeDoi,
 } from "../sources/identifiers";
+import { truncateProviderTextAtCodePointBoundary } from "../sources/provider-text";
 import {
   mergeItemGroup,
   preferredItem,
@@ -281,7 +282,10 @@ function attachedCommentary(
   const relatedPaperIds = [...new Set(commentaryRelatedIds(commentary))].sort(
     (left, right) => left.localeCompare(right),
   );
-  const excerpt = commentary.normalizedText.slice(0, COMMENTARY_EXCERPT_LIMIT);
+  const excerpt = truncateProviderTextAtCodePointBoundary(
+    commentary.normalizedText,
+    COMMENTARY_EXCERPT_LIMIT,
+  );
   return commentary.sourceRefs.map((source) => ({
     sourceId: source.id,
     role: "blog" as const,

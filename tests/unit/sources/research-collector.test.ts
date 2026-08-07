@@ -190,6 +190,28 @@ async function collectorWithFixtures() {
 }
 
 describe("ResearchCollector", () => {
+  it("decodes institutions before preferred-institution matching", async () => {
+    const candidate = {
+      ...rawPaper(),
+      institutions: ["&#83;tanford"],
+    };
+    const collector = new ResearchCollector({
+      discoveryAdapters: [{
+        sourceId: "arxiv",
+        collect: async () => [candidate],
+      }],
+      enrichers: [],
+      preferredInstitutions: ["Stanford"],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates[0]?.institutions).toEqual(["Stanford"]);
+    expect(result.candidates[0]?.preferredInstitutionMatches).toEqual([
+      "Stanford",
+    ]);
+  });
+
   it("runs three targeted arXiv lanes and merges repeated paper identities", async () => {
     const fixture = await loadFixture("arxiv-response.xml");
     const requestQueries: string[] = [];

@@ -461,6 +461,92 @@ Planned message: `fix: trust provider normalization checkpoint envelope`. The re
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 7
+
+Round 7 makes provider-text preparation an orchestration-owned, normalize-once lifecycle rather than an adapter-by-adapter convention. Raw human text is bounded before collection persistence, decoded at most twice in one preparation boundary, routed only after that preparation, and then mapped to Items without another entity pass. Structural URLs, IDs, dates, roles, access flags, and arbitrary metadata remain untouched.
+
+### RED evidence
+
+Regressions were added before the corresponding production changes. The first focused run was:
+
+```sh
+npx vitest run tests/unit/sources/news-collector.test.ts tests/unit/sources/publication-collector.test.ts tests/unit/sources/research-collector.test.ts
+```
+
+Result: exit 1; 3 intended failures and 117 surrounding passes. GDELT and RSS triple-encoded text decoded through a third lifecycle pass, and `&#83;tanford` neither normalized nor matched the preferred institution.
+
+The Worker routing regression was then run with:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "prepares publication text before routing"
+```
+
+Result: exit 1; the encoded interpretability publication was dropped because routing ran before provider-text preparation.
+
+Provider-bound and safe-truncation tests initially failed at import time because the undecoded bounding and public code-point-safe truncation helpers did not yet exist. The legacy checkpoint regression was extended to require normalized attached commentary, editorial signal display names, recomputed author identity keys, refreshed configured/primary topics, source-packet evidence, and successful triage while preserving an entity-like arbitrary structural value.
+
+### Implementation
+
+- Added an internal Symbol brand for prepared raw candidates. `prepareRawCandidateForPipeline` performs the sole bounded entity decode for raw display/evidence fields; `normalizePreparedCandidate` maps prepared text without decoding again. The public `normalizeCandidate` composes the two for compatibility.
+- Added a distinct `providerTextPreparationVersion` checkpoint envelope valid only on `collect`. Production collection prepares every raw candidate after durable-evidence compaction. Schema clones are rebranded in memory, current collect restores rebrand only when the trusted envelope is present, and legacy collect artifacts remain unbranded so normalize prepares them once. D1 chunk groups must agree on both preparation and normalization versions.
+- Publication candidates are prepared before `routePublication`; routing schema clones are rebranded before Item mapping. No provider-controlled metadata or persisted Item field can authorize the bypass.
+- RSS, GDELT, Federal Register, Papers with Code, Polymarket, direct-page, publication-page, and article-extractor paths now persist undecoded, NFKC-normalized, post-expansion bounded raw text. Transient decoded copies feed routing/signal derivation only. Explicit persisted limits are title/name 500, evidence/excerpt 4,000, and content 100,000 code units, with surrogate-pair-safe endings.
+- Research collection prepares the full candidate before institution aliasing, so encoded Stanford becomes `Stanford`, matches the preferred set, and retains existing scoring semantics without a later decode.
+- Legacy Item normalization now covers only known display fields in `attachedCommentary`, `editorialSignals`, provenance, source references, venue, and approved text arrays. It recomputes `normalizedAuthors`, `configuredTopics`, and `primaryTopic` from the once-normalized title/topics/evidence. IDs, URLs, dates, roles, access, and unknown metadata remain unchanged.
+- Assessment candidate construction, assessment packets, workflow source packets, and attached-commentary excerpt construction use one shared code-point-safe truncator. It never entity-decodes and cannot retain a lone high or low surrogate at the 4,000 or 100,000 boundaries.
+
+### GREEN evidence
+
+Affected unit/editorial/workflow suites:
+
+```sh
+npx vitest run tests/unit/sources tests/unit/editorial tests/unit/workflow
+```
+
+Result: exit 0; 21 files and 499 tests passed.
+
+Full Worker suite:
+
+```sh
+npm run test:worker
+```
+
+Result: exit 0; 11 files and 215 tests passed. The run emitted only the existing third-party missing-sourcemap warnings.
+
+Remaining non-Worker suite excluding the unrelated managed-OAuth fixture:
+
+```sh
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+```
+
+Result: exit 0; 39 files and 728 tests passed.
+
+Static, evaluation, build, and diff verification:
+
+```sh
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results: all exited 0. TypeScript passed, the golden evaluation passed every relevance/identity/routing/grounding check, Vite built 53 modules, and the diff contained no whitespace errors.
+
+### Self-review
+
+- The preparation brand is non-enumerable and module-private; it disappears from JSON. Only the checkpoint envelope carries lifecycle state across persistence, so candidates and Items do not gain provider-spoofable marker fields.
+- Preparation happens after durable evidence policy so decoding cannot cause discarded full bodies to leak into checkpoints. Post-NFKC bounds are applied before raw schemas persist adapter outputs and again at the central custom-candidate boundary.
+- Blank-but-present evidence retains fail-closed precedence through a canonical blank prepared value, while absent evidence still falls back to title. Federal Register access classification continues to use raw field presence even when normalized evidence is empty.
+- Current prepared collect checkpoints restore byte-stably and never receive the normalized-Item marker. Normalize through validate retain the Round 5 normalized envelope. Legacy artifacts are not rewritten.
+- Legacy arrays are normalized once, then reused directly for author keys and topic mapping; derived identity and triage fields do not trigger hidden extra entity passes.
+- Structural invariants are explicitly covered for URL query bytes, external IDs, publication dates, and arbitrary metadata. The allowlist does not recurse through generic metadata.
+- No database migration, historical rewrite, deployment, canary, or unrelated OAuth implementation change was made.
+
+### Concerns
+
+- The repository-wide `npm test` command has 13 failures confined to the pre-existing `tests/unit/config/preview-e2e-managed-oauth.test.ts` fixture: authorization-server metadata is rejected before the mocked registration stage, and its callback timing assertions consequently fail. This round does not touch OAuth code or tests. All other 728 non-Worker tests, all 215 Worker tests, typecheck, evaluation, build, and diff checks pass.
+- Worker runs emit existing third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 6
 
 Round 6 closes the scoped review's D1 coverage gap with characterization tests against the real checkpoint parser, audit-event storage, chunk serialization, and chunk merge paths. No implementation defect was found, so production code is unchanged.

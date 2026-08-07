@@ -4,9 +4,13 @@ import { z } from "zod";
 
 import { assertSafeOutboundUrl } from "./outbound-url";
 import {
-  normalizeProviderText,
-  normalizeProviderTextDetailed,
+  boundProviderText,
+  boundProviderTextDetailed,
 } from "./provider-text";
+import {
+  MAX_PROVIDER_EVIDENCE_CHARACTERS,
+  MAX_PROVIDER_TITLE_CHARACTERS,
+} from "./types";
 
 export const MAX_EXTRACTED_ARTICLE_CHARACTERS = 100_000;
 export const MIN_COMPLETE_ARTICLE_CHARACTERS = 500;
@@ -31,8 +35,11 @@ function metadataOnly(): ExtractedArticle {
   };
 }
 
-function normalized(value: string | null | undefined): string | null {
-  return normalizeProviderText(value);
+function normalized(
+  value: string | null | undefined,
+  maximum = MAX_PROVIDER_TITLE_CHARACTERS,
+): string | null {
+  return boundProviderText(value, { maxCharacters: maximum });
 }
 
 function isHtmlContentType(contentType: string | null): boolean {
@@ -59,9 +66,9 @@ export function extractReadableArticle(
   }
   const fallbackSourceText =
     document.querySelector("article, main")?.textContent;
-  const fallbackNormalization = normalizeProviderTextDetailed(
-    fallbackSourceText,
-  );
+  const fallbackNormalization = boundProviderTextDetailed(fallbackSourceText, {
+    maxCharacters: MAX_EXTRACTED_ARTICLE_CHARACTERS,
+  });
   const fallbackText = fallbackNormalization.value;
   const fallbackTitle = normalized(
     document.querySelector("h1")?.textContent ??
@@ -71,14 +78,16 @@ export function extractReadableArticle(
     document
       .querySelector('meta[name="description"]')
       ?.getAttribute("content"),
+    MAX_PROVIDER_EVIDENCE_CHARACTERS,
   );
   const article = new Readability(
     document as unknown as Document,
     { charThreshold: 100 },
   ).parse();
   const readabilitySourceText = article?.textContent;
-  const readabilityNormalization = normalizeProviderTextDetailed(
+  const readabilityNormalization = boundProviderTextDetailed(
     readabilitySourceText,
+    { maxCharacters: MAX_EXTRACTED_ARTICLE_CHARACTERS },
   );
   const readabilityText = readabilityNormalization.value;
   const fullText = readabilityText ?? fallbackText;
@@ -98,7 +107,10 @@ export function extractReadableArticle(
   return ExtractedArticleSchema.parse({
     title: normalized(article?.title) ?? fallbackTitle,
     byline: normalized(article?.byline),
-    excerpt: normalized(article?.excerpt) ?? fallbackExcerpt,
+    excerpt: normalized(
+      article?.excerpt,
+      MAX_PROVIDER_EVIDENCE_CHARACTERS,
+    ) ?? fallbackExcerpt,
     text: fullText,
     extractionLevel:
       wasTruncated ||

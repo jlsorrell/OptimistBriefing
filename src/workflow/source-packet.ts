@@ -2,6 +2,7 @@ import type { Item } from "../contracts/editorial";
 import type { NewsDevelopment } from "../editorial/cluster";
 import type { SourcePacket } from "../editorial/validate-summary";
 import { WorkflowItemPayloadSchema } from "./types";
+import { truncateProviderTextAtCodePointBoundary } from "../sources/provider-text";
 
 type SourceDocument = SourcePacket["sources"][number];
 
@@ -77,8 +78,10 @@ function sourceDocumentForItem(item: Item): SourcePacket {
       accessLevel: commentary?.accessLevel ?? item.accessLevel,
       excerpts: [{
         number: 1,
-        text: commentary?.excerpt.slice(0, 4_000) ||
-          item.normalizedText.slice(0, 4_000) || item.title,
+        text: truncateProviderTextAtCodePointBoundary(
+          commentary?.excerpt ?? item.normalizedText,
+          4_000,
+        ) || item.title,
       }],
     });
   }
@@ -101,7 +104,10 @@ function sourceDocumentsForDevelopment(
       if ((current?.excerpts.length ?? 0) >= 4) continue;
       const excerpt = {
         number: (current?.excerpts.length ?? 0) + 1,
-        text: developmentItem.normalizedText.slice(0, 4_000) ||
+        text: truncateProviderTextAtCodePointBoundary(
+          developmentItem.normalizedText,
+          4_000,
+        ) ||
           developmentItem.title,
       };
       grouped.set(source.id, {

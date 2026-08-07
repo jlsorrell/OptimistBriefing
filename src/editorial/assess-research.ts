@@ -4,6 +4,7 @@ import {
   type ResearchAssessment,
 } from "../contracts/editorial";
 import type { ModelProvider } from "../models/provider";
+import { truncateProviderTextAtCodePointBoundary } from "../sources/provider-text";
 import type { RawResearchCandidate } from "../sources/types";
 import {
   impliesFullTextAccess,
@@ -78,12 +79,11 @@ function assessmentPacket(
         excerpts: [
           {
             number: 1,
-            text: sourceText
+            text: truncateProviderTextAtCodePointBoundary(sourceText
               .normalize("NFKC")
               .replace(/[\u0000-\u001f\u007f-\u009f]+/gu, " ")
               .replace(/\s+/g, " ")
-              .trim()
-              .slice(0, 4_000),
+              .trim(), 4_000),
           },
         ],
       },

@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { SourceHttpClient } from "./http-client";
 import { normalizeArxivIdentifier } from "./identifiers";
-import { normalizeProviderText } from "./provider-text";
+import { boundProviderText, normalizeProviderText } from "./provider-text";
 import {
   assertSafeOutboundUrl,
   type OutboundUrlPolicy,
@@ -14,6 +14,7 @@ import {
 import {
   CollectionWindowSchema,
   MAX_PROVIDER_EVIDENCE_CHARACTERS,
+  MAX_PROVIDER_TITLE_CHARACTERS,
   RawItemSchema,
   ResearchSourceRecordSchema,
   type CollectionBatch,
@@ -239,14 +240,18 @@ export class RssAdapter {
                 if (date !== null && Number.isNaN(date.getTime())) return [];
                 const publishedAt = date === null ? null : date.toISOString();
                 const rawDescription = entry.description ?? "";
-                const description = normalizeProviderText(rawDescription, {
+                const description = boundProviderText(rawDescription, {
                   stripHtml: true,
                   maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS,
                 }) ?? "";
-                const title = normalizeProviderText(entry.title, {
+                const title = boundProviderText(entry.title, {
                   stripHtml: true,
+                  maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
                 }) ?? "";
-                if (title.length === 0) return [];
+                const signalTitle = normalizeProviderText(title, {
+                  maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+                });
+                if (signalTitle === null) return [];
                 const identifier = entry.identifier ?? originalUrl;
                 const candidate = RawItemSchema.parse({
                   kind: "blog",

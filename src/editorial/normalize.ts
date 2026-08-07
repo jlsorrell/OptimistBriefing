@@ -9,9 +9,12 @@ import {
 } from "../sources/identifiers";
 import {
   EditorialSignalRecordSchema,
+  MAX_PROVIDER_CONTENT_CHARACTERS,
+  MAX_PROVIDER_EVIDENCE_CHARACTERS,
   MAX_PROVIDER_TITLE_CHARACTERS,
   ScopedNewsMaterialFactSchema,
   RawItemSchema,
+  RawPublicationCandidateSchema,
   type ScopedNewsMaterialFact,
 } from "../sources/types";
 import { normalizeProviderText } from "../sources/provider-text";
@@ -115,6 +118,121 @@ function providerTextArray(value: unknown): string[] {
     : [];
 }
 
+const PREPARED_RAW_CANDIDATE = Symbol("preparedRawCandidate");
+
+export type PreparedRawCandidate = Record<string, unknown> & {
+  readonly [PREPARED_RAW_CANDIDATE]: true;
+};
+
+export function isPreparedRawCandidate(
+  value: unknown,
+): value is PreparedRawCandidate {
+  return value !== null && typeof value === "object" &&
+    (value as Partial<PreparedRawCandidate>)[PREPARED_RAW_CANDIDATE] === true;
+}
+
+export function markPreparedRawCandidate<T extends object>(
+  value: T,
+): T & PreparedRawCandidate {
+  Object.defineProperty(value, PREPARED_RAW_CANDIDATE, {
+    value: true,
+    enumerable: false,
+  });
+  return value as T & PreparedRawCandidate;
+}
+
+function preparedDisplay(value: string): string {
+  return rawWhitespace(value).slice(0, MAX_PROVIDER_TITLE_CHARACTERS);
+}
+
+function preparedTextArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+        .filter((entry): entry is string => typeof entry === "string")
+        .map(preparedDisplay)
+        .filter((entry) => entry.length > 0)
+    : [];
+}
+
+function preparedKey(value: string): string {
+  return rawWhitespace(value)
+    .toLocaleLowerCase("en-US")
+    .replace(/[\p{P}\p{S}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function prepareRawCandidateForPipeline(
+  raw: unknown,
+): PreparedRawCandidate {
+  if (isPreparedRawCandidate(raw)) return raw;
+  const input =
+    raw !== null && typeof raw === "object"
+      ? (raw as Record<string, unknown>)
+      : {};
+  const normalizedInput = {
+    ...input,
+    publishedAt:
+      input.publishedAt === null
+        ? null
+        : optionalDate(input.publishedAt) ?? input.publishedAt,
+    retrievedAt: optionalDate(input.retrievedAt) ?? input.retrievedAt,
+  };
+  const rawItem = RawItemSchema.safeParse(normalizedInput);
+  const candidate = rawItem.success
+    ? rawItem.data
+    : RawPublicationCandidateSchema.parse(normalizedInput);
+  const displayArray = (value: unknown): string[] =>
+    providerTextArray(value);
+  const metadata: Record<string, unknown> = { ...candidate.metadata };
+  if (typeof metadata.venue === "string") {
+    metadata.venue = normalizedProviderDisplayText(metadata.venue);
+  }
+  if (Array.isArray(metadata.topics)) {
+    metadata.topics = displayArray(metadata.topics);
+  }
+  if (Array.isArray(metadata.preferredInstitutionMatches)) {
+    metadata.preferredInstitutionMatches = displayArray(
+      metadata.preferredInstitutionMatches,
+    );
+  }
+  return markPreparedRawCandidate({
+    ...input,
+    ...candidate,
+    title: normalizeProviderText(candidate.title, {
+      maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+    }) ?? "",
+    sourceName: normalizeProviderText(candidate.sourceName, {
+      maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+    }) ?? "",
+    authors: displayArray(candidate.authors),
+    institutions: displayArray(candidate.institutions),
+    abstract: candidate.abstract === null
+      ? null
+      : normalizeProviderText(candidate.abstract, {
+          stripHtml: true,
+          maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS,
+        }) ?? " ",
+    content: candidate.content === null
+      ? null
+      : normalizeProviderText(candidate.content, {
+          stripHtml: true,
+          maxCharacters: MAX_PROVIDER_CONTENT_CHARACTERS,
+        }) ?? " ",
+    ...(Array.isArray(input.topics)
+      ? { topics: displayArray(input.topics) }
+      : {}),
+    ...(Array.isArray(input.preferredInstitutionMatches)
+      ? {
+          preferredInstitutionMatches: displayArray(
+            input.preferredInstitutionMatches,
+          ),
+        }
+      : {}),
+    metadata,
+  });
+}
+
 function scopedMaterialFacts(
   value: unknown,
 ): ScopedNewsMaterialFact[] {
@@ -189,27 +307,18 @@ export function normalizeAuthorKey(value: string): string {
     .trim();
 }
 
-export function normalizeCandidate(raw: unknown): Item {
-  const input =
-    raw !== null && typeof raw === "object"
-      ? (raw as Record<string, unknown>)
-      : {};
-  const normalizedInput = {
-    ...input,
-    publishedAt:
-      input.publishedAt === null
-        ? null
-        : optionalDate(input.publishedAt) ?? input.publishedAt,
-    retrievedAt: optionalDate(input.retrievedAt) ?? input.retrievedAt,
-  };
-  const candidate = RawItemSchema.parse(normalizedInput);
-  const title = normalizedProviderDisplayText(candidate.title);
+export function normalizePreparedCandidate(
+  prepared: PreparedRawCandidate,
+): Item {
+  const input = prepared;
+  const candidate = RawItemSchema.parse(prepared);
+  const title = candidate.title;
   const abstract = candidate.abstract === null
     ? null
-    : normalizeProviderText(candidate.abstract);
+    : rawWhitespace(candidate.abstract);
   const content = candidate.content === null
     ? null
-    : normalizeProviderText(candidate.content);
+    : rawWhitespace(candidate.content);
   const selectedNormalizedText = candidate.content !== null
     ? content ?? ""
     : candidate.abstract !== null
@@ -224,18 +333,16 @@ export function normalizeCandidate(raw: unknown): Item {
       canonicalIdentifier,
     ),
   );
-  const topics = providerTextArray(input.topics);
-  const preferredInstitutionMatches = providerTextArray(
+  const topics = preparedTextArray(input.topics);
+  const preferredInstitutionMatches = preparedTextArray(
     input.preferredInstitutionMatches ??
       candidate.metadata.preferredInstitutionMatches,
   );
   const metadataVenue = typeof candidate.metadata.venue === "string"
-    ? normalizeProviderText(candidate.metadata.venue, {
-        maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
-      })
+    ? preparedDisplay(candidate.metadata.venue)
     : undefined;
   const metadataTopics = Array.isArray(candidate.metadata.topics)
-    ? uniqueSorted(providerTextArray(candidate.metadata.topics))
+    ? uniqueSorted(preparedTextArray(candidate.metadata.topics))
     : undefined;
   const configuredTopics =
     candidate.kind === "paper" || candidate.kind === "blog"
@@ -371,7 +478,7 @@ export function normalizeCandidate(raw: unknown): Item {
   const primaryTopic =
     configuredTopics[0] ??
     (typeof candidate.metadata.primaryTopic === "string"
-      ? normalizedWhitespace(candidate.metadata.primaryTopic)
+      ? rawWhitespace(candidate.metadata.primaryTopic)
       : section) ??
     topics[0] ??
     "general";
@@ -414,7 +521,7 @@ export function normalizeCandidate(raw: unknown): Item {
     sourceRefs: [
       {
         id: candidate.sourceId,
-        name: normalizedProviderDisplayText(candidate.sourceName),
+        name: candidate.sourceName,
         url: sourceUrl,
         role: candidate.sourceRole,
         retrievedAt: new Date(candidate.retrievedAt).toISOString(),
@@ -435,21 +542,21 @@ export function normalizeCandidate(raw: unknown): Item {
       ...(metadataTopics === undefined ? {} : { topics: metadataTopics }),
       externalId: canonicalIdentifier(candidate.externalId),
       externalIds,
-      normalizedTitle: normalizeTitleKey(title),
+      normalizedTitle: preparedKey(title),
       originalUrl: candidate.originalUrl,
       authors: uniqueSorted(
         candidate.authors
-          .map(normalizedProviderDisplayText)
+          .map(preparedDisplay)
           .filter((author) => author.length > 0),
       ),
       normalizedAuthors: uniqueSorted(
         candidate.authors
-          .map(normalizeAuthorKey)
+          .map(preparedKey)
           .filter((author) => author.length > 0),
       ),
       institutions: uniqueSorted(
         candidate.institutions
-          .map(normalizedProviderDisplayText)
+          .map(preparedDisplay)
           .filter((institution) => institution.length > 0),
       ),
       providerTopics: uniqueSorted(topics),
@@ -470,7 +577,7 @@ export function normalizeCandidate(raw: unknown): Item {
           itemId: id,
           itemKind: candidate.kind,
           sourceId: candidate.sourceId,
-          sourceName: normalizedProviderDisplayText(candidate.sourceName),
+          sourceName: candidate.sourceName,
           sourceUrl,
           sourceRole: candidate.sourceRole,
           accessLevel: candidate.accessLevel,
@@ -495,7 +602,7 @@ export function normalizeCandidate(raw: unknown): Item {
       provenance: [
         {
           sourceId: candidate.sourceId,
-          sourceName: normalizedProviderDisplayText(candidate.sourceName),
+          sourceName: candidate.sourceName,
           role: candidate.sourceRole,
           accessLevel: candidate.accessLevel,
           url: candidate.originalUrl,
@@ -507,4 +614,8 @@ export function normalizeCandidate(raw: unknown): Item {
     createdAt,
     expiresAt: candidateExpiry(createdAt, candidate.metadata.expiresAt),
   });
+}
+
+export function normalizeCandidate(raw: unknown): Item {
+  return normalizePreparedCandidate(prepareRawCandidateForPipeline(raw));
 }
