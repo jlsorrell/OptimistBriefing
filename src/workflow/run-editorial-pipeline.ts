@@ -1455,6 +1455,39 @@ function normalizedStoredItem(item: Item, refreshDerived = false): Item {
     : normalized;
 }
 
+/**
+ * Maps an already-normalized development back to its aggregate Item without
+ * crossing another provider-text normalization boundary.
+ */
+function storedItemFromNormalizedDevelopment(
+  development: NewsDevelopment,
+  storedAggregate?: Item,
+): Item {
+  const representative = development.representativeItem;
+  return ItemSchema.parse({
+    ...representative,
+    id: development.id,
+    canonicalUrl:
+      development.canonicalPrimaryDocument ?? representative.canonicalUrl,
+    title: development.title,
+    sourceRefs: development.sourceRefs,
+    normalizedText: development.items
+      .map((nestedItem) => nestedItem.normalizedText)
+      .join(" "),
+    primaryTopic: development.primarySection,
+    tags: representative.tags,
+    metadata: {
+      ...(storedAggregate?.metadata ?? {}),
+      ...representative.metadata,
+      primarySection: development.primarySection,
+      sectionEligibility: development.sectionEligibility,
+      ...(storedAggregate?.metadata.workflow === undefined
+        ? {}
+        : { workflow: storedAggregate.metadata.workflow }),
+    },
+  });
+}
+
 function normalizedStoredWorkflowItem(
   item: Item,
   ensureWorkflow = false,
@@ -1464,7 +1497,7 @@ function normalizedStoredWorkflowItem(
     ? null
     : workflowPayload(item);
   let development: NewsDevelopment | undefined;
-  let storedInput = item;
+  let normalizedDevelopmentRoot: Item | undefined;
   if (originalWorkflow?.development !== undefined) {
     if (refreshDerived) {
       const survivingItems = normalizedStoredWorkflowItems(
@@ -1475,27 +1508,10 @@ function normalizedStoredWorkflowItem(
         throw new InvalidPreparedCandidateTextError("title");
       }
       development = developmentFromItems(survivingItems);
-      const representative = development.representativeItem;
-      storedInput = ItemSchema.parse({
-        ...representative,
-        id: development.id,
-        canonicalUrl:
-          development.canonicalPrimaryDocument ?? representative.canonicalUrl,
-        title: development.title,
-        sourceRefs: development.sourceRefs,
-        normalizedText: development.items
-          .map((nestedItem) => nestedItem.normalizedText)
-          .join(" "),
-        primaryTopic: development.primarySection,
-        tags: representative.tags,
-        metadata: {
-          ...item.metadata,
-          ...representative.metadata,
-          primarySection: development.primarySection,
-          sectionEligibility: development.sectionEligibility,
-          workflow: item.metadata.workflow,
-        },
-      });
+      normalizedDevelopmentRoot = storedItemFromNormalizedDevelopment(
+        development,
+        item,
+      );
     } else {
       development = NewsDevelopmentSchema.parse({
         ...originalWorkflow.development,
@@ -1515,7 +1531,8 @@ function normalizedStoredWorkflowItem(
       });
     }
   }
-  const normalizedStored = normalizedStoredItem(storedInput, refreshDerived);
+  const normalizedStored = normalizedDevelopmentRoot ??
+    normalizedStoredItem(item, refreshDerived);
   if (
     normalizedStored.metadata.workflow === undefined &&
     !ensureWorkflow
@@ -1744,25 +1761,8 @@ function itemFromDevelopment(
   development: NewsDevelopment,
   score: NewsScore,
 ): Item {
-  const representative = development.representativeItem;
   return withWorkflowPayload(
-    ItemSchema.parse({
-      ...representative,
-      id: development.id,
-      canonicalUrl:
-        development.canonicalPrimaryDocument ??
-        representative.canonicalUrl,
-      title: development.title,
-      sourceRefs: development.sourceRefs,
-      normalizedText: development.items
-        .map((item) => item.normalizedText)
-        .join(" "),
-      metadata: {
-        ...representative.metadata,
-        primarySection: development.primarySection,
-        sectionEligibility: development.sectionEligibility,
-      },
-    }),
+    storedItemFromNormalizedDevelopment(development),
     {
       development,
       developmentScore: score,

@@ -3900,37 +3900,103 @@ describe("manual editorial run", () => {
   });
 
   it.each(["cluster", "shortlist"] as const)(
-    "rebuilds a stale legacy %s development after removing its invalid representative",
+    "rebuilds a stale legacy %s development through exactly one text boundary",
     async (checkpointStep) => {
       const sharedDocument =
         "https://example.com/documents/legacy-development-shared";
-      const newsItem = (
+      const encodedTitle =
+        "World agency reviews &amp;amp;#115;oftware safeguards";
+      const encodedEvidence =
+        "Evidence &amp;amp;#69; remains bounded after the review.";
+      const encodedSourceName = "Source &amp;amp;#83;yndicate";
+      const freshNewsItem = (
         id: string,
         sourceRole: RawNewsCandidate["sourceRole"],
       ): Item => normalizeCandidate({
         ...rawNewsCandidate(id, "world"),
         sourceRole,
-        title: `Federal Reserve updates the ${id} interest-rate decision`,
-        abstract:
-          `Federal Reserve updates the ${id} interest-rate decision after its meeting.`,
+        sourceName: encodedSourceName,
+        title: encodedTitle,
+        abstract: encodedEvidence,
         namedEntities: [],
         eventFamilies: [],
         materialFacts: [],
         primaryDocumentUrl: sharedDocument,
         primaryDocumentUrls: [sharedDocument],
+        sectionEligibility: ["world", "technology"],
+        metadata: { primarySection: "world" },
       });
-      const survivorA = newsItem("legacy-development-a", "reporting");
-      const survivorB = newsItem("legacy-development-b", "reporting");
+      const legacyNewsItem = (
+        id: string,
+        sourceRole: RawNewsCandidate["sourceRole"],
+      ): Item => {
+        const fresh = freshNewsItem(id, sourceRole);
+        return ItemSchema.parse({
+          ...fresh,
+          title: encodedTitle,
+          sourceRefs: fresh.sourceRefs.map((source) => ({
+            ...source,
+            name: encodedSourceName,
+          })),
+          normalizedText: encodedEvidence,
+          metadata: {
+            ...fresh.metadata,
+            normalizedTitle: "stale-encoded-title",
+            editorialSignals: (
+              fresh.metadata.editorialSignals as readonly Record<
+                string,
+                unknown
+              >[]
+            ).map((signal) => ({
+              ...signal,
+              sourceName: encodedSourceName,
+            })),
+            provenance: (
+              fresh.metadata.provenance as readonly Record<string, unknown>[]
+            ).map((entry) => ({
+              ...entry,
+              sourceName: encodedSourceName,
+            })),
+          },
+        });
+      };
+      const freshSurvivorA = freshNewsItem(
+        "legacy-development-a",
+        "reporting",
+      );
+      const freshSurvivorB = freshNewsItem(
+        "legacy-development-b",
+        "reporting",
+      );
+      const survivorA = legacyNewsItem(
+        "legacy-development-a",
+        "reporting",
+      );
+      const survivorB = legacyNewsItem(
+        "legacy-development-b",
+        "reporting",
+      );
       const invalidRepresentative = ItemSchema.parse({
-        ...newsItem("legacy-development-invalid", "primary"),
+        ...freshNewsItem("legacy-development-invalid", "primary"),
         title: "&#32;",
         tags: ["stale&#45;section"],
       });
-      const freshDevelopment = clusterNews([survivorA, survivorB], {})[0]!;
+      const freshDevelopment = clusterNews(
+        [freshSurvivorA, freshSurvivorB],
+        {},
+      )[0]!;
       const legacyDevelopment = clusterNews(
         [invalidRepresentative, survivorA, survivorB],
         {},
       )[0]!;
+      const scoreInputs = {
+        publicImportance: 0.8,
+        personalRelevance: 0.8,
+        sourceQuality: 0.8,
+        recency: 0.8,
+        geography: 0.2,
+        novelty: 0.7,
+      };
       expect(legacyDevelopment.representativeItem.id).toBe(
         invalidRepresentative.id,
       );
@@ -3977,14 +4043,10 @@ describe("manual editorial run", () => {
             version: 1,
             personalRelevance: 0.8,
             development: staleDevelopment,
-            developmentScore: scoreNewsDevelopment(legacyDevelopment, {
-              publicImportance: 0.8,
-              personalRelevance: 0.8,
-              sourceQuality: 0.8,
-              recency: 0.8,
-              geography: 0.2,
-              novelty: 0.7,
-            }),
+            developmentScore: scoreNewsDevelopment(
+              legacyDevelopment,
+              scoreInputs,
+            ),
             ...(checkpointStep === "shortlist"
               ? {
                   section: "world" as const,
@@ -4049,17 +4111,67 @@ describe("manual editorial run", () => {
       expect(restored).toHaveLength(1);
       const refreshedAggregate = restored[0]?.[0];
       expect(refreshedAggregate).toBeDefined();
-      const refreshedDevelopment = (refreshedAggregate!.metadata.workflow as {
+      const refreshedWorkflow = refreshedAggregate!.metadata.workflow as {
         development: typeof freshDevelopment;
-      }).development;
+        developmentScore: ReturnType<typeof scoreNewsDevelopment>;
+        section?: string;
+      };
+      const refreshedDevelopment = refreshedWorkflow.development;
       expect(refreshedDevelopment).toEqual(freshDevelopment);
+      expect(refreshedWorkflow.developmentScore).toEqual(
+        scoreNewsDevelopment(freshDevelopment, scoreInputs),
+      );
       expect(refreshedAggregate).toMatchObject({
         id: freshDevelopment.id,
-        title: freshDevelopment.title,
+        title: "World agency reviews &#115;oftware safeguards",
         primaryTopic: freshDevelopment.primarySection,
         tags: freshDevelopment.representativeItem.tags,
       });
-      expect(JSON.stringify(refreshedAggregate)).not.toContain("&#");
+      expect(refreshedAggregate!.title).toBe(refreshedDevelopment.title);
+      expect(refreshedAggregate!.title).toBe(
+        refreshedDevelopment.representativeItem.title,
+      );
+      expect(refreshedAggregate!.normalizedText).toBe(
+        refreshedDevelopment.items
+          .map((nestedItem) => nestedItem.normalizedText)
+          .join(" "),
+      );
+      expect(refreshedAggregate!.normalizedText).toContain(
+        "Evidence &#69; remains bounded",
+      );
+      expect(refreshedAggregate!.sourceRefs).toEqual(
+        refreshedDevelopment.sourceRefs,
+      );
+      expect(refreshedAggregate!.sourceRefs[0]!.name).toBe(
+        "Source &#83;yndicate",
+      );
+      expect(refreshedAggregate!.metadata).toMatchObject({
+        primarySection: "world",
+        sectionEligibility: ["technology", "world"],
+      });
+      expect(refreshedWorkflow.section).toBe(
+        checkpointStep === "shortlist" ? "world" : undefined,
+      );
+      expect(JSON.stringify(refreshedAggregate)).toContain("&#");
+      expect(JSON.stringify(refreshedAggregate)).not.toContain("software");
+
+      const onceRestored = structuredClone(refreshedAggregate!);
+      await store.saveCheckpoint(context.runId, checkpointStep, {
+        output: [onceRestored],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 1,
+        estimatedCostUsd: 0,
+        providerTextNormalizationVersion:
+          PROVIDER_TEXT_NORMALIZATION_VERSION,
+      });
+      await expect(runEditorialPipeline(context)).rejects.toThrow(
+        checkpointStep === "cluster"
+          ? "STOP_AFTER_LEGACY_CLUSTER_RESTORE"
+          : "STOP_AFTER_LEGACY_SHORTLIST_RESTORE",
+      );
+      expect(restored).toHaveLength(2);
+      expect(restored[1]![0]).toEqual(onceRestored);
     },
   );
 

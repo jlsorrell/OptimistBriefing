@@ -461,6 +461,132 @@ Planned message: `fix: trust provider normalization checkpoint envelope`. The re
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 11
+
+Round 11 removes a second provider-text boundary from legacy clustered and
+shortlisted development restoration. Rebuilt aggregate roots are now mapped
+only from the already-normalized canonical development and representative, so
+their display text, evidence, sources, derived section, score, and routing stay
+aligned. No deployment, migration, historical rewrite, or unrelated change was
+made.
+
+### RED evidence
+
+The cluster and shortlist regressions use a triple-layer title that becomes the
+literal Technology keyword `software` only if the aggregate root is normalized
+twice, plus similarly layered evidence and source display names:
+
+```sh
+npm run test:worker -- tests/integration/workflow/manual-run.test.ts -t "through exactly one text boundary"
+```
+
+The initial sandboxed run could not bind the Worker test port (`EPERM`). After
+the required localhost permission was granted, the command exited 1 with both
+regressions failing. In each case the canonical nested development retained
+`World agency reviews &#115;oftware safeguards` and routed `world`, while the
+aggregate root became `World agency reviews software safeguards` and routed
+`technology`.
+
+### Implementation
+
+- Added `storedItemFromNormalizedDevelopment`, a schema-only mapper for an
+  already-normalized development. It copies the representative's structural
+  Item fields, maps canonical development ID/document/title/evidence/sources,
+  and assigns representative tags plus development topic/section without any
+  entity decoding, NFKC, or provider-text normalization.
+- Legacy development refresh now normalizes each nested Item once, rebuilds the
+  canonical development, and uses that mapper directly. It no longer passes
+  the assembled aggregate root back through `normalizedStoredItem`.
+- Stored aggregate workflow state is retained for score replay and shortlist
+  state, while canonical representative metadata replaces stale item-derived
+  fields. Development scoring is recomputed from the rebuilt development and
+  shortlist routing remains aligned with its primary section.
+- Audited the other development/root construction path and replaced its
+  duplicate constructor with the same schema-only mapper. The sole
+  `developmentFromItems` caller remains legacy restoration; both fresh and
+  restored root construction are now no-decode mappings.
+
+### GREEN evidence
+
+Final focused cluster/shortlist command:
+
+```sh
+npm run test:worker -- tests/integration/workflow/manual-run.test.ts -t "through exactly one text boundary"
+```
+
+Result: exit 0; both targeted regressions passed. They assert the entire rebuilt
+development equals a fresh canonical development, root title/text/source refs/
+tags/topic/section match the canonical development and representative, the
+inert entity references remain, the development score is freshly replayed, no
+false Technology route occurs, and a subsequent current-envelope restore is
+byte-stable.
+
+Affected source/editorial/workflow suites:
+
+```sh
+npx vitest run tests/unit/editorial tests/unit/workflow tests/unit/sources
+```
+
+Result: exit 0; 21 files and 517 tests passed.
+
+Full Worker suite:
+
+```sh
+npm run test:worker
+```
+
+Result: exit 0; 11 files and 220 tests passed. It emitted only the existing
+third-party missing-sourcemap warnings.
+
+Remaining non-Worker suite excluding the unrelated managed-OAuth fixture:
+
+```sh
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+```
+
+Result: exit 0; 39 files and 746 tests passed.
+
+Static, evaluation, build, and diff verification:
+
+```sh
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results: all exited 0. TypeScript passed, every golden relevance/identity/
+routing/grounding check passed, Vite built 53 modules, and the diff contained
+no whitespace errors.
+
+### Files changed
+
+- `src/workflow/run-editorial-pipeline.ts`
+- `tests/integration/workflow/manual-run.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+
+### Self-review
+
+- The mapper performs only object construction and `ItemSchema.parse`; it has
+  no normalization helper call and does not recursively rewrite metadata.
+- Aggregate title, normalized text, source references, tags, primary topic,
+  primary section, and section eligibility all come directly from the rebuilt
+  development or its representative. Top-level URL/access/time/provenance
+  structure comes from that representative.
+- The regression's expected once-normalized strings are literal, and the title
+  is deliberately routing-sensitive: a hidden second decode necessarily turns
+  `&#115;oftware` into `software` and changes `world` to `technology`.
+- Both missing-envelope entry stages are covered. The second restore uses the
+  trusted current artifact envelope and compares the entire root byte-for-byte
+  to the once-restored value.
+- Existing development score components are replayed rather than trusted from
+  the stale aggregate. Structural source IDs, URLs, roles, dates, access, and
+  canonical document values are not decoded.
+
+### Concerns
+
+- None. Worker runs emit existing third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 10
 
 Round 10 closes the remaining stored-Item, legacy development aggregate,
