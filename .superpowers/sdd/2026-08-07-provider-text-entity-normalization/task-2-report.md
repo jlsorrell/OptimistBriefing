@@ -70,3 +70,59 @@ Result: exit 0; no whitespace errors.
 Planned message: `fix: normalize provider text before persistence`.
 
 This report is written before the commit as required; the resulting commit SHA is recorded in the task handoff.
+
+## Fix Round 1
+
+The earlier self-review statement that all URL paths were protected was inaccurate: the shared array helper decoded `primaryDocumentUrls` before canonicalization. This round corrects that boundary, restores raw source-length classification for extracted articles, and uses decoded abstracts for configured research-topic mapping.
+
+### TDD evidence
+
+RED command:
+
+```sh
+npx vitest run tests/unit/editorial/normalize.test.ts tests/unit/sources/news-collector.test.ts -t "structural|decoded provider abstracts|direct readability"
+```
+
+Result: exit 1. The structural URL test received a decoded `next` query parameter, decoded abstracts did not produce `secure-computation-ml`, and direct Readability text longer than 100,000 characters was incorrectly classified as `full`.
+
+Focused GREEN command:
+
+```sh
+npx vitest run tests/unit/editorial/normalize.test.ts tests/unit/sources/news-collector.test.ts -t "structural|decoded provider abstracts|direct readability"
+```
+
+Result: exit 0; 2 test files passed, 3 targeted tests passed.
+
+Task 2 focused/adjacent command:
+
+```sh
+npx vitest run tests/unit/sources/provider-text.test.ts tests/unit/editorial/normalize.test.ts tests/unit/sources/publication-collector.test.ts tests/unit/sources/news-collector.test.ts
+```
+
+Result: exit 0; 4 test files passed, 59 tests passed.
+
+Typecheck command:
+
+```sh
+npm run check
+```
+
+Result: exit 0; `tsc --noEmit` passed.
+
+### Files changed
+
+- `src/editorial/normalize.ts`
+- `src/sources/article-extractor.ts`
+- `tests/unit/editorial/normalize.test.ts`
+- `tests/unit/sources/news-collector.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/task-2-report.md`
+
+### Self-review
+
+- Structural string arrays now retain raw whitespace normalization, so `primaryDocumentUrls` reach URL canonicalization without entity decoding.
+- Truncation is determined from the selected raw source text before the bounded provider-text helper runs; retained text remains bounded and overlength Readability extractions remain partial.
+- Configured research topics receive the already-decoded local abstract.
+
+### Concerns
+
+- None.

@@ -48,6 +48,31 @@ describe("research normalization", () => {
     );
   });
 
+  it("keeps entity-like primary document URLs structural before canonicalization", () => {
+    const normalized = normalizeCandidate(candidate({
+      metadata: {
+        discoveryFamily: "arxiv",
+        primaryDocumentUrls: [
+          "https://agency.example/reports?label=encoded&amp;next=keep",
+        ],
+      },
+    }));
+
+    expect(normalized.metadata.primaryDocumentUrls).toEqual([
+      "https://agency.example/reports?amp%3Bnext=keep&label=encoded",
+    ]);
+  });
+
+  it("uses decoded provider abstracts to map research topics", () => {
+    const normalized = normalizeCandidate(candidate({
+      abstract: "The report studies &#115;ecure computation.",
+    }));
+
+    expect(normalized.metadata.configuredTopics).toContain(
+      "secure-computation-ml",
+    );
+  });
+
   it("stores conservative author keys and primary research source IDs", () => {
     const paper = normalizeCandidate(candidate());
     const commentary = normalizeCandidate(candidate({

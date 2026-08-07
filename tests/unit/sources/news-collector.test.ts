@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
+import { Readability } from "@mozilla/readability";
 import { describe, expect, it, vi } from "vitest";
 
 import type { SourceRecord } from "../../../src/db/repository";
@@ -1460,6 +1461,35 @@ describe("extractReadableArticle", () => {
 
     expect(article.text?.length).toBeLessThanOrEqual(100_000);
     expect(article.extractionLevel).toBe("partial");
+  });
+
+  it("keeps direct readability text over the bound classified as partial", () => {
+    const readabilityText = "Readable article text. ".repeat(5_000);
+    const parse = vi.spyOn(Readability.prototype, "parse").mockReturnValue({
+      title: "Long report",
+      content: "<p>Long report</p>",
+      textContent: readabilityText,
+      length: readabilityText.length,
+      excerpt: null,
+      byline: null,
+      dir: null,
+      siteName: null,
+      lang: null,
+      publishedTime: null,
+    });
+
+    try {
+      const article = extractReadableArticle(
+        "<article><p>Fallback text.</p></article>",
+        "https://example.com/direct-readability-long-report",
+        "text/html",
+      );
+
+      expect(article.text).toHaveLength(100_000);
+      expect(article.extractionLevel).toBe("partial");
+    } finally {
+      parse.mockRestore();
+    }
   });
 
   it("labels a short teaser as partial rather than complete full text", () => {

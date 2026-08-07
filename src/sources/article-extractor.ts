@@ -54,9 +54,9 @@ export function extractReadableArticle(
   )) {
     element.remove();
   }
-  const fallbackText = normalized(
-    document.querySelector("article, main")?.textContent,
-  );
+  const fallbackSourceText =
+    document.querySelector("article, main")?.textContent;
+  const fallbackText = normalized(fallbackSourceText);
   const fallbackTitle = normalized(
     document.querySelector("h1")?.textContent ??
       document.querySelector("title")?.textContent,
@@ -70,13 +70,17 @@ export function extractReadableArticle(
     document as unknown as Document,
     { charThreshold: 100 },
   ).parse();
-  const readabilityText = normalized(article?.textContent);
+  const readabilitySourceText = article?.textContent;
+  const readabilityText = normalized(readabilitySourceText);
   const fullText = readabilityText ?? fallbackText;
   if (fullText === null) {
     return metadataOnly();
   }
+  const sourceText = readabilityText === null
+    ? fallbackSourceText
+    : readabilitySourceText;
   const wasTruncated =
-    fullText.length > MAX_EXTRACTED_ARTICLE_CHARACTERS;
+    (sourceText?.length ?? 0) > MAX_EXTRACTED_ARTICLE_CHARACTERS;
 
   return ExtractedArticleSchema.parse({
     title: normalized(article?.title) ?? fallbackTitle,

@@ -90,7 +90,7 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value
         .filter((entry): entry is string => typeof entry === "string")
-        .map(normalizedWhitespace)
+        .map(rawWhitespace)
         .filter((entry) => entry.length > 0)
     : [];
 }
@@ -205,7 +205,7 @@ export function normalizeCandidate(raw: unknown): Item {
       ? mapResearchTopicIds([
           title,
           ...topics,
-          candidate.abstract ?? "",
+          abstract ?? "",
         ])
       : [];
   const sectionEligibility = stringArray(
