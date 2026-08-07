@@ -90,13 +90,13 @@ export function editorialSignals(item: Item): EditorialSignalRecord[] {
     }
   }
 
-  const primaryDocumentUrls = [
+  const primaryDocumentUrls = [...new Set([
     ...stringArray(item.metadata.primaryDocumentUrls),
     ...(typeof item.metadata.primaryDocumentUrl === "string"
       ? [item.metadata.primaryDocumentUrl]
       : []),
     ...(item.kind === "document" ? [item.canonicalUrl] : []),
-  ];
+  ])].sort((left, right) => left.localeCompare(right));
   const itemEventInstances = eventInstances(
     item.metadata.eventInstances,
   );

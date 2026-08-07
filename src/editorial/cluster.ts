@@ -699,6 +699,19 @@ function cluster(items: readonly Item[]): NewsCluster {
   });
 }
 
+/**
+ * Rebuilds one already-formed development through the same deterministic
+ * aggregate derivation used by fresh clustering. This does not decide cluster
+ * membership and does not transform provider text.
+ */
+export function developmentFromItems(input: readonly Item[]): NewsDevelopment {
+  const items = z.array(ItemSchema).min(1).parse(input);
+  if (items.some((item) => !NEWS_KINDS.has(item.kind))) {
+    throw new TypeError("News developments require only news Items.");
+  }
+  return cluster(items);
+}
+
 export function clusterNews(
   input: readonly Item[],
   embeddings: EmbeddingLookup,

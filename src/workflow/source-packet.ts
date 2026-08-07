@@ -15,6 +15,20 @@ type AttachedCommentaryDocument = {
   excerpt: string;
 };
 
+const UNSAFE_PACKET_TEXT = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
+
+function sanitizedPacketText(value: string | undefined, maximum: number): string {
+  if (value === undefined) return "";
+  const scalarSafe = truncateProviderTextAtCodePointBoundary(value, 100_000);
+  if (UNSAFE_PACKET_TEXT.test(scalarSafe)) return "";
+  const normalized = scalarSafe.replace(/\s+/gu, " ").trim();
+  return truncateProviderTextAtCodePointBoundary(normalized, maximum);
+}
+
+function firstPacketText(...values: readonly string[]): string {
+  return values.find((value) => value.length > 0) ?? "";
+}
+
 function stringSet(value: unknown): ReadonlySet<string> {
   return new Set(
     Array.isArray(value)
@@ -63,13 +77,13 @@ function sourceDocumentForItem(item: Item): SourcePacket {
   for (const source of item.sourceRefs) {
     if (sources.has(source.id)) continue;
     const commentary = attachedCommentary.get(source.id);
-    const commentaryExcerpt = commentary === undefined
-      ? ""
-      : truncateProviderTextAtCodePointBoundary(commentary.excerpt, 4_000);
-    const itemExcerpt = truncateProviderTextAtCodePointBoundary(
-      item.normalizedText,
+    const commentaryExcerpt = sanitizedPacketText(
+      commentary?.excerpt,
       4_000,
     );
+    const itemExcerpt = sanitizedPacketText(item.normalizedText, 4_000);
+    const titleExcerpt = sanitizedPacketText(item.title, 4_000);
+    const itemTitle = sanitizedPacketText(item.title, 500);
     sources.set(source.id, {
       sourceId: source.id,
       sourceName: source.name,
@@ -79,17 +93,20 @@ function sourceDocumentForItem(item: Item): SourcePacket {
           : "commentary"
         : "news-evidence",
       role: source.role,
-      title: commentary?.title ?? item.title,
+      title: firstPacketText(
+        sanitizedPacketText(commentary?.title, 500),
+        itemTitle,
+      ),
       url: commentary?.url ?? source.url,
       retrievedAt: commentary?.retrievedAt ?? source.retrievedAt,
       accessLevel: commentary?.accessLevel ?? item.accessLevel,
       excerpts: [{
         number: 1,
-        text: commentaryExcerpt.trim().length > 0
-          ? commentaryExcerpt
-          : itemExcerpt.trim().length > 0
-            ? itemExcerpt
-            : item.title,
+        text: firstPacketText(
+          commentaryExcerpt,
+          itemExcerpt,
+          titleExcerpt,
+        ),
       }],
     });
   }
@@ -112,18 +129,17 @@ function sourceDocumentsForDevelopment(
       if ((current?.excerpts.length ?? 0) >= 4) continue;
       const excerpt = {
         number: (current?.excerpts.length ?? 0) + 1,
-        text: truncateProviderTextAtCodePointBoundary(
-          developmentItem.normalizedText,
-          4_000,
-        ) ||
-          developmentItem.title,
+        text: firstPacketText(
+          sanitizedPacketText(developmentItem.normalizedText, 4_000),
+          sanitizedPacketText(developmentItem.title, 4_000),
+        ),
       };
       grouped.set(source.id, {
         sourceId: source.id,
         sourceName: source.name,
         evidenceKind: "news-evidence",
         role: source.role,
-        title: developmentItem.title,
+        title: sanitizedPacketText(developmentItem.title, 500),
         url: source.url,
         retrievedAt: source.retrievedAt,
         accessLevel: developmentItem.accessLevel,

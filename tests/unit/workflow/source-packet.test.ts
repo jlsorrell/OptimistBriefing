@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { ItemSchema, type Item } from "../../../src/contracts/editorial";
 import { clusterNews } from "../../../src/editorial/cluster";
+import { SourcePacketSchema } from "../../../src/editorial/validate-summary";
 import { sourcePacketForItem } from "../../../src/workflow/source-packet";
 
 const retrievedAt = "2026-07-30T09:00:00.000Z";
@@ -43,6 +44,9 @@ function sourceItem(
 describe("sourcePacketForItem", () => {
   it.each([
     ["empty", ""],
+    ["NUL-control", "\u0000"],
+    ["C1-control", "\u0085"],
+    ["line-separator", "\u2028"],
     ["malformed-surrogate", "\uDC00"],
   ])(
     "falls back from an %s commentary excerpt to the item's normalized evidence",
@@ -72,6 +76,7 @@ describe("sourcePacketForItem", () => {
         number: 1,
         text: "Primary normalized evidence.",
       }]);
+      expect(() => SourcePacketSchema.parse(packet)).not.toThrow();
     },
   );
 

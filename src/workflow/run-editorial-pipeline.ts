@@ -62,6 +62,7 @@ import {
 } from "../editorial/news-score";
 import {
   clusterNews,
+  developmentFromItems,
   NewsDevelopmentSchema,
   type NewsDevelopment,
 } from "../editorial/cluster";
@@ -1260,6 +1261,16 @@ function normalizedStoredDisplay(value: string): string {
   }) ?? "";
 }
 
+function normalizedRequiredStoredTitle(value: string): string {
+  const title = normalizeProviderText(value, {
+    maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+  });
+  if (title === null) {
+    throw new InvalidPreparedCandidateTextError("title");
+  }
+  return title;
+}
+
 function normalizedStoredArray(value: unknown): string[] {
   const seen = new Set<string>();
   const normalized: string[] = [];
@@ -1278,6 +1289,7 @@ function normalizedStoredItem(item: Item, refreshDerived = false): Item {
   if (refreshDerived) {
     delete metadata.contentFingerprint;
     delete metadata.evidenceFingerprint;
+    delete metadata.tags;
   }
   for (const key of [
     "authors",
@@ -1343,7 +1355,7 @@ function normalizedStoredItem(item: Item, refreshDerived = false): Item {
         : signal;
     });
   }
-  const title = normalizedStoredDisplay(item.title);
+  const title = normalizedRequiredStoredTitle(item.title);
   const normalizedText = normalizeProviderText(item.normalizedText) ?? "";
   const authors = itemStringArray(metadata.authors);
   if (Array.isArray(metadata.authors)) metadata.authors = authors;
@@ -1364,7 +1376,9 @@ function normalizedStoredItem(item: Item, refreshDerived = false): Item {
   if (research) metadata.configuredTopics = configuredTopics;
   let primaryTopic = configuredTopics[0] ??
     normalizedStoredDisplay(item.primaryTopic);
-  let tags = [...item.tags];
+  let tags = refreshDerived && research
+    ? [...configuredTopics]
+    : [...item.tags];
   if (refreshDerived) {
     metadata.normalizedTitle = normalizePreparedTitleKey(title);
     const derivedFields = [
@@ -1412,16 +1426,7 @@ function normalizedStoredItem(item: Item, refreshDerived = false): Item {
         signals.metadata.primarySection,
       );
       primaryTopic = section;
-      const sectionNames = new Set<EditionSection>([
-        "world",
-        "technology",
-        "ai_policy",
-        "dmv",
-        "baltimore",
-        "research",
-      ]);
       tags = [...new Set([
-        ...item.tags.filter((tag) => !sectionNames.has(tag as EditionSection)),
         ...signals.sectionEligibility,
         section,
       ])].sort((left, right) => left.localeCompare(right));
@@ -1455,7 +1460,62 @@ function normalizedStoredWorkflowItem(
   ensureWorkflow = false,
   refreshDerived = false,
 ): Item {
-  const normalizedStored = normalizedStoredItem(item, refreshDerived);
+  const originalWorkflow = item.metadata.workflow === undefined
+    ? null
+    : workflowPayload(item);
+  let development: NewsDevelopment | undefined;
+  let storedInput = item;
+  if (originalWorkflow?.development !== undefined) {
+    if (refreshDerived) {
+      const survivingItems = normalizedStoredWorkflowItems(
+        originalWorkflow.development.items,
+        true,
+      );
+      if (survivingItems.length === 0) {
+        throw new InvalidPreparedCandidateTextError("title");
+      }
+      development = developmentFromItems(survivingItems);
+      const representative = development.representativeItem;
+      storedInput = ItemSchema.parse({
+        ...representative,
+        id: development.id,
+        canonicalUrl:
+          development.canonicalPrimaryDocument ?? representative.canonicalUrl,
+        title: development.title,
+        sourceRefs: development.sourceRefs,
+        normalizedText: development.items
+          .map((nestedItem) => nestedItem.normalizedText)
+          .join(" "),
+        primaryTopic: development.primarySection,
+        tags: representative.tags,
+        metadata: {
+          ...item.metadata,
+          ...representative.metadata,
+          primarySection: development.primarySection,
+          sectionEligibility: development.sectionEligibility,
+          workflow: item.metadata.workflow,
+        },
+      });
+    } else {
+      development = NewsDevelopmentSchema.parse({
+        ...originalWorkflow.development,
+        title: normalizedRequiredStoredTitle(
+          originalWorkflow.development.title,
+        ),
+        items: originalWorkflow.development.items.map((nestedItem) =>
+          normalizedStoredWorkflowItem(nestedItem)
+        ),
+        representativeItem: normalizedStoredWorkflowItem(
+          originalWorkflow.development.representativeItem,
+        ),
+        sourceRefs: originalWorkflow.development.sourceRefs.map((source) => ({
+          ...source,
+          name: normalizedStoredDisplay(source.name),
+        })),
+      });
+    }
+  }
+  const normalizedStored = normalizedStoredItem(storedInput, refreshDerived);
   if (
     normalizedStored.metadata.workflow === undefined &&
     !ensureWorkflow
@@ -1465,24 +1525,19 @@ function normalizedStoredWorkflowItem(
   const existing = normalizedStored.metadata.workflow === undefined
     ? null
     : workflowPayload(normalizedStored);
-  const development = existing?.development === undefined
-    ? undefined
-    : NewsDevelopmentSchema.parse({
-        ...existing.development,
-        title: normalizedStoredDisplay(existing.development.title),
-        items: existing.development.items.map((nestedItem) =>
-          normalizedStoredWorkflowItem(nestedItem, false, refreshDerived)
-        ),
-        representativeItem: normalizedStoredWorkflowItem(
-          existing.development.representativeItem,
-          false,
-          refreshDerived,
-        ),
-        sourceRefs: existing.development.sourceRefs.map((source) => ({
-          ...source,
-          name: normalizedStoredDisplay(source.name),
-        })),
-      });
+  const refreshedDevelopmentScore =
+    refreshDerived &&
+      development !== undefined &&
+      existing?.developmentScore !== undefined
+      ? scoreNewsDevelopment(development, {
+          publicImportance: existing.developmentScore.publicImportance,
+          personalRelevance: existing.developmentScore.personalRelevance,
+          sourceQuality: existing.developmentScore.sourceQuality,
+          recency: existing.developmentScore.recency,
+          geography: existing.developmentScore.geography,
+          novelty: existing.developmentScore.novelty,
+        })
+      : undefined;
   return withWorkflowPayload(
     normalizedStored,
     {
@@ -1495,8 +1550,30 @@ function normalizedStoredWorkflowItem(
             ),
           }),
       ...(development === undefined ? {} : { development }),
+      ...(refreshedDevelopmentScore === undefined
+        ? {}
+        : { developmentScore: refreshedDevelopmentScore }),
+      ...(refreshDerived &&
+          development !== undefined &&
+          existing?.section !== undefined
+        ? { section: development.primarySection }
+        : {}),
     },
   );
+}
+
+function normalizedStoredWorkflowItems(
+  items: readonly Item[],
+  refreshDerived: boolean,
+): Item[] {
+  return items.flatMap((item): Item[] => {
+    try {
+      return [normalizedStoredWorkflowItem(item, false, refreshDerived)];
+    } catch (error) {
+      if (error instanceof InvalidPreparedCandidateTextError) return [];
+      throw error;
+    }
+  });
 }
 
 function compactResearchCandidate(
@@ -3109,18 +3186,26 @@ function normalizedRestoredCheckpointOutput(
     case "score":
     case "cluster":
     case "shortlist":
-      return (output as readonly Item[]).map((item) =>
-        normalizedStoredWorkflowItem(item, false, true)
+      return normalizedStoredWorkflowItems(
+        output as readonly Item[],
+        true,
       );
     case "synthesize":
     case "validate":
       return (output as readonly {
         item: Item;
         [key: string]: unknown;
-      }[]).map((candidate) => ({
-        ...candidate,
-        item: normalizedStoredWorkflowItem(candidate.item, false, true),
-      }));
+      }[]).flatMap((candidate) => {
+        try {
+          return [{
+            ...candidate,
+            item: normalizedStoredWorkflowItem(candidate.item, false, true),
+          }];
+        } catch (error) {
+          if (error instanceof InvalidPreparedCandidateTextError) return [];
+          throw error;
+        }
+      });
     case "compose":
     case "publish":
       return output;

@@ -43,6 +43,7 @@ import { D1BriefingRepository } from "../../../src/db/d1-repository";
 import { FakeModelProvider } from "../../../src/models/fake-provider";
 import { OpenAIModelProvider } from "../../../src/models/openai-provider";
 import { clusterNews } from "../../../src/editorial/cluster";
+import { scoreNewsDevelopment } from "../../../src/editorial/news-score";
 import {
   canonicalResearchIdentity,
   consolidateResearchCandidates,
@@ -976,6 +977,67 @@ describe("manual editorial run", () => {
     }])).rejects.toThrow();
   });
 
+  it("isolates an entity-only stored Item title from its valid sibling", async () => {
+    const laneId = "official-publication:stored-item-title";
+    const diagnosticWrites: DiscoveryLaneDiagnostic[][] = [];
+    const invalid = ItemSchema.parse({
+      ...fixtureItem("stored-empty-title", "world"),
+      title: "&#32;",
+      metadata: {
+        ...fixtureItem("stored-empty-title", "world").metadata,
+        discoveryFamily: "official-publication",
+        discoveryLaneIds: [laneId],
+      },
+    });
+    const valid = ItemSchema.parse({
+      ...fixtureItem("stored-valid-title", "world"),
+      metadata: {
+        ...fixtureItem("stored-valid-title", "world").metadata,
+        discoveryFamily: "official-publication",
+        discoveryLaneIds: [laneId],
+      },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-01",
+      runId: "run-isolate-stored-empty-title",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+      loadDiscoveryDiagnostics: () => [{
+        laneId,
+        sourceId: "stored-items",
+        discoveryFamily: "official-publication",
+        discovered: 2,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "success",
+        rejectionCounts: {},
+      }],
+      researchRepository: {
+        getDiscoveryObservations: async () => [],
+        upsertDiscoveryObservations: async () => undefined,
+        getCachedResearchAssessment: async () => null,
+        putCachedResearchAssessment: async () => undefined,
+        recordDiscoveryDiagnostics: async (_runId, diagnostics) => {
+          diagnosticWrites.push(structuredClone([...diagnostics]));
+        },
+      },
+    });
+
+    const normalized = await context.normalize([invalid, valid]);
+
+    expect(normalized).toHaveLength(1);
+    expect(normalized[0]?.id).toBe(valid.id);
+    expect(diagnosticWrites.at(-1)?.[0]?.rejectionCounts).toEqual({
+      quality_rejected: 1,
+    });
+  });
+
   it("prepares publication text before routing without changing structure", async () => {
     const publication: RawPublicationCandidate = {
       ...rawOfficialPublicationCandidate(
@@ -1320,6 +1382,12 @@ describe("manual editorial run", () => {
       sourceName: "Checkpoint &amp; Source",
       metadata: { arbitraryRawDisplay: "Legacy &#82;aw metadata" },
     };
+    const freshLegacyResearch = normalizeCandidate({
+      ...legacyRaw,
+      title: "Checkpoint research title",
+      abstract: "Checkpoint evidence for assessment.",
+      metadata: {},
+    });
     const structuralProvenance = {
       sourceId: "source&#65;",
       sourceName: "Checkpoint &amp; Source",
@@ -1339,6 +1407,7 @@ describe("manual editorial run", () => {
         url: legacyRaw.originalUrl,
       }],
       normalizedText: "Checkpoint &#101;vidence for assessment.",
+      tags: ["research", "stale&#45;topic"],
       metadata: {
         normalizedAuthors: ["&amp;#65;da Example"],
         institutions: ["Checkpoint &#73;nstitute"],
@@ -1389,6 +1458,7 @@ describe("manual editorial run", () => {
       title: "F&#101;deral Reserve raises interest rates to 5%",
       normalizedText:
         "F&#101;deral Reserve raises interest rates to 5% after the meeting.",
+      tags: ["world", "stale&#45;section"],
       metadata: {
         ...freshNews.metadata,
         namedEntities: ["Stale &#69;ntity"],
@@ -1495,6 +1565,7 @@ describe("manual editorial run", () => {
     expect(assessed.metadata.eventInstances).toEqual([]);
     expect(assessed.metadata.materialFacts).toEqual([]);
     expect(assessed.metadata.scopedMaterialFacts).toEqual([]);
+    expect(assessed.tags).toEqual(freshLegacyResearch.tags);
     expect(assessed.metadata.configuredTopics).toContain(
       "alignment-interpretability",
     );
@@ -1563,6 +1634,67 @@ describe("manual editorial run", () => {
       (store.artifacts.get(`${context.runId}:normalize`) as
         CheckpointArtifact<readonly Item[]>).output,
     )).toContain("arbitraryRawDisplay");
+  });
+
+  it("drops only an entity-empty Item from a legacy normalize checkpoint", async () => {
+    const store = new FixtureStore();
+    const invalid = ItemSchema.parse({
+      ...fixtureItem("legacy-normalize-empty-title", "world"),
+      title: "&nbsp;",
+    });
+    const valid = fixtureItem("legacy-normalize-valid-title", "world");
+    const restoredInputs: Item[][] = [];
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-16",
+      runId: "run-legacy-normalize-empty-title",
+      store,
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => {
+        throw new Error("completed collect must not run");
+      },
+    });
+    context.normalize = async () => {
+      throw new Error("completed normalize must not run");
+    };
+    context.enrich = async (items) => {
+      restoredInputs.push([...items]);
+      throw new Error("STOP_AFTER_LEGACY_NORMALIZE_RESTORE");
+    };
+    await store.createRun({
+      id: context.runId,
+      editionDate: context.editionDate,
+      status: "retryable",
+      currentStep: "normalize",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await store.saveCheckpoint(context.runId, "collect", {
+      output: [],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 0,
+      estimatedCostUsd: 0,
+    });
+    await store.saveCheckpoint(context.runId, "normalize", {
+      output: [invalid, valid],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 2,
+      estimatedCostUsd: 0,
+    });
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_LEGACY_NORMALIZE_RESTORE",
+    );
+    expect(restoredInputs).toHaveLength(1);
+    expect(restoredInputs[0]?.map(({ id }) => id)).toEqual([valid.id]);
   });
 
   it("normalizes a completed collect Item only once before normalization", async () => {
@@ -3766,6 +3898,170 @@ describe("manual editorial run", () => {
     expect(JSON.stringify(clustered)).not.toContain('"embedding"');
     expect(JSON.stringify(shortlisted)).not.toContain('"embedding"');
   });
+
+  it.each(["cluster", "shortlist"] as const)(
+    "rebuilds a stale legacy %s development after removing its invalid representative",
+    async (checkpointStep) => {
+      const sharedDocument =
+        "https://example.com/documents/legacy-development-shared";
+      const newsItem = (
+        id: string,
+        sourceRole: RawNewsCandidate["sourceRole"],
+      ): Item => normalizeCandidate({
+        ...rawNewsCandidate(id, "world"),
+        sourceRole,
+        title: `Federal Reserve updates the ${id} interest-rate decision`,
+        abstract:
+          `Federal Reserve updates the ${id} interest-rate decision after its meeting.`,
+        namedEntities: [],
+        eventFamilies: [],
+        materialFacts: [],
+        primaryDocumentUrl: sharedDocument,
+        primaryDocumentUrls: [sharedDocument],
+      });
+      const survivorA = newsItem("legacy-development-a", "reporting");
+      const survivorB = newsItem("legacy-development-b", "reporting");
+      const invalidRepresentative = ItemSchema.parse({
+        ...newsItem("legacy-development-invalid", "primary"),
+        title: "&#32;",
+        tags: ["stale&#45;section"],
+      });
+      const freshDevelopment = clusterNews([survivorA, survivorB], {})[0]!;
+      const legacyDevelopment = clusterNews(
+        [invalidRepresentative, survivorA, survivorB],
+        {},
+      )[0]!;
+      expect(legacyDevelopment.representativeItem.id).toBe(
+        invalidRepresentative.id,
+      );
+      const staleDevelopment = {
+        ...legacyDevelopment,
+        title: "Stale &#68;evelopment title",
+        namedEntities: ["Stale &#69;ntity"],
+        eventFamilies: ["stale&#45;event-family"],
+        materialFacts: [{
+          kind: "status" as const,
+          key: "stale&#45;status",
+          value: "stale&#45;value",
+        }],
+        primarySection: "technology" as const,
+        eventInstance: {
+          subject: "Stale &#83;ubject",
+          domain: "governance-event" as const,
+          object: "Stale &#79;bject",
+        },
+        developmentKey: "development-stale&#45;key",
+        repeatable: true,
+        materialFactsFingerprint: "facts-stale&#45;fingerprint",
+        editorialSignals: legacyDevelopment.editorialSignals.map((signal) => ({
+          ...signal,
+          namedEntities: ["Stale &#69;ntity"],
+          eventFamilies: ["stale&#45;event-family"],
+        })),
+      };
+      const legacyAggregate = ItemSchema.parse({
+        ...invalidRepresentative,
+        id: legacyDevelopment.id,
+        title: legacyDevelopment.title,
+        sourceRefs: legacyDevelopment.sourceRefs,
+        normalizedText: legacyDevelopment.items
+          .map((item) => item.normalizedText)
+          .join(" "),
+        primaryTopic: "technology",
+        tags: ["technology", "stale&#45;section"],
+        metadata: {
+          ...invalidRepresentative.metadata,
+          primarySection: "technology",
+          sectionEligibility: ["technology"],
+          workflow: {
+            version: 1,
+            personalRelevance: 0.8,
+            development: staleDevelopment,
+            developmentScore: scoreNewsDevelopment(legacyDevelopment, {
+              publicImportance: 0.8,
+              personalRelevance: 0.8,
+              sourceQuality: 0.8,
+              recency: 0.8,
+              geography: 0.2,
+              novelty: 0.7,
+            }),
+            ...(checkpointStep === "shortlist"
+              ? {
+                  section: "world" as const,
+                  selectionReasons: ["Fixture selection."],
+                }
+              : {}),
+          },
+        },
+      });
+      const store = new FixtureStore();
+      const context = createProductionPipelineContext({
+        editionDate:
+          checkpointStep === "cluster" ? "2034-04-01" : "2034-04-02",
+        runId: `run-legacy-${checkpointStep}-development-refresh`,
+        store,
+        now: () => now,
+        providers: {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+        collectCandidates: async () => {
+          throw new Error("completed collect must not run");
+        },
+      });
+      const restored: Item[][] = [];
+      context.shortlist = async (items) => {
+        restored.push([...items]);
+        throw new Error("STOP_AFTER_LEGACY_CLUSTER_RESTORE");
+      };
+      context.synthesize = async (items) => {
+        restored.push([...items]);
+        throw new Error("STOP_AFTER_LEGACY_SHORTLIST_RESTORE");
+      };
+      await store.createRun({
+        id: context.runId,
+        editionDate: context.editionDate,
+        status: "running",
+        currentStep: checkpointStep,
+        retryable: false,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const targetIndex = PIPELINE_STEPS.indexOf(checkpointStep);
+      for (const step of PIPELINE_STEPS.slice(0, targetIndex + 1)) {
+        await store.saveCheckpoint(context.runId, step, {
+          output: step === checkpointStep ? [legacyAggregate] : [],
+          attempts: 1,
+          durationMs: 0,
+          itemCount: step === checkpointStep ? 1 : 0,
+          estimatedCostUsd: 0,
+        });
+      }
+
+      await expect(runEditorialPipeline(context)).rejects.toThrow(
+        checkpointStep === "cluster"
+          ? "STOP_AFTER_LEGACY_CLUSTER_RESTORE"
+          : "STOP_AFTER_LEGACY_SHORTLIST_RESTORE",
+      );
+
+      expect(restored).toHaveLength(1);
+      const refreshedAggregate = restored[0]?.[0];
+      expect(refreshedAggregate).toBeDefined();
+      const refreshedDevelopment = (refreshedAggregate!.metadata.workflow as {
+        development: typeof freshDevelopment;
+      }).development;
+      expect(refreshedDevelopment).toEqual(freshDevelopment);
+      expect(refreshedAggregate).toMatchObject({
+        id: freshDevelopment.id,
+        title: freshDevelopment.title,
+        primaryTopic: freshDevelopment.primarySection,
+        tags: freshDevelopment.representativeItem.tags,
+      });
+      expect(JSON.stringify(refreshedAggregate)).not.toContain("&#");
+    },
+  );
 
   it("rejects a normalized envelope on a D1 collect checkpoint", async () => {
     const runId = "run-d1-reject-normalized-collect";

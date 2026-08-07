@@ -461,6 +461,172 @@ Planned message: `fix: trust provider normalization checkpoint envelope`. The re
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 10
+
+Round 10 closes the remaining stored-Item, legacy development aggregate,
+source-packet structural text, and legacy tag gaps. It retains the Round 7–9
+single provider-text decode boundary and makes no deployment, database
+migration, history rewrite, or unrelated OAuth change.
+
+### RED evidence
+
+The direct stored-Item sibling regression was first run with:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "isolates an entity-only stored Item"
+```
+
+Result: exit 1; the entity-only Item title became an empty string inside
+`normalizedStoredItem` and raised a generic Zod minimum-length error, aborting
+its valid sibling rather than reaching the typed candidate rejection path.
+
+The missing-envelope normalize checkpoint regression was first run with:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "drops only an entity-empty Item from a legacy normalize checkpoint"
+```
+
+Result: exit 1; checkpoint graph restoration aborted on the first invalid Item
+instead of retaining the schema-valid sibling.
+
+The corrected stage-valid cluster and shortlist fixtures were first run with:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "rebuilds a stale legacy.*development"
+```
+
+Result: exit 1; both fixtures failed with the same empty-title Zod error before
+they could remove the invalid representative. The fixtures contain stale but
+schema-valid aggregate title, entities, event families, material facts,
+event-instance, primary section, editorial signals, development key, and facts
+fingerprint values.
+
+The legacy research/news checkpoint regression was extended with encoded stale
+Item tags. It failed because research retained `research` and
+`stale&#45;topic` rather than the fresh normalized configured-topic tags; the
+news fixture similarly retained its stale section literal.
+
+The packet fallback matrix was first run with:
+
+```sh
+npx vitest run tests/unit/workflow/source-packet.test.ts
+```
+
+Result: exit 1; NUL and C1-only commentary were treated as nonempty evidence.
+The line-separator and lone-surrogate cases already fell through because trim
+or code-point truncation emptied them, and remain explicit regression cases.
+
+### Implementation
+
+- Added a required stored-title helper that uses the existing bounded provider
+  normalization and throws only `InvalidPreparedCandidateTextError` when the
+  normalized title is empty. Direct normalize catches this typed error, keeps
+  valid siblings, and records `quality_rejected` when discovery lineage exists.
+  Other Zod, URL, and structural failures still propagate.
+- Legacy checkpoint array restoration now flat-maps only the typed invalid-text
+  case for Item, synthesize, and validate graphs. Empty or invalid unrelated
+  structures are not swallowed.
+- Exposed `developmentFromItems`, a minimal schema-validated wrapper around the
+  existing deterministic fresh cluster aggregate builder. It does not decide
+  membership and performs no provider-text transformation. Legacy development
+  restoration normalizes and filters nested Items, drops the aggregate if none
+  survive, deterministically reselects the representative, and rebuilds every
+  aggregate-consumed field through this canonical path.
+- Rebuilt aggregate Items use the surviving representative's structural
+  source/access/provenance values and the development's derived ID, document,
+  title, section, sources, and evidence. Existing score components are replayed
+  through `scoreNewsDevelopment`, and existing shortlist section routing is
+  aligned with the rebuilt primary section.
+- Editorial-signal fallback now deduplicates and sorts primary document URLs,
+  matching fresh normalization when both singular and plural metadata carry
+  the same structural URL.
+- Legacy research tags are rebuilt from configured topics. Legacy news tags are
+  rebuilt from refreshed section eligibility and primary section. Unverifiable
+  legacy `metadata.tags` is omitted rather than entity-decoded, so stale literal
+  topic/section tags cannot survive the refresh.
+- Added a no-decode packet-text sanitizer. Each fallback candidate is scalar-
+  safe truncated, rejected if it contains C0/C1 controls or U+2028/U+2029,
+  whitespace-normalized, and independently bounded. Commentary evidence falls
+  back to normalized Item evidence, then title; source titles and development
+  excerpts use the same structural rules.
+
+### GREEN evidence
+
+Affected source/editorial/workflow suites:
+
+```sh
+npx vitest run tests/unit/editorial tests/unit/workflow tests/unit/sources
+```
+
+Result: exit 0; 21 files and 517 tests passed.
+
+The complete manual workflow suite passed all 83 tests, including both legacy
+cluster/shortlist restoration variants. The final full Worker run was:
+
+```sh
+npm run test:worker
+```
+
+Result: exit 0; 11 files and 220 tests passed. It emitted only the existing
+third-party missing-sourcemap warnings.
+
+Remaining non-Worker suite excluding the unrelated managed-OAuth fixture:
+
+```sh
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+```
+
+Result: exit 0; 39 files and 746 tests passed.
+
+Static, evaluation, build, and diff verification:
+
+```sh
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results: all exited 0. TypeScript passed, the golden evaluation passed every
+relevance/identity/routing/grounding check, Vite built 53 modules, and the diff
+contained no whitespace errors.
+
+### Files changed
+
+- `src/editorial/cluster.ts`
+- `src/editorial/editorial-signals.ts`
+- `src/workflow/run-editorial-pipeline.ts`
+- `src/workflow/source-packet.ts`
+- `tests/integration/workflow/manual-run.test.ts`
+- `tests/unit/workflow/source-packet.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+
+### Self-review
+
+- The aggregate wrapper calls the private fresh aggregate builder directly;
+  it cannot drift on named entities, event families, facts, event instance,
+  repeatability, keys, fingerprints, signals, source evidence, dates, or count
+  derivation. Its input is Item-schema validated and nonempty before rebuild.
+- Invalid nested Items are caught only by the dedicated required-text error.
+  The representative is selected from surviving normalized Items; an empty
+  development raises that same typed error so only that top-level aggregate is
+  omitted.
+- The cluster and shortlist regressions compare the entire rebuilt development
+  to a fresh `clusterNews` result, not a hand-selected subset, and assert the
+  root ID/title/topic/tags plus absence of encoded stale literals.
+- Packet sanitization never calls the entity decoder. It applies the same
+  forbidden structural ranges as `SourcePacketSchema` before independent
+  fallback selection and code-point-safe bounds.
+- Current normalization envelopes still bypass legacy refresh. Structural
+  nested Item URLs, source IDs, dates, roles, access levels, and provenance are
+  not decoded or rewritten.
+
+### Concerns
+
+- The managed-OAuth fixture remains outside the requested non-OAuth
+  verification boundary and no OAuth file was touched.
+- Worker runs emit existing third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 9
 
 Round 9 makes provider-text normalization fail open per candidate, refreshes
