@@ -25,6 +25,7 @@ import {
   type OutboundUrlPolicy,
 } from "./outbound-url";
 import { PolymarketAdapter } from "./polymarket";
+import { normalizeProviderText } from "./provider-text";
 import {
   bodyRetrievalPermitted,
   CollectionWindowSchema,
@@ -190,8 +191,7 @@ function catalogInputMayBeNews(source: SourceRecord): boolean {
 }
 
 function normalizedText(value: string | null | undefined): string | null {
-  const normalized = value?.replace(/\s+/g, " ").trim() ?? "";
-  return normalized.length === 0 ? null : normalized;
+  return normalizeProviderText(value);
 }
 
 function listingDate(value: string): string | null {

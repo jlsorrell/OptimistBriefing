@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import { SourceHttpClient } from "./http-client";
 import { normalizeArxivIdentifier } from "./identifiers";
+import { normalizeProviderText } from "./provider-text";
 import {
   assertSafeOutboundUrl,
   type OutboundUrlPolicy,
@@ -151,10 +152,6 @@ function normalizeFeedEntry(
   };
 }
 
-function normalizeWhitespace(value: string): string {
-  return value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-}
-
 export function relatedArxivIds(value: string): string[] {
   const matches = value.matchAll(
     /(?:arxiv:|arxiv\.org\/(?:abs|html|pdf)\/)(\d{4}\.\d{4,5})(?:v\d+)?/gi,
@@ -242,11 +239,13 @@ export class RssAdapter {
                 if (date !== null && Number.isNaN(date.getTime())) return [];
                 const publishedAt = date === null ? null : date.toISOString();
                 const rawDescription = entry.description ?? "";
-                const description = normalizeWhitespace(rawDescription).slice(
-                  0,
-                  MAX_PROVIDER_EVIDENCE_CHARACTERS,
-                );
-                const title = normalizeWhitespace(entry.title);
+                const description = normalizeProviderText(rawDescription, {
+                  stripHtml: true,
+                  maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS,
+                }) ?? "";
+                const title = normalizeProviderText(entry.title, {
+                  stripHtml: true,
+                }) ?? "";
                 if (title.length === 0) return [];
                 const identifier = entry.identifier ?? originalUrl;
                 const candidate = RawItemSchema.parse({

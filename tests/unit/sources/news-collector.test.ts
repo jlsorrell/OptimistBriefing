@@ -1040,6 +1040,58 @@ describe("catalog-driven news collection", () => {
     });
   });
 
+  it("decodes provider entities in direct-page listing text", async () => {
+    const host = "wamu-entities.example.com";
+    const pageUrl = `https://${host}/news`;
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          `<article>
+            <h2><a href="/story">WAMU&amp;#8217;s entity update</a></h2>
+            <time datetime="2026-07-29T08:00:00.000Z"></time>
+            <p>&#8220;quoted&#8221; summary</p>
+          </article>`,
+          { headers: { "content-type": "text/html" } },
+        )),
+        now: () => new Date("2026-07-29T10:00:00.000Z"),
+      }),
+      sources: [
+        catalogSource({
+          id: "wamu-entities",
+          canonicalName: "WAMU",
+          canonicalUrl: `https://${host}/`,
+          role: "reporting",
+          discoveryMechanism: "page",
+          sectionEligibility: ["dmv"],
+          restrictions: {
+            bodyRetrieval: "forbidden",
+            paywall: "none",
+            contentUse: "metadata-only",
+            pageUrl,
+            urlPolicy: policy(host, ["/"]),
+            listing: {
+              itemSelector: "article",
+              linkSelector: "h2 a",
+              titleSelector: "h2",
+              dateSelector: "time",
+              dateAttribute: "datetime",
+              summarySelector: "p",
+              maxItems: 10,
+              maxBodyFetches: 0,
+            },
+          },
+        }),
+      ],
+    });
+
+    const candidate = (await collector.collect(fixedWindow())).candidates[0];
+    expect(candidate).toMatchObject({
+      title: "WAMU’s entity update",
+      abstract: "“quoted” summary",
+    });
+    expect(JSON.stringify(candidate)).not.toMatch(/&#(?:x[0-9a-f]+|[0-9]+);/i);
+  });
+
   it.each([
     {
       id: "reuters",

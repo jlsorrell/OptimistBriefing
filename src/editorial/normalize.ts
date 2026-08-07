@@ -9,6 +9,7 @@ import {
   RawItemSchema,
   type ScopedNewsMaterialFact,
 } from "../sources/types";
+import { normalizeProviderText } from "../sources/provider-text";
 import {
   deriveCanonicalEventInstances,
   deriveEventFamilies,
@@ -27,6 +28,10 @@ const TRACKING_PARAMETERS = new Set([
 const CANDIDATE_RETENTION_MS = 90 * 24 * 60 * 60 * 1_000;
 
 function normalizedWhitespace(value: string): string {
+  return normalizeProviderText(value) ?? "";
+}
+
+function rawWhitespace(value: string): string {
   return value.normalize("NFKC").replace(/\s+/g, " ").trim();
 }
 
@@ -71,7 +76,7 @@ function canonicalIdentifier(value: string): string {
   try {
     return canonicalizeUrl(value);
   } catch {
-    return normalizedWhitespace(value);
+    return rawWhitespace(value);
   }
 }
 
@@ -179,6 +184,12 @@ export function normalizeCandidate(raw: unknown): Item {
   };
   const candidate = RawItemSchema.parse(normalizedInput);
   const title = normalizedWhitespace(candidate.title);
+  const abstract = candidate.abstract === null
+    ? null
+    : normalizeProviderText(candidate.abstract);
+  const content = candidate.content === null
+    ? null
+    : normalizeProviderText(candidate.content);
   const canonicalUrl = candidateCanonicalUrl(
     candidate.originalUrl,
     candidate.metadata,
@@ -202,8 +213,8 @@ export function normalizeCandidate(raw: unknown): Item {
   );
   const materialText = [
     title,
-    candidate.abstract,
-    candidate.content,
+    abstract,
+    content,
   ];
   const namedEntities = uniqueSorted([
     ...stringArray(
@@ -378,9 +389,7 @@ export function normalizeCandidate(raw: unknown): Item {
       ...stringArray(candidate.metadata.tags),
       ...(section === null ? [] : [section]),
     ]),
-    normalizedText: normalizedWhitespace(
-      candidate.content ?? candidate.abstract ?? title,
-    ),
+    normalizedText: content ?? abstract ?? title,
     metadata: {
       ...candidate.metadata,
       externalId: canonicalIdentifier(candidate.externalId),

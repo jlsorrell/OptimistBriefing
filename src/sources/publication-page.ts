@@ -7,6 +7,7 @@ import { SourceFetchError, SourceHttpClient } from "./http-client";
 import { transientExtractionPermitted } from "./news-collector";
 import { assertSafeOutboundUrl, type OutboundUrlPolicy } from "./outbound-url";
 import { relatedArxivIds } from "./rss";
+import { normalizeProviderText } from "./provider-text";
 import {
   CollectionWindowSchema,
   RawPublicationCandidateSchema,
@@ -38,12 +39,17 @@ type ListingItem = {
 
 function text(value: unknown): string | null {
   if (typeof value !== "string") return null;
+  return normalizeProviderText(value, { stripHtml: true });
+}
+
+function rawText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
   const normalized = value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   return normalized.length === 0 ? null : normalized;
 }
 
 function date(value: unknown): string | null {
-  const normalized = text(value);
+  const normalized = rawText(value);
   if (normalized === null) return null;
   const timestamp = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(normalized) ? `${normalized}T00:00:00Z` : normalized);
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
@@ -67,11 +73,11 @@ function schemaType(value: unknown): string[] {
 }
 
 function schemaUrl(value: Record<string, unknown>): string | null {
-  const direct = text(value.url);
+  const direct = rawText(value.url);
   if (direct !== null) return direct;
-  if (typeof value.mainEntityOfPage === "string") return text(value.mainEntityOfPage);
+  if (typeof value.mainEntityOfPage === "string") return rawText(value.mainEntityOfPage);
   if (value.mainEntityOfPage !== null && typeof value.mainEntityOfPage === "object") {
-    return text((value.mainEntityOfPage as Record<string, unknown>)["@id"]);
+    return rawText((value.mainEntityOfPage as Record<string, unknown>)["@id"]);
   }
   return null;
 }

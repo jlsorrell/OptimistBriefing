@@ -33,6 +33,21 @@ function candidate(
 }
 
 describe("research normalization", () => {
+  it("decodes provider entities before normalized items are persisted", () => {
+    const normalized = normalizeCandidate(candidate({
+      title: "Inspector finds &#8216;systemic breakdown&#8217;",
+      abstract: "It&amp;#8217;s documented in yesterday&#8217;s report.",
+    }));
+
+    expect(normalized.title).toBe("Inspector finds ‘systemic breakdown’");
+    expect(normalized.normalizedText).toContain(
+      "It’s documented in yesterday’s report.",
+    );
+    expect(JSON.stringify(normalized)).not.toMatch(
+      /&#(?:x[0-9a-f]+|[0-9]+);/i,
+    );
+  });
+
   it("stores conservative author keys and primary research source IDs", () => {
     const paper = normalizeCandidate(candidate());
     const commentary = normalizeCandidate(candidate({

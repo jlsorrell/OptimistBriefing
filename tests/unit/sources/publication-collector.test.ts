@@ -402,6 +402,25 @@ describe("PublicationCollector", () => {
 });
 
 describe("RssAdapter feed normalization", () => {
+  it("decodes WAMU-style provider entities in RSS titles and descriptions", async () => {
+    const rssResult = await rssAdapterFor(
+      rssSource(),
+      `<?xml version="1.0"?><rss><channel><item>
+        <title><![CDATA[WAMU&#8217;s briefing]]></title>
+        <link>https://www.alignmentforum.org/posts/example/wamu</link>
+        <pubDate>Sat, 02 Aug 2026 12:00:00 GMT</pubDate>
+        <description><![CDATA[It&amp;#8217;s a provider update.]]></description>
+      </item></channel></rss>`,
+    ).collect(window);
+
+    const candidate = rssResult.candidates[0];
+    expect(candidate).toMatchObject({
+      title: "WAMU’s briefing",
+      abstract: "It’s a provider update.",
+    });
+    expect(JSON.stringify(candidate)).not.toMatch(/&#(?:x[0-9a-f]+|[0-9]+);/i);
+  });
+
   it("keeps an interpretable structured-link RSS entry when a malformed sibling is skipped", async () => {
     const rssResult = await rssAdapterFor(
       rssSource(),

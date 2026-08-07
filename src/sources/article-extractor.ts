@@ -3,6 +3,7 @@ import { parseHTML } from "linkedom";
 import { z } from "zod";
 
 import { assertSafeOutboundUrl } from "./outbound-url";
+import { normalizeProviderText } from "./provider-text";
 
 export const MAX_EXTRACTED_ARTICLE_CHARACTERS = 100_000;
 export const MIN_COMPLETE_ARTICLE_CHARACTERS = 500;
@@ -28,8 +29,7 @@ function metadataOnly(): ExtractedArticle {
 }
 
 function normalized(value: string | null | undefined): string | null {
-  const result = value?.replace(/\s+/g, " ").trim() ?? "";
-  return result.length === 0 ? null : result;
+  return normalizeProviderText(value);
 }
 
 function isHtmlContentType(contentType: string | null): boolean {
