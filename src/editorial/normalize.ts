@@ -154,12 +154,20 @@ function preparedTextArray(value: unknown): string[] {
     : [];
 }
 
-function preparedKey(value: string): string {
+function normalizedPreparedKey(value: string): string {
   return rawWhitespace(value)
     .toLocaleLowerCase("en-US")
     .replace(/[\p{P}\p{S}]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+export function normalizePreparedTitleKey(value: string): string {
+  return normalizedPreparedKey(value);
+}
+
+export function normalizePreparedAuthorKey(value: string): string {
+  return normalizedPreparedKey(value);
 }
 
 export function prepareRawCandidateForPipeline(
@@ -542,7 +550,7 @@ export function normalizePreparedCandidate(
       ...(metadataTopics === undefined ? {} : { topics: metadataTopics }),
       externalId: canonicalIdentifier(candidate.externalId),
       externalIds,
-      normalizedTitle: preparedKey(title),
+      normalizedTitle: normalizePreparedTitleKey(title),
       originalUrl: candidate.originalUrl,
       authors: uniqueSorted(
         candidate.authors
@@ -551,7 +559,7 @@ export function normalizePreparedCandidate(
       ),
       normalizedAuthors: uniqueSorted(
         candidate.authors
-          .map(preparedKey)
+          .map(normalizePreparedAuthorKey)
           .filter((author) => author.length > 0),
       ),
       institutions: uniqueSorted(

@@ -43,7 +43,10 @@ import { D1BriefingRepository } from "../../../src/db/d1-repository";
 import { FakeModelProvider } from "../../../src/models/fake-provider";
 import { OpenAIModelProvider } from "../../../src/models/openai-provider";
 import { clusterNews } from "../../../src/editorial/cluster";
-import { canonicalResearchIdentity } from "../../../src/editorial/research-identity";
+import {
+  canonicalResearchIdentity,
+  consolidateResearchCandidates,
+} from "../../../src/editorial/research-identity";
 import {
   researchFingerprints,
   triageResearch,
@@ -1269,7 +1272,7 @@ describe("manual editorial run", () => {
       }],
       normalizedText: "Checkpoint &#101;vidence for assessment.",
       metadata: {
-        authors: ["Checkpoint &#65;uthor"],
+        normalizedAuthors: ["&amp;#65;da Example"],
         institutions: ["Checkpoint &#73;nstitute"],
         providerTopics: ["&#73;nterpretability"],
         provenance: [structuralProvenance],
@@ -1360,9 +1363,7 @@ describe("manual editorial run", () => {
       ...structuralProvenance,
       sourceName: "Checkpoint & Source",
     }]);
-    expect(assessed.metadata.normalizedAuthors).toEqual([
-      "checkpoint author",
-    ]);
+    expect(assessed.metadata.normalizedAuthors).toEqual([]);
     expect(assessed.metadata.configuredTopics).toContain(
       "alignment-interpretability",
     );
@@ -1392,6 +1393,24 @@ describe("manual editorial run", () => {
       configuredTopics: CONFIGURED_RESEARCH_TOPIC_IDS,
       now,
     }).items).toHaveLength(1);
+    const staleIdentity = (id: string): Item => ItemSchema.parse({
+      ...assessed,
+      id,
+      canonicalUrl: `https://${id}.example/research`,
+      sourceRefs: assessed.sourceRefs.map((source) => ({
+        ...source,
+        id,
+        url: `https://${id}.example/source`,
+      })),
+      metadata: {
+        ...assessed.metadata,
+        externalIds: [],
+      },
+    });
+    expect(consolidateResearchCandidates([
+      staleIdentity("legacy-no-author-a"),
+      staleIdentity("legacy-no-author-b"),
+    ]).papers).toHaveLength(2);
     expect(JSON.stringify(
       (store.artifacts.get(`${context.runId}:normalize`) as
         CheckpointArtifact<readonly Item[]>).output,
@@ -1803,6 +1822,10 @@ describe("manual editorial run", () => {
         (source) => ({ ...source, name: "Legacy &amp;amp;#8217; Source" }),
       ),
       normalizedText: "Legacy &amp;amp;#8217; evidence.",
+      metadata: {
+        authors: ["Legacy &#65;uthor"],
+        normalizedAuthors: ["stale-author"],
+      },
     });
     const observed: Item[] = [];
     const context = fixturePipelineContext({
@@ -1864,6 +1887,10 @@ describe("manual editorial run", () => {
     expect(observed).toHaveLength(2);
     expect(observed[0]!.title).toBe("Legacy &#8217; item");
     expect(observed[0]!.metadata.workflow).toBeUndefined();
+    expect(observed[0]!.metadata.authors).toEqual(["Legacy Author"]);
+    expect(observed[0]!.metadata.normalizedAuthors).toEqual([
+      "legacy author",
+    ]);
     expect(observed[1]).toEqual(observed[0]);
   });
 

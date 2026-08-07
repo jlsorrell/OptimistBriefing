@@ -48,6 +48,17 @@ describe("research normalization", () => {
     );
   });
 
+  it("keeps a third-layer entity inert in the prepared title key", () => {
+    const normalized = normalizeCandidate(candidate({
+      title: "Interpretability &amp;amp;#8217; boundary",
+    }));
+
+    expect(normalized.title).toBe("Interpretability &#8217; boundary");
+    expect(normalized.metadata.normalizedTitle).toBe(
+      "interpretability 8217 boundary",
+    );
+  });
+
   it("keeps entity-like primary document URLs structural before canonicalization", () => {
     const normalized = normalizeCandidate(candidate({
       metadata: {

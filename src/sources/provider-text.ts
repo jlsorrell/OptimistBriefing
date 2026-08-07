@@ -50,13 +50,23 @@ export function truncateProviderTextAtCodePointBoundary(
   value: string,
   maximum: number,
 ): string {
-  if (value.length <= maximum) return value;
-  if (maximum === 0) return "";
-  const finalCodeUnit = value.charCodeAt(maximum - 1);
-  const end = finalCodeUnit >= 0xd800 && finalCodeUnit <= 0xdbff
-    ? maximum - 1
-    : maximum;
-  return value.slice(0, end);
+  if (maximum <= 0) return "";
+  const inspectedLength = Math.min(value.length, maximum);
+  const safe: string[] = [];
+  for (let index = 0; index < inspectedLength; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      if (index + 1 >= inspectedLength) continue;
+      const following = value.charCodeAt(index + 1);
+      if (following < 0xdc00 || following > 0xdfff) continue;
+      safe.push(String.fromCharCode(codeUnit, following));
+      index += 1;
+      continue;
+    }
+    if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) continue;
+    safe.push(String.fromCharCode(codeUnit));
+  }
+  return safe.join("");
 }
 
 export function normalizeProviderTextDetailed(

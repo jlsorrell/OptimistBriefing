@@ -16,8 +16,8 @@ import {
 } from "./deduplicate";
 import {
   canonicalizeUrl,
-  normalizeAuthorKey,
-  normalizeTitleKey,
+  normalizePreparedAuthorKey,
+  normalizePreparedTitleKey,
 } from "./normalize";
 
 const PROVIDER_NAMES = new Map([
@@ -159,12 +159,13 @@ function normalizedAuthors(item: Item): ReadonlySet<string> {
   const stored = stringArray(item.metadata.normalizedAuthors);
   const values = stored.length > 0
     ? stored
-    : stringArray(item.metadata.authors).map(normalizeAuthorKey);
+    : stringArray(item.metadata.authors).map(normalizePreparedAuthorKey);
   return new Set(values.filter((author) => author.length > 0));
 }
 
 function titleAndAuthorMatch(left: Item, right: Item): boolean {
-  return normalizeTitleKey(left.title) === normalizeTitleKey(right.title) &&
+  return normalizePreparedTitleKey(left.title) ===
+      normalizePreparedTitleKey(right.title) &&
     intersects(normalizedAuthors(left), normalizedAuthors(right));
 }
 

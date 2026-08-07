@@ -19,6 +19,7 @@ import { durableCollectedCandidate } from "../sources/durable-evidence";
 import {
   isPreparedRawCandidate,
   markPreparedRawCandidate,
+  normalizePreparedAuthorKey,
   normalizePreparedCandidate,
   prepareRawCandidateForPipeline,
 } from "../editorial/normalize";
@@ -1256,14 +1257,6 @@ function normalizedStoredDisplay(value: string): string {
   }) ?? "";
 }
 
-function normalizedStoredAuthorKey(value: string): string {
-  return value.normalize("NFKC")
-    .toLocaleLowerCase("en-US")
-    .replace(/[\p{P}\p{S}]+/gu, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
 function normalizedStoredArray(value: unknown): string[] {
   const seen = new Set<string>();
   const normalized: string[] = [];
@@ -1346,14 +1339,12 @@ function normalizedStoredItem(item: Item): Item {
   const title = normalizedStoredDisplay(item.title);
   const normalizedText = normalizeProviderText(item.normalizedText) ?? "";
   const authors = itemStringArray(metadata.authors);
-  if (Array.isArray(metadata.authors)) {
-    metadata.authors = authors;
-    metadata.normalizedAuthors = [...new Set(
-      authors.map(normalizedStoredAuthorKey).filter(
-        (author) => author.length > 0,
-      ),
-    )].sort((left, right) => left.localeCompare(right));
-  }
+  if (Array.isArray(metadata.authors)) metadata.authors = authors;
+  metadata.normalizedAuthors = [...new Set(
+    authors.map(normalizePreparedAuthorKey).filter(
+      (author) => author.length > 0,
+    ),
+  )].sort((left, right) => left.localeCompare(right));
   const research = item.kind === "paper" || item.kind === "blog";
   const configuredTopics = research
     ? mapResearchTopicIds([

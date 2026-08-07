@@ -122,4 +122,63 @@ describe("provider text normalization", () => {
       expect(truncated).not.toContain("&");
     }
   });
+
+  it.each([
+    {
+      name: "lone low surrogate at boundary",
+      value: "a\uDC00",
+      maximum: 2,
+      expected: "a",
+    },
+    {
+      name: "lone low surrogate in the interior",
+      value: "a\uDC00b",
+      maximum: 3,
+      expected: "ab",
+    },
+    {
+      name: "lone high surrogate at exact length",
+      value: "a\uD800",
+      maximum: 2,
+      expected: "a",
+    },
+    {
+      name: "valid pair within the bound",
+      value: "a😀b",
+      maximum: 3,
+      expected: "a😀",
+    },
+    {
+      name: "pair split by the bound",
+      value: "a😀b",
+      maximum: 2,
+      expected: "a",
+    },
+    { name: "zero bound", value: "😀", maximum: 0, expected: "" },
+  ])("sanitizes $name", ({ value, maximum, expected }) => {
+    const truncated = truncateProviderTextAtCodePointBoundary(value, maximum);
+
+    expect(truncated).toBe(expected);
+    expect(truncated.length).toBeLessThanOrEqual(maximum);
+    expect(truncated).not.toMatch(/[\uD800-\uDFFF]/u);
+  });
+
+  it("does not inspect code units beyond the truncation bound", () => {
+    const originalCharCodeAt = String.prototype.charCodeAt;
+    const inspected: number[] = [];
+    String.prototype.charCodeAt = function(index: number): number {
+      inspected.push(index);
+      return originalCharCodeAt.call(this, index);
+    };
+    try {
+      expect(truncateProviderTextAtCodePointBoundary("ab😀tail", 2)).toBe(
+        "ab",
+      );
+    } finally {
+      String.prototype.charCodeAt = originalCharCodeAt;
+    }
+
+    expect(inspected.length).toBeGreaterThan(0);
+    expect(Math.max(...inspected)).toBeLessThan(2);
+  });
 });

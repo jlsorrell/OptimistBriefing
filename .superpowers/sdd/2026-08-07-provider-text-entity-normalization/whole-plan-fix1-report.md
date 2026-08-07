@@ -461,6 +461,85 @@ Planned message: `fix: trust provider normalization checkpoint envelope`. The re
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 8
+
+Round 8 closes three post-preparation correctness gaps without changing the Round 7 Symbol or checkpoint-envelope lifecycle: Item identity keys no longer entity-decode prepared display text, legacy author keys are always freshly derived or cleared, and the shared truncator sanitizes malformed UTF-16 throughout its bounded prefix.
+
+### RED evidence
+
+Prepared-title identity and dedup regressions were added and run with:
+
+```sh
+npx vitest run tests/unit/editorial/normalize.test.ts tests/unit/editorial/research-identity.test.ts tests/unit/editorial/deduplicate.test.ts
+```
+
+Result: exit 1; research identity and news dedup each false-merged an Item whose visible prepared title retained `&#8217;` with an otherwise distinct plain title. The central `normalizedTitle` assertion passed immediately because Round 7 already used a no-decode internal key there.
+
+The legacy checkpoint regression was changed to omit `metadata.authors` while supplying an encoded stale `normalizedAuthors`, then run through the real Worker resume path. Result: exit 1; the stale array survived instead of becoming empty. The regression also constructs two authorless Items from the restored result and proves downstream consolidation must not use that stale identity.
+
+The truncator matrix was run with:
+
+```sh
+npx vitest run tests/unit/sources/provider-text.test.ts
+```
+
+Result: exit 1; three intended cases failed: a lone low surrogate at the boundary, a lone low surrogate in the interior, and a lone high surrogate at exact input length. Valid pairs, split pairs, zero bound, and bounded inspection characterized the existing correct behavior.
+
+An author-fallback mutation check temporarily restored the old decoding helper and ran the new focused regression. It failed by false-merging the inert third-layer author with the plain author; restoring the prepared helper made the same test pass.
+
+### Implementation
+
+- Added explicit `normalizePreparedTitleKey` and `normalizePreparedAuthorKey` helpers. They preserve the existing NFKC, case, punctuation/symbol, and whitespace key semantics but never entity-decode.
+- Central `normalizedTitle` and `normalizedAuthors`, research identity, news title similarity/dedup, exact paper-title comparison, and missing-derived-author fallbacks all use the prepared helpers. The raw-compatible `normalizeTitleKey` and `normalizeAuthorKey` APIs remain available only for genuinely raw callers.
+- Legacy restore now assigns `metadata.normalizedAuthors` on every Item. Once-normalized authors produce fresh sorted keys; absent authors produce `[]`, replacing any stale or encoded derived array without decoding it.
+- `truncateProviderTextAtCodePointBoundary` now scans at most `maximum` UTF-16 code units, copies ordinary units, copies only complete high+low pairs wholly inside the bound, and drops unpaired high or low surrogates anywhere in the inspected prefix. It performs no entity decode or Unicode normalization and emits no more than the requested number of code units.
+
+### Verification
+
+Focused key and truncator suites: 4 files and 61 tests passed.
+
+Focused Worker legacy/assessment selection: 3 tests passed; 75 unrelated tests were skipped.
+
+Affected source/editorial/workflow suites:
+
+```sh
+npx vitest run tests/unit/sources tests/unit/editorial tests/unit/workflow
+```
+
+Result: exit 0; 21 files and 510 tests passed.
+
+Full Worker suite:
+
+```sh
+npm run test:worker
+```
+
+Result: exit 0; 11 files and 215 tests passed, with only existing third-party missing-sourcemap warnings.
+
+Static, evaluation, build, and diff checks:
+
+```sh
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results: all exited 0; TypeScript passed, every golden relevance/identity/routing/grounding check passed, Vite built 53 modules, and the diff contained no whitespace errors.
+
+### Self-review
+
+- A repository-wide usage audit leaves raw `normalizeTitleKey`/`normalizeAuthorKey` definitions unused by post-preparation production paths. Every Item identity, title-similarity, dedup, and derived-author consumer uses the no-decode helpers.
+- Triple-layer title regressions assert both the visible inert entity and the literal hand-derived key (`interpretability 8217 boundary`), then verify no research or news false merge.
+- The author regression removes the normal derived-key field so it exercises the real fallback path; it does not merely assert fresh normalization metadata.
+- Legacy tests cover both branches: encoded authors replace a stale key with `legacy author`, while missing authors replace an encoded stale key with `[]` and cannot influence consolidation.
+- The surrogate tests cover low surrogates at boundary and interior, high surrogate at exact length, valid and split pairs, maximum zero, the existing 4,000/100,000 assessment boundaries, source-packet/commentary consumers through the Worker suite, and instrumented proof that `charCodeAt` never receives an index at or beyond the maximum.
+- Checkpoint envelope fields, preparation Symbol behavior, schemas, publication routing, preferred-institution matching, structural metadata, database state, and deployment scope are unchanged.
+
+### Concerns
+
+- None. Worker runs emit existing third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 7
 
 Round 7 makes provider-text preparation an orchestration-owned, normalize-once lifecycle rather than an adapter-by-adapter convention. Raw human text is bounded before collection persistence, decoded at most twice in one preparation boundary, routed only after that preparation, and then mapped to Items without another entity pass. Structural URLs, IDs, dates, roles, access flags, and arbitrary metadata remain untouched.
