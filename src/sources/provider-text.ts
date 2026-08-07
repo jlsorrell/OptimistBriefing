@@ -24,7 +24,10 @@ function decodePass(value: string): string {
 }
 
 export function decodeProviderTextEntities(value: string): string {
-  let decoded = value.slice(0, MAX_PROVIDER_TEXT_INPUT_CHARACTERS);
+  let decoded = truncateAtCodePointBoundary(
+    value,
+    MAX_PROVIDER_TEXT_INPUT_CHARACTERS,
+  );
   for (let pass = 0; pass < MAX_ENTITY_DECODE_PASSES; pass += 1) {
     const next = decodePass(decoded);
     if (next === decoded) break;
@@ -37,6 +40,19 @@ export type ProviderTextOptions = {
   stripHtml?: boolean;
   maxCharacters?: number;
 };
+
+function truncateAtCodePointBoundary(
+  value: string,
+  maximum: number,
+): string {
+  if (value.length <= maximum) return value;
+  let truncated = "";
+  for (const character of value) {
+    if (truncated.length + character.length > maximum) break;
+    truncated += character;
+  }
+  return truncated;
+}
 
 export function normalizeProviderText(
   value: string | null | undefined,
@@ -53,5 +69,7 @@ export function normalizeProviderText(
     ? decoded.replace(/<[^>]+>/g, " ")
     : decoded;
   const normalized = plain.normalize("NFKC").replace(/\s+/g, " ").trim();
-  return normalized.length === 0 ? null : normalized.slice(0, maximum);
+  return normalized.length === 0
+    ? null
+    : truncateAtCodePointBoundary(normalized, maximum);
 }

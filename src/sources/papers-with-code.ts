@@ -3,6 +3,7 @@ import { parseHTML } from "linkedom";
 import { SourceHttpClient } from "./http-client";
 import { normalizeArxivIdentifier } from "./identifiers";
 import { assertSafeOutboundUrl, type OutboundUrlPolicy } from "./outbound-url";
+import { normalizeProviderText } from "./provider-text";
 import {
   CollectionWindowSchema,
   RawPublicationCandidateSchema,
@@ -109,7 +110,7 @@ export class PapersWithCodeAdapter {
         } catch { return false; }
       });
       if (paperLink === undefined) return [];
-      const title = normalizedText(paperLink.textContent);
+      const title = normalizeProviderText(paperLink.textContent);
       let paperUrl: URL;
       try { paperUrl = assertSafeOutboundUrl(new URL(paperLink.getAttribute("href") ?? "", finalUrl), PAPERS_WITH_CODE_POLICY); } catch { return []; }
       const identifier = paperIdentity(paperUrl.pathname);

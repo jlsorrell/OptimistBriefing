@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 import type { SourceRecord } from "../../../src/db/repository";
+import { routePublication } from "../../../src/editorial/route-publication";
 import { durableCollectedCandidate } from "../../../src/sources/durable-evidence";
 import { SourceHttpClient } from "../../../src/sources/http-client";
 import { PapersWithCodeAdapter } from "../../../src/sources/papers-with-code";
@@ -523,6 +524,45 @@ describe("RssAdapter feed normalization", () => {
 });
 
 describe("PapersWithCodeAdapter", () => {
+  it("decodes topical provider text before publication routing", async () => {
+    const adapter = new PapersWithCodeAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          `<!doctype html><html><body><section>
+            <h2>Relevant papers</h2>
+            <article>
+              <a href="/paper/2608.12345">&amp;#105;nterpretability study results</a>
+              <time datetime="2026-08-02">August 2, 2026</time>
+            </article>
+          </section></body></html>`,
+          { headers: { "content-type": "text/html" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      ResearchSourceRecordSchema.parse(rssSource({
+        id: "papers-with-code-co",
+        canonicalName: "Papers with Code",
+        canonicalUrl: "https://paperswithcode.co/",
+        role: "analysis",
+        restrictions: {
+          bodyRetrieval: "permitted",
+          paywall: "none",
+          contentUse: "discovery-metadata-only",
+        },
+        sectionEligibility: ["research", "research_radar"],
+      })),
+    );
+
+    const candidate = (await adapter.collect(window))[0]!;
+    const routed = routePublication(candidate);
+
+    expect(candidate.title).toBe("interpretability study results");
+    expect(routed).toMatchObject({
+      topics: ["alignment-interpretability"],
+      metadata: { primarySection: "research" },
+    });
+  });
+
   it("parses only on-origin paper links into discovery-only identifiers and code metadata", async () => {
     const fixture = await loadFixture("papers-with-code-recent.html");
     const adapter = new PapersWithCodeAdapter(

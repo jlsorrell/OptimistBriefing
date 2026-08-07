@@ -18,6 +18,40 @@ describe("provider text normalization", () => {
     )).toBe("&#0; &#xD800; &#x110000; &#x1F; &copy; &unfinished");
   });
 
+  it("keeps C1 control references inert", () => {
+    expect(decodeProviderTextEntities("&#128; &#x9F;")).toBe(
+      "&#128; &#x9F;",
+    );
+  });
+
+  it("decodes the named apos reference", () => {
+    expect(decodeProviderTextEntities("it&apos;s")).toBe("it's");
+  });
+
+  it("inspects at most 100,000 input characters", () => {
+    const decoded = decodeProviderTextEntities(
+      `${"a".repeat(100_000)}&apos;outside`,
+    );
+
+    expect(decoded).toHaveLength(100_000);
+    expect(decoded.endsWith("outside")).toBe(false);
+  });
+
+  it("does not split a surrogate pair at the input inspection bound", () => {
+    const decoded = decodeProviderTextEntities(
+      `${"a".repeat(99_999)}😀outside`,
+    );
+
+    expect(decoded).toHaveLength(99_999);
+    expect(decoded).not.toMatch(/[\uD800-\uDFFF]/u);
+  });
+
+  it("leaves a third decode pass inert", () => {
+    expect(decodeProviderTextEntities("&amp;amp;#8217;")).toBe(
+      "&#8217;",
+    );
+  });
+
   it("returns bounded plain text after decoding and tag removal", () => {
     expect(normalizeProviderText(
       "&lt;script&gt;bad()&lt;/script&gt; &nbsp; useful   text",
@@ -28,5 +62,14 @@ describe("provider text normalization", () => {
   it("normalizes empty input to null", () => {
     expect(normalizeProviderText(" &nbsp; ")).toBeNull();
     expect(normalizeProviderText(null)).toBeNull();
+  });
+
+  it("truncates without retaining half of a surrogate pair", () => {
+    const normalized = normalizeProviderText("A😀B", {
+      maxCharacters: 2,
+    });
+
+    expect(normalized).toBe("A");
+    expect(normalized).not.toMatch(/[\uD800-\uDFFF]/u);
   });
 });

@@ -63,6 +63,19 @@ describe("research normalization", () => {
     ]);
   });
 
+  it("does not decode structural section metadata into a classification", () => {
+    const normalized = normalizeCandidate(candidate({
+      metadata: {
+        discoveryFamily: "arxiv",
+        primarySection: "&#114;esearch",
+      },
+    }));
+
+    expect(normalized.primaryTopic).toBe("general");
+    expect(normalized.tags).not.toContain("research");
+    expect(normalized.metadata.primarySection).toBe("&#114;esearch");
+  });
+
   it("uses decoded provider abstracts to map research topics", () => {
     const normalized = normalizeCandidate(candidate({
       abstract: "The report studies &#115;ecure computation.",

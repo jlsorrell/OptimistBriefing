@@ -1,4 +1,8 @@
-import { ItemSchema, type Item } from "../contracts/editorial";
+import {
+  EditionSectionSchema,
+  ItemSchema,
+  type Item,
+} from "../contracts/editorial";
 import {
   normalizeArxivIdentifier,
   normalizeDoi,
@@ -337,12 +341,14 @@ export function normalizeCandidate(raw: unknown): Item {
   const instanceMaterialFacts = structuredScopedFacts.map(
     ({ eventInstance: _eventInstance, ...fact }) => fact,
   );
-  const section =
+  const rawSection =
     typeof candidate.metadata.primarySection === "string"
-      ? normalizedWhitespace(candidate.metadata.primarySection)
+      ? rawWhitespace(candidate.metadata.primarySection)
       : typeof candidate.metadata.section === "string"
-        ? normalizedWhitespace(candidate.metadata.section)
+        ? rawWhitespace(candidate.metadata.section)
       : null;
+  const parsedSection = EditionSectionSchema.safeParse(rawSection);
+  const section = parsedSection.success ? parsedSection.data : null;
   const primaryTopic =
     configuredTopics[0] ??
     (typeof candidate.metadata.primaryTopic === "string"

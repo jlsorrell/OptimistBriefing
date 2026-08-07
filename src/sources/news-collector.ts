@@ -470,6 +470,9 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
       } catch {
         return [];
       }
+      const title = normalizeProviderText(item.title);
+      if (title === null) return [];
+      const abstract = normalizeProviderText(item.abstract);
       const metadata = {
         documentNumber: item.document_number,
         documentType: item.type ?? null,
@@ -481,26 +484,26 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
           sourceId: this.source.id,
           sourceName: this.source.canonicalName,
           sourceRole: this.source.role,
-          title: item.title,
+          title,
           originalUrl,
           externalId: `FederalRegister:${item.document_number}`,
           externalIds: [`FederalRegister:${item.document_number}`],
           publishedAt,
           retrievedAt: response.retrievedAt,
           accessLevel:
-            item.abstract === null || item.abstract === undefined
+            abstract === null
               ? "metadata"
               : "secondary",
           authors: [],
           institutions: [],
-          abstract: item.abstract ?? null,
+          abstract,
           content: null,
           relatedPaperIds: [],
           canCorroborateFacts: canCorroborateFacts(this.source.role),
           ...deriveNewsSignals({
             kind: "document",
-            title: item.title,
-            abstract: item.abstract ?? null,
+            title,
+            abstract,
             content: null,
             originalUrl,
             sectionEligibility:

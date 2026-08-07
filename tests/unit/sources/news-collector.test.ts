@@ -164,6 +164,33 @@ async function newsCollectorWithFixtures() {
 }
 
 describe("NewsCollector", () => {
+  it("decodes GDELT provider text before deriving news signals", async () => {
+    const adapter = new GdeltAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({
+          articles: [{
+            url: "https://news.example.com/artificial-intelligence-rule",
+            title: "artificial&#32;intelligence regulation advances",
+            seendate: "20260729T081500Z",
+            domain: "news.example.com",
+            language: "English",
+            sourcecountry: "United States",
+          }],
+        })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      gdeltSource,
+      { query: "AI policy", maxRecords: 1 },
+    );
+
+    const candidate = (await adapter.collect(fixedWindow()))[0]!;
+
+    expect(candidate.title).toBe(
+      "artificial intelligence regulation advances",
+    );
+    expect(candidate.metadata.primarySection).toBe("ai_policy");
+  });
+
   it("retains direct local results when a discovery adapter fails", async () => {
     const localNews = await loadFixture("local-news.xml");
     const directSource = source({
@@ -860,6 +887,57 @@ describe("catalog-driven news collection", () => {
       sectionEligibility: ["ai_policy"],
       primaryDocumentUrl:
         "https://www.federalregister.gov/documents/2026/07/29/2026-12345/secure-evaluation-requirements",
+    });
+  });
+
+  it("decodes Federal Register text before deriving news signals", async () => {
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({
+          results: [{
+            document_number: "2026-encoded",
+            title: "artificial&#32;intelligence regulation notice",
+            html_url:
+              "https://www.federalregister.gov/documents/2026/07/29/2026-encoded/ai-regulation",
+            publication_date: "2026-07-29",
+            type: "Notice",
+            abstract:
+              "The agency&amp;#8217;s artificial intelligence regulation applies nationally.",
+          }],
+        })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      sources: [
+        catalogSource({
+          id: "federal-register",
+          canonicalName: "Federal Register",
+          canonicalUrl: "https://www.federalregister.gov/",
+          role: "primary",
+          discoveryMechanism: "api",
+          sectionEligibility: ["ai_policy"],
+          restrictions: {
+            bodyRetrieval: "permitted",
+            paywall: "none",
+            contentUse: "open-government",
+            apiUrl:
+              "https://www.federalregister.gov/api/v1/documents.json",
+            apiFormat: "federal-register-v1",
+            urlPolicy: policy("www.federalregister.gov", [
+              "/api/v1/documents.json",
+              "/documents/",
+            ]),
+          },
+        }),
+      ],
+    });
+
+    const candidate = (await collector.collect(fixedWindow())).candidates[0]!;
+
+    expect(candidate).toMatchObject({
+      title: "artificial intelligence regulation notice",
+      abstract:
+        "The agency’s artificial intelligence regulation applies nationally.",
+      metadata: { primarySection: "ai_policy" },
     });
   });
 
