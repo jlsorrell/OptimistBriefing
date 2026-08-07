@@ -106,6 +106,7 @@ import type {
 } from "../contracts/editorial";
 import {
   PIPELINE_STEPS,
+  PROVIDER_TEXT_NORMALIZATION_VERSION,
   CollectedCandidateSchema,
   SummaryRejectionEventSchema,
   WorkflowItemPayloadSchema,
@@ -395,7 +396,15 @@ const ARTIFACT_KEYS = new Set([
   "durationMs",
   "itemCount",
   "estimatedCostUsd",
+  "providerTextNormalizationVersion",
 ]);
+const REQUIRED_ARTIFACT_KEYS = [
+  "output",
+  "attempts",
+  "durationMs",
+  "itemCount",
+  "estimatedCostUsd",
+] as const;
 
 function parseCheckpointArtifact(
   step: (typeof PIPELINE_STEPS)[number],
@@ -407,10 +416,21 @@ function parseCheckpointArtifact(
   const record = value as Record<string, unknown>;
   const keys = Object.keys(record);
   if (
-    keys.length !== ARTIFACT_KEYS.size ||
+    REQUIRED_ARTIFACT_KEYS.some((key) => !Object.hasOwn(record, key)) ||
     keys.some((key) => !ARTIFACT_KEYS.has(key))
   ) {
     throw new TypeError("Checkpoint artifact has unknown or missing fields.");
+  }
+  const providerTextNormalizationVersion =
+    record.providerTextNormalizationVersion === undefined
+      ? undefined
+      : z.literal(PROVIDER_TEXT_NORMALIZATION_VERSION).parse(
+          record.providerTextNormalizationVersion,
+        );
+  if (step === "collect" && providerTextNormalizationVersion !== undefined) {
+    throw new TypeError(
+      "Collect checkpoint artifacts cannot be marked provider-text normalized.",
+    );
   }
   return {
     output: checkpointOutputSchema(step).parse(record.output),
@@ -418,6 +438,9 @@ function parseCheckpointArtifact(
     durationMs: ArtifactDurationSchema.parse(record.durationMs),
     itemCount: ArtifactItemCountSchema.parse(record.itemCount),
     estimatedCostUsd: ArtifactCostSchema.parse(record.estimatedCostUsd),
+    ...(providerTextNormalizationVersion === undefined
+      ? {}
+      : { providerTextNormalizationVersion }),
   };
 }
 
@@ -842,6 +865,15 @@ export class D1PipelineStore implements PipelineStore {
       if (artifacts.some(({ output }) => !Array.isArray(output))) {
         throw new Error(`INVALID_CHECKPOINT_CHUNKS:${step}`);
       }
+      if (
+        artifacts.some(
+          (artifact) =>
+            artifact.providerTextNormalizationVersion !==
+            first.providerTextNormalizationVersion,
+        )
+      ) {
+        throw new Error(`INVALID_CHECKPOINT_CHUNKS:${step}`);
+      }
       try {
         return parseCheckpointArtifact(step, {
           ...first,
@@ -1057,7 +1089,11 @@ export async function ensurePipelineRun(
 }
 
 function workflowPayload(item: Item): WorkflowItemPayload {
-  return WorkflowItemPayloadSchema.parse(item.metadata.workflow);
+  const {
+    providerTextNormalizationVersion: _legacyItemMarker,
+    ...payload
+  } = WorkflowItemPayloadSchema.parse(item.metadata.workflow);
+  return payload;
 }
 
 function withoutWorkflowEmbedding(item: Item): Item {
@@ -1166,17 +1202,12 @@ function normalizedCandidate(candidate: CollectedCandidate): Item | null {
     normalizedWithLineage,
     research.success
       ? {
-          providerTextNormalizationVersion:
-            PROVIDER_TEXT_NORMALIZATION_VERSION,
           rawResearch: compactResearchCandidate(
             normalizedWithLineage,
             research.data,
           ),
         }
-      : {
-          providerTextNormalizationVersion:
-            PROVIDER_TEXT_NORMALIZATION_VERSION,
-        },
+      : {},
   );
 }
 
@@ -1185,8 +1216,6 @@ function normalizedStoredDisplay(value: string): string {
     maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
   }) ?? "";
 }
-
-const PROVIDER_TEXT_NORMALIZATION_VERSION = 1;
 
 function normalizedStoredArray(value: unknown): string[] {
   const seen = new Set<string>();
@@ -1249,29 +1278,10 @@ function normalizedStoredItem(item: Item): Item {
   });
 }
 
-function hasNormalizedStoredWorkflow(item: Item): boolean {
-  const parsed = WorkflowItemPayloadSchema.safeParse(item.metadata.workflow);
-  if (
-    !parsed.success ||
-    parsed.data.providerTextNormalizationVersion !==
-      PROVIDER_TEXT_NORMALIZATION_VERSION
-  ) {
-    return false;
-  }
-  const development = parsed.data.development;
-  return development === undefined || (
-    hasNormalizedStoredWorkflow(development.representativeItem) &&
-    development.items.every((nestedItem) =>
-      hasNormalizedStoredWorkflow(nestedItem)
-    )
-  );
-}
-
 function normalizedStoredWorkflowItem(
   item: Item,
   ensureWorkflow = false,
 ): Item {
-  if (hasNormalizedStoredWorkflow(item)) return item;
   const normalizedStored = normalizedStoredItem(item);
   if (
     normalizedStored.metadata.workflow === undefined &&
@@ -1301,8 +1311,6 @@ function normalizedStoredWorkflowItem(
   return withWorkflowPayload(
     normalizedStored,
     {
-      providerTextNormalizationVersion:
-        PROVIDER_TEXT_NORMALIZATION_VERSION,
       ...(existing?.rawResearch === undefined
         ? {}
         : {
@@ -2882,12 +2890,7 @@ function normalizedRestoredCheckpointOutput(
 ): unknown {
   switch (step) {
     case "collect":
-      return (output as readonly CollectedCandidate[]).map((candidate) => {
-        const stored = ItemSchema.safeParse(candidate);
-        return stored.success
-          ? normalizedStoredWorkflowItem(stored.data, true)
-          : candidate;
-      });
+      return output;
     case "normalize":
     case "enrich":
     case "prefilter":
@@ -2916,10 +2919,35 @@ function normalizedRestoredCheckpointOutput(
 function restoredCheckpointOutput<T>(
   step: PipelineStep,
   schema: z.ZodType<T, z.ZodTypeDef, unknown>,
-  output: unknown,
+  artifact: CheckpointArtifact<unknown>,
 ): T {
-  const parsed = schema.parse(output);
+  const parsed = schema.parse(artifact.output);
+  if (
+    artifact.providerTextNormalizationVersion ===
+    PROVIDER_TEXT_NORMALIZATION_VERSION
+  ) {
+    return parsed;
+  }
   return schema.parse(normalizedRestoredCheckpointOutput(step, parsed));
+}
+
+function checkpointHasNormalizedProviderText(step: PipelineStep): boolean {
+  switch (step) {
+    case "normalize":
+    case "enrich":
+    case "prefilter":
+    case "assess":
+    case "score":
+    case "cluster":
+    case "shortlist":
+    case "synthesize":
+    case "validate":
+      return true;
+    case "collect":
+    case "compose":
+    case "publish":
+      return false;
+  }
 }
 
 async function currentRun(context: PipelineContext): Promise<PipelineRun> {
@@ -2973,7 +3001,7 @@ async function checkpoint<T>(
           failureCode: null,
         });
       }
-      return restoredCheckpointOutput(step, outputSchema, artifact.output);
+      return restoredCheckpointOutput(step, outputSchema, artifact);
     }
     const attempt = await context.store.beginAttempt(context.runId, step);
     const startedAt = Date.parse(context.now());
@@ -2992,6 +3020,12 @@ async function checkpoint<T>(
       durationMs: Math.max(0, Date.parse(context.now()) - startedAt),
       itemCount: countOutput(output),
       estimatedCostUsd,
+      ...(checkpointHasNormalizedProviderText(step)
+        ? {
+            providerTextNormalizationVersion:
+              PROVIDER_TEXT_NORMALIZATION_VERSION,
+          }
+        : {}),
     };
     await context.store.saveCheckpoint(context.runId, step, artifact);
     const storedRun = await context.store.getRun(context.runId) ?? run;
@@ -3018,7 +3052,7 @@ async function readCheckpointOutput<T>(
 ): Promise<T> {
   const artifact = await context.store.readArtifact(context.runId, step);
   if (artifact === null) throw new Error(`MISSING_CHECKPOINT_ARTIFACT:${step}`);
-  return restoredCheckpointOutput(step, schema, artifact.output);
+  return restoredCheckpointOutput(step, schema, artifact);
 }
 
 async function collectAndNormalize(

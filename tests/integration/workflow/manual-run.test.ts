@@ -1450,6 +1450,306 @@ describe("manual editorial run", () => {
     expect(packet).not.toContain("&#");
   });
 
+  it("ignores a fresh Item's spoofed workflow normalization marker", async () => {
+    const store = new FixtureStore();
+    const legacyRaw = rawResearchCandidate(
+      "2607.spoofed-marker",
+      "Fresh &amp;amp;#8217; research",
+    );
+    const spoofed = ItemSchema.parse({
+      ...fixtureItem("spoofed-marker-research", "research"),
+      title: "Fresh &amp;amp;#8217; research",
+      sourceRefs: [{
+        ...fixtureItem("spoofed-marker-source", "research").sourceRefs[0]!,
+        id: "arxiv",
+        name: "Fresh &amp;amp;#8217; Source",
+        url: legacyRaw.originalUrl,
+      }],
+      normalizedText: "Fresh &amp;amp;#8217; evidence.",
+      metadata: {
+        workflow: {
+          version: 1,
+          providerTextNormalizationVersion: 1,
+          rawResearch: legacyRaw,
+        },
+      },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-19",
+      runId: "run-spoofed-item-marker",
+      store,
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [spoofed],
+    });
+    context.enrich = async () => {
+      throw new Error("STOP_AFTER_NORMALIZE");
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_NORMALIZE",
+    );
+
+    const artifact = store.artifacts.get(
+      `${context.runId}:normalize`,
+    ) as CheckpointArtifact<readonly Item[]>;
+    const normalized = artifact.output[0]!;
+    expect(normalized.title).toBe("Fresh &#8217; research");
+    expect(normalized.sourceRefs[0]!.name).toBe("Fresh &#8217; Source");
+    expect(normalized.normalizedText).toBe("Fresh &#8217; evidence.");
+  });
+
+  it("trusts a current synthesis envelope without changing workflow-less nested Items", async () => {
+    const store = new FixtureStore();
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-20",
+      runId: "run-current-synthesis-envelope",
+      store,
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [
+        rawNewsCandidate("current-envelope-development", "world"),
+      ],
+    });
+    const collected = await context.collect();
+    const [normalized] = await context.normalize(collected);
+    const enriched = ItemSchema.parse({
+      ...normalized!,
+      metadata: {
+        ...normalized!.metadata,
+        workflow: {
+          ...(normalized!.metadata.workflow as Record<string, unknown>),
+          embedding: [1, 0],
+          personalRelevance: 0.8,
+        },
+      },
+    });
+    const [scored] = await context.score([enriched]);
+    const [clustered] = await context.cluster([scored!]);
+    const workflow = structuredClone(
+      clustered!.metadata.workflow as Record<string, unknown>,
+    ) as Record<string, unknown> & {
+      development: {
+        items: Item[];
+        representativeItem: Item;
+      };
+    };
+    const nested = workflow.development.items[0]!;
+    const encodedWorkflowlessNested = ItemSchema.parse({
+      ...nested,
+      title: "Current &#8217; nested report",
+      sourceRefs: nested.sourceRefs.map((source) => ({
+        ...source,
+        name: "Current &#8217; nested source",
+      })),
+      normalizedText: "Current &#8217; nested evidence.",
+      metadata: Object.fromEntries(
+        Object.entries(nested.metadata).filter(([key]) => key !== "workflow"),
+      ),
+    });
+    workflow.development = {
+      ...workflow.development,
+      items: [encodedWorkflowlessNested],
+      representativeItem: encodedWorkflowlessNested,
+    };
+    const shortlisted = ItemSchema.parse({
+      ...clustered!,
+      metadata: {
+        ...clustered!.metadata,
+        section: "world",
+        workflow: {
+          ...workflow,
+          section: "world",
+          selectionReasons: ["Fixture selection."],
+        },
+      },
+    });
+    const observed: Item[] = [];
+    context.validate = async (entries) => {
+      const restoredWorkflow = entries[0]!.item.metadata.workflow as {
+        development: { items: Item[] };
+      };
+      observed.push(structuredClone(restoredWorkflow.development.items[0]!));
+      throw new Error("STOP_AFTER_SYNTHESIS_RESTORE");
+    };
+    await store.createRun({
+      id: context.runId,
+      editionDate: context.editionDate,
+      status: "retryable",
+      currentStep: "synthesize",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const stageOutputs = new Map<string, unknown>([
+      ["collect", collected],
+      ["normalize", [normalized]],
+      ["enrich", [enriched]],
+      ["prefilter", [enriched]],
+      ["assess", [enriched]],
+      ["score", [scored]],
+      ["cluster", [shortlisted]],
+      ["shortlist", [shortlisted]],
+    ]);
+    for (const [step, output] of stageOutputs) {
+      await store.saveCheckpoint(context.runId, step, {
+        output,
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 1,
+        estimatedCostUsd: 0,
+      });
+    }
+    await store.saveCheckpoint(context.runId, "synthesize", {
+      output: [{ item: shortlisted, summary: fixtureSummary(shortlisted) }],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 1,
+      estimatedCostUsd: 0,
+      providerTextNormalizationVersion: 1,
+    });
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_SYNTHESIS_RESTORE",
+    );
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_SYNTHESIS_RESTORE",
+    );
+
+    expect(observed).toHaveLength(2);
+    expect(observed[0]!.title).toBe("Current &#8217; nested report");
+    expect(observed[0]!.sourceRefs[0]!.name).toBe(
+      "Current &#8217; nested source",
+    );
+    expect(observed[0]!.normalizedText).toBe(
+      "Current &#8217; nested evidence.",
+    );
+    expect(observed[0]!.metadata.workflow).toBeUndefined();
+    expect(observed[1]).toEqual(observed[0]);
+  });
+
+  it("promotes a legacy checkpoint graph to a stable current envelope", async () => {
+    const store = new FixtureStore();
+    const legacy = ItemSchema.parse({
+      ...fixtureItem("legacy-envelope-item", "world"),
+      title: "Legacy &amp;amp;#8217; item",
+      sourceRefs: fixtureItem("legacy-envelope-source", "world").sourceRefs.map(
+        (source) => ({ ...source, name: "Legacy &amp;amp;#8217; Source" }),
+      ),
+      normalizedText: "Legacy &amp;amp;#8217; evidence.",
+    });
+    const observed: Item[] = [];
+    const context = fixturePipelineContext({
+      editionDate: "2033-01-21",
+      runId: "run-legacy-envelope-promotion",
+    });
+    context.store = store;
+    context.enrich = async (items) => items;
+    context.prefilter = async (items) => {
+      observed.push(structuredClone(items[0]!));
+      throw new Error("STOP_AFTER_ENRICH_RESTORE");
+    };
+    await store.createRun({
+      id: context.runId,
+      editionDate: context.editionDate,
+      status: "retryable",
+      currentStep: "normalize",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await store.saveCheckpoint(context.runId, "collect", {
+      output: [],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 0,
+      estimatedCostUsd: 0,
+    });
+    await store.saveCheckpoint(context.runId, "normalize", {
+      output: [legacy],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 1,
+      estimatedCostUsd: 0,
+    });
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_ENRICH_RESTORE",
+    );
+    const legacyArtifact = store.artifacts.get(
+      `${context.runId}:normalize`,
+    ) as CheckpointArtifact<readonly Item[]>;
+    const currentArtifact = store.artifacts.get(
+      `${context.runId}:enrich`,
+    ) as CheckpointArtifact<readonly Item[]> & {
+      providerTextNormalizationVersion?: number;
+    };
+    expect(legacyArtifact.output[0]!.title).toBe(
+      "Legacy &amp;amp;#8217; item",
+    );
+    expect(currentArtifact.providerTextNormalizationVersion).toBe(1);
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_ENRICH_RESTORE",
+    );
+
+    expect(observed).toHaveLength(2);
+    expect(observed[0]!.title).toBe("Legacy &#8217; item");
+    expect(observed[0]!.metadata.workflow).toBeUndefined();
+    expect(observed[1]).toEqual(observed[0]);
+  });
+
+  it("marks normalized checkpoints but never marks the raw collect artifact", async () => {
+    const store = new FixtureStore();
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-22",
+      runId: "run-checkpoint-envelope-labels",
+      store,
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [
+        rawResearchCandidate(
+          "2607.envelope-labels",
+          "Raw &amp; collected research",
+        ),
+      ],
+    });
+    context.enrich = async () => {
+      throw new Error("STOP_AFTER_NORMALIZE");
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_NORMALIZE",
+    );
+
+    const collectArtifact = store.artifacts.get(
+      `${context.runId}:collect`,
+    ) as CheckpointArtifact<unknown> & {
+      providerTextNormalizationVersion?: number;
+    };
+    const normalizeArtifact = store.artifacts.get(
+      `${context.runId}:normalize`,
+    ) as CheckpointArtifact<unknown> & {
+      providerTextNormalizationVersion?: number;
+    };
+    expect(collectArtifact.providerTextNormalizationVersion).toBeUndefined();
+    expect(JSON.stringify(collectArtifact.output)).toContain("Raw &amp;");
+    expect(normalizeArtifact.providerTextNormalizationVersion).toBe(1);
+  });
+
   it("rejects a corrupt durable composition checkpoint before publication", async () => {
     const fixture = fixturePipelineContext({
       editionDate: "2033-01-01",

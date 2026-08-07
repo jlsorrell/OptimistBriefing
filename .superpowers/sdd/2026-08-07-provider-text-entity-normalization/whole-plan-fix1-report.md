@@ -382,3 +382,81 @@ Planned message: `fix: normalize legacy workflow checkpoints`. The resulting SHA
 ### Concerns
 
 - The final reviewer follow-up did not return within its bounded interval and was stopped. The reviewer-raised marker collision is covered by a tightened red/green regression, and the fresh affected, integration, typecheck, build, and diff checks all pass. Worker runs emit existing third-party missing-sourcemap warnings.
+
+## Whole-plan Fix Round 5
+
+Round 5 replaces Item-owned normalization trust with an orchestration-owned checkpoint envelope. Legacy artifacts remain readable without a migration, fresh provider Items cannot authorize a normalization bypass, and current artifact graphs—including workflow-less nested development Items—are restored byte-stably without another decode.
+
+### RED evidence
+
+Four required regressions were added before production changes and run with:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "ignores a fresh Item's spoofed|trusts a current synthesis envelope|promotes a legacy checkpoint graph|marks normalized checkpoints"
+```
+
+Result: exit 1; all four tests failed for their intended reasons:
+
+- a fresh schema-valid Item carrying the Round 4 workflow marker bypassed normalization and retained triple-encoded title, source name, and evidence;
+- a current-version synthesis artifact was decoded again because the checkpoint envelope was ignored, changing workflow-less nested display text;
+- the first downstream checkpoint written from a legacy restored graph had no trusted envelope version;
+- the normalize checkpoint had no current marker, although the raw collect checkpoint correctly had none.
+
+### GREEN evidence
+
+The same focused command exited 0 with all 4 tests passing. The combined Round 4 and Round 5 boundary command exited 0 with all 9 tests passing.
+
+Affected unit suites:
+
+```sh
+npx vitest run tests/unit/sources/provider-text.test.ts tests/unit/editorial/normalize.test.ts tests/unit/editorial/route-publication.test.ts tests/unit/editorial/research-triage.test.ts tests/unit/sources/publication-collector.test.ts tests/unit/sources/research-collector.test.ts tests/unit/sources/news-collector.test.ts tests/unit/sources/news-signals.test.ts tests/unit/editorial/pipeline.test.ts tests/unit/workflow/source-packet.test.ts tests/unit/workflow/schedule.test.ts
+```
+
+Result: exit 0; 11 test files passed, 249 tests passed.
+
+Full manual workflow integration suite:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts
+```
+
+Result: exit 0; all 73 tests passed. The run emitted existing third-party missing-sourcemap warnings only.
+
+Static verification:
+
+```sh
+npm run check
+npm run build
+git diff --check
+```
+
+Results: all exited 0 after correcting three test-only concrete-store annotations; `tsc --noEmit` passed, Vite built 53 modules, and the diff contained no whitespace errors.
+
+### Files changed
+
+- `src/workflow/run-editorial-pipeline.ts`
+- `src/workflow/types.ts`
+- `tests/integration/workflow/manual-run.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+
+### Commit
+
+Planned message: `fix: trust provider normalization checkpoint envelope`. The resulting SHA is recorded in the task handoff.
+
+### Self-review
+
+- `CheckpointArtifact` has one optional, literal-valued provider-text normalization version. Missing values remain valid legacy records; no database column, historical event, or stored artifact is rewritten.
+- D1 artifact parsing still rejects unknown or missing base fields, validates the optional version, rejects a normalization marker on `collect`, and requires chunked artifacts to agree on the envelope version before merging.
+- Orchestration writes the current envelope only for `normalize` through `validate`. Raw `collect` and non-Item `compose`/`publish` artifacts are never labeled provider-text normalized.
+- Restore first parses the original stage schema. A current trusted envelope returns that parsed graph unchanged. A missing legacy envelope normalizes the known Item graph once in memory and revalidates it; the stored legacy artifact remains unchanged.
+- The separate normalize-artifact read used by composition consumes the full checkpoint envelope and therefore follows the same current-versus-legacy decision.
+- Collect restoration deliberately preserves raw candidates and Items. Fresh entry into the normalize stage always invokes Item normalization, including after a collect retry.
+- The old workflow marker remains schema-compatible only as inert legacy data. `workflowPayload` removes it whenever a workflow is rebuilt, and no code consults it for trust or bypass decisions.
+- Envelope-level idempotence preserves workflow absence in fixture/custom Items and nested development Items. Current synthesis restoration is tested twice and remains byte-stable.
+- A legacy normalize artifact is tested across two resumes: the first downstream artifact receives the current envelope, the historical artifact retains its original bytes, and restoring the new artifact does not decode again.
+- Round 3/4 compaction, preferred-institution fallback, array bounds, provenance display-only normalization, and nested development traversal remain covered by the combined regressions and full suite.
+- No deployment, canary, database migration, history rewrite, or unrelated source change was performed.
+
+### Concerns
+
+- None. Worker runs emit existing third-party missing-sourcemap warnings.
