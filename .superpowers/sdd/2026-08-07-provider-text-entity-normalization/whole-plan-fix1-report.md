@@ -460,3 +460,70 @@ Planned message: `fix: trust provider normalization checkpoint envelope`. The re
 ### Concerns
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
+
+## Whole-plan Fix Round 6
+
+Round 6 closes the scoped review's D1 coverage gap with characterization tests against the real checkpoint parser, audit-event storage, chunk serialization, and chunk merge paths. No implementation defect was found, so production code is unchanged.
+
+### Characterization evidence
+
+Three D1-backed tests were added before any production change and run with:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "rejects a normalized envelope on a D1 collect|rejects D1 checkpoint chunks with inconsistent|round trips a current normalization envelope"
+```
+
+Result: exit 0; all 3 tests passed immediately against the Round 5 implementation. This is recorded as immediate-green characterization coverage rather than a fabricated bugfix RED cycle.
+
+The tests exercise these public/storage behaviors:
+
+- `D1PipelineStore.saveCheckpoint` rejects a `collect` artifact carrying `providerTextNormalizationVersion` and persists no checkpoint row;
+- two real `workflow_checkpoint` audit rows in one chunk group, one legacy and one current, cause `D1PipelineStore.readArtifact` to reject with `INVALID_CHECKPOINT_CHUNKS:normalize`;
+- a 500-item current normalize artifact is split into multiple D1 rows, every row retains version `1`, and `readArtifact` reconstructs the exact artifact including its envelope version.
+
+Mutation rationale: the first test fails if the collect-stage parser guard is removed, the second fails if chunk-version agreement is removed, and the third fails if serialization or chunk merging drops the trusted envelope.
+
+### Verification
+
+Full D1/manual workflow suite:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts
+```
+
+Result: exit 0; all 76 tests passed.
+
+Round 4/5 checkpoint-boundary selection: exit 0; all 9 tests passed.
+
+Affected unit suites: exit 0; 11 test files and 249 tests passed.
+
+Static verification:
+
+```sh
+npm run check
+npm run build
+git diff --check
+```
+
+Results: all exited 0; `tsc --noEmit` passed, Vite built 53 modules, and the diff contained no whitespace errors.
+
+### Files changed
+
+- `tests/integration/workflow/manual-run.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+
+### Commit
+
+Planned message: `test: cover D1 normalization checkpoint envelopes`. The resulting SHA is recorded in the task handoff.
+
+### Self-review
+
+- All three regressions use `createD1PipelineStore(env.DB)` and the real D1 audit schema; none use `FixtureStore`, private parser exports, or parser mocks.
+- The inconsistent-chunk test inserts only the corrupt external state that the public writer cannot produce, then verifies rejection through the public reader.
+- The normal round-trip test proves actual chunking by requiring more than one persisted checkpoint row before asserting exact artifact reconstruction.
+- Literal expected version values and exact restored artifacts are derived independently of serializer/parser helpers.
+- No production file, schema, deployment, database migration, history, or unrelated test was changed.
+
+### Concerns
+
+- None. Worker runs emit existing third-party missing-sourcemap warnings.

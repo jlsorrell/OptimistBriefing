@@ -20,7 +20,10 @@ import {
   type PipelineRun,
   type PipelineStore,
 } from "../../../src/workflow/run-editorial-pipeline";
-import type { CheckpointArtifact } from "../../../src/workflow/types";
+import {
+  PROVIDER_TEXT_NORMALIZATION_VERSION,
+  type CheckpointArtifact,
+} from "../../../src/workflow/types";
 import { createApp, type WorkflowLauncher } from "../../../src/api/app";
 import {
   createD1PipelineStore,
@@ -3417,6 +3420,145 @@ describe("manual editorial run", () => {
     expect(JSON.stringify(clustered)).not.toContain('"embedding"');
     expect(JSON.stringify(shortlisted)).not.toContain('"embedding"');
   });
+
+  it("rejects a normalized envelope on a D1 collect checkpoint", async () => {
+    const runId = "run-d1-reject-normalized-collect";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-03-01",
+      status: "running",
+      currentStep: "collect",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+
+    await expect(store.saveCheckpoint(runId, "collect", {
+      output: [rawResearchCandidate(
+        "2608.invalid-collect-envelope",
+        "Raw collect checkpoint",
+      )],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 1,
+      estimatedCostUsd: 0,
+      providerTextNormalizationVersion:
+        PROVIDER_TEXT_NORMALIZATION_VERSION,
+    })).rejects.toThrow(
+      "Collect checkpoint artifacts cannot be marked provider-text normalized.",
+    );
+    expect(await store.readArtifact(runId, "collect")).toBeNull();
+  });
+
+  it("rejects D1 checkpoint chunks with inconsistent normalization envelopes", async () => {
+    const runId = "run-d1-mixed-normalization-chunks";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-03-02",
+      status: "running",
+      currentStep: "normalize",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const checkpointId = "mixed-normalization-envelope";
+    const items = [
+      fixtureItem("mixed-envelope-a", "world"),
+      fixtureItem("mixed-envelope-b", "technology"),
+    ];
+    const events = items.map((item, chunkIndex) => JSON.stringify({
+      step: "normalize",
+      checkpointId,
+      chunkIndex,
+      chunkCount: 2,
+      artifact: {
+        output: [item],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 2,
+        estimatedCostUsd: 0,
+        ...(chunkIndex === 0
+          ? {}
+          : {
+              providerTextNormalizationVersion:
+                PROVIDER_TEXT_NORMALIZATION_VERSION,
+            }),
+      },
+    }));
+    await env.DB.batch(events.map((eventJson, chunkIndex) =>
+      env.DB.prepare(
+        `INSERT INTO audit_events (
+          id, run_id, event_type, event_json, created_at
+        ) VALUES (?, ?, 'workflow_checkpoint', ?, ?)`,
+      ).bind(
+        `${checkpointId}:${chunkIndex}`,
+        runId,
+        eventJson,
+        now,
+      )
+    ));
+
+    await expect(store.readArtifact(runId, "normalize")).rejects.toThrow(
+      "INVALID_CHECKPOINT_CHUNKS:normalize",
+    );
+  });
+
+  it("round trips a current normalization envelope through D1 checkpoint chunks", async () => {
+    const runId = "run-d1-current-normalization-chunks";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-03-03",
+      status: "running",
+      currentStep: "normalize",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const items = Array.from({ length: 500 }, (_, index) => ({
+      ...fixtureItem(`current-envelope-chunk-${index}`, "world"),
+      normalizedText:
+        `CURRENT_ENVELOPE_${String(index).padStart(3, "0")} ` +
+        "é".repeat(3_000),
+    }));
+    const artifact: CheckpointArtifact<readonly Item[]> = {
+      output: items,
+      attempts: 1,
+      durationMs: 25,
+      itemCount: items.length,
+      estimatedCostUsd: 0.25,
+      providerTextNormalizationVersion:
+        PROVIDER_TEXT_NORMALIZATION_VERSION,
+    };
+
+    await store.saveCheckpoint(runId, "normalize", artifact);
+
+    const rows = await env.DB.prepare(
+      `SELECT event_json
+       FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'`,
+    ).bind(runId).all<{ event_json: string }>();
+    expect(rows.results.length).toBeGreaterThan(1);
+    expect(rows.results.every(({ event_json: eventJson }) =>
+      (JSON.parse(eventJson) as {
+        artifact?: { providerTextNormalizationVersion?: unknown };
+      }).artifact?.providerTextNormalizationVersion === 1
+    )).toBe(true);
+    await expect(store.readArtifact(runId, "normalize")).resolves.toEqual(
+      artifact,
+    );
+  }, 30_000);
 
   it("keeps every 500-item worst-case D1 checkpoint below the encoded row limit", async () => {
     const families = [
