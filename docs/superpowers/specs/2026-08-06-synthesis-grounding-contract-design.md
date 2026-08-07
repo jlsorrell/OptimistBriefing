@@ -121,9 +121,9 @@ bound, replace it with the single canonical `SCHEMA_INVALID:root` instruction.
 
 The repair guidance must cover these code families:
 
-- `UNGROUNDED_PROSE:<field>`: copy the field exactly from one cited source title
-  or excerpt, and make provenance evidence an exact substring from the same
-  cited source;
+- `UNGROUNDED_PROSE:<field>`: copy the field exactly from its provenance
+  evidence, and make that evidence an exact substring of the title or a
+  numbered excerpt of every cited source;
 - `CLAIM_EVIDENCE_NOT_EXACT`: cite only sources whose numbered excerpts contain
   the exact evidence text; use one source when only one contains it;
 - `EVIDENCE_NOT_FOUND:<index>`: copy evidence exactly from a numbered excerpt of
