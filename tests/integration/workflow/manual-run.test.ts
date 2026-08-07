@@ -400,6 +400,59 @@ class ConcurrencyTrackingSummaryProvider implements ModelProvider {
   }
 }
 
+class TitleRepairingSummaryProvider implements ModelProvider {
+  readonly requests: GenerateObjectRequest[] = [];
+  readonly embedRequests: (readonly string[])[] = [];
+
+  async embed(
+    texts: readonly string[],
+  ): Promise<readonly (readonly number[])[]> {
+    this.embedRequests.push([...texts]);
+    return texts.map(() => [1, 0]);
+  }
+
+  async generateObject(input: GenerateObjectRequest): Promise<unknown> {
+    this.requests.push(input);
+    const sourceId = packetValue(input.sourcePacket, "source_id");
+    const title = packetValue(input.sourcePacket, "title");
+    const evidence = packetExcerpt(input.sourcePacket);
+    const repairing = input.sourcePacket.startsWith(
+      "VALIDATION ERRORS AND REQUIRED REPAIRS",
+    );
+    const provenance = {
+      sourceIds: [sourceId],
+      evidenceExcerpt: repairing ? title : evidence,
+    };
+    return {
+      title: repairing ? title : "Unsupported paraphrased headline",
+      oneSentence: evidence,
+      whyItMatters: evidence,
+      uncertainty: evidence,
+      claims: [{
+        text: evidence,
+        sourceIds: [sourceId],
+        evidenceExcerpt: evidence,
+      }],
+      accessLevel: packetAccessLevel(input.sourcePacket),
+      provenance: {
+        title: provenance,
+        oneSentence: {
+          sourceIds: [sourceId],
+          evidenceExcerpt: evidence,
+        },
+        whyItMatters: {
+          sourceIds: [sourceId],
+          evidenceExcerpt: evidence,
+        },
+        uncertainty: {
+          sourceIds: [sourceId],
+          evidenceExcerpt: evidence,
+        },
+      },
+    };
+  }
+}
+
 class WrongSourceGroundingProvider implements ModelProvider {
   async embed(
     texts: readonly string[],
@@ -518,9 +571,9 @@ class UnknownSourceThenAcceptanceProvider implements ModelProvider {
         whyItMatters: evidence,
         uncertainty: evidence,
         claims: [{
-          text: evidence,
-          sourceIds: [this.unknownSourceId],
-          evidenceExcerpt: evidence,
+          text: "Unsupported model claim",
+          sourceIds: [sourceId, this.unknownSourceId],
+          evidenceExcerpt: "Unsupported model evidence",
         }],
         accessLevel,
         provenance: {
@@ -2933,9 +2986,12 @@ describe("manual editorial run", () => {
     ).bind(runId).first<{ event_json: string }>();
 
     expect(event).not.toBeNull();
-    expect(JSON.parse(event!.event_json)).toMatchObject({
-      errors: expect.arrayContaining(["UNKNOWN_SOURCE"]),
-    });
+    expect(JSON.parse(event!.event_json).errors).toEqual([
+      "CLAIM_EVIDENCE_NOT_EXACT",
+      "EVIDENCE_NOT_FOUND:0",
+      "UNGROUNDED_CLAIM:0",
+      "UNKNOWN_SOURCE",
+    ]);
     expect(event!.event_json).not.toContain(maliciousSourceId);
     expect(event!.event_json).not.toContain(
       encodeURIComponent(maliciousSourceId),
@@ -2983,8 +3039,9 @@ describe("manual editorial run", () => {
     );
   });
 
-  it("rejects malformed synthesis rejection events before writing SQL", async () => {
-    // This fails if malformed diagnostics reach the audit table.
+  it("rejects invalid event envelopes and fail-closes malformed rejection codes", async () => {
+    // This fails if invalid envelopes are stored or malformed codes are not
+    // replaced by the shared deterministic fallback.
     const runId = "run-bounded-synthesis-rejection";
     const store = createD1PipelineStore(env.DB);
     await store.createRun({
@@ -3006,17 +3063,20 @@ describe("manual editorial run", () => {
         event: unknown,
       ) => Promise<void>;
     };
-    const invalidEvents = [
-      {
+    await expect(
+      recorder.recordSummaryRejection(runId, "invalid-envelope", {
         section: "not-a-section",
         errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
         createdAt: now,
-      },
+      }),
+    ).rejects.toBeDefined();
+
+    const malformedEvents = [
       {
         section: "world",
         errors: Array.from(
           { length: 65 },
-          () => "CLAIM_EVIDENCE_NOT_EXACT",
+          (_, index) => `UNGROUNDED_CLAIM:${index}`,
         ),
         createdAt: now,
       },
@@ -3027,16 +3087,21 @@ describe("manual editorial run", () => {
       },
     ];
 
-    for (const event of invalidEvents) {
+    for (const [index, event] of malformedEvents.entries()) {
       await expect(
-        recorder.recordSummaryRejection(runId, "transient-item-id", event),
-      ).rejects.toBeDefined();
+        recorder.recordSummaryRejection(runId, `malformed-${index}`, event),
+      ).resolves.toBeUndefined();
     }
     const events = await env.DB.prepare(
-      `SELECT id FROM audit_events
+      `SELECT event_json FROM audit_events
        WHERE run_id = ? AND event_type = 'summary_rejected'`,
-    ).bind(runId).all<{ id: string }>();
-    expect(events.results).toEqual([]);
+    ).bind(runId).all<{ event_json: string }>();
+    expect(events.results.map(({ event_json }) =>
+      JSON.parse(event_json).errors
+    )).toEqual([
+      ["SCHEMA_INVALID:root"],
+      ["SCHEMA_INVALID:root"],
+    ]);
   });
 
   it("fails closed when recording a synthesis rejection fails", async () => {
@@ -3554,6 +3619,113 @@ describe("manual editorial run", () => {
 
     await expect(context.synthesize(normalized)).resolves.toHaveLength(2);
     expect(summary.maximumActive).toBe(1);
+  });
+
+  it("repairs canary-like extractive titles", async () => {
+    // This fails if production qualification or clustering drops a canary
+    // candidate, shortlist reservation moves qualified research behind news,
+    // title repair exceeds one attempt, or repaired summaries fail downstream
+    // validation and coverage composition.
+    const provider = new TitleRepairingSummaryProvider();
+    const assessment = new FakeModelProvider({
+      generatedObjects: Array.from(
+        { length: 2 },
+        () => researchAssessment,
+      ),
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-03-13",
+      runId: "canary-like-title-repair",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: provider,
+        assessment,
+      },
+      collectCandidates: async () => [
+        {
+          ...rawResearchCandidate(
+            "2607.30001",
+            "Research title Alpha absent from the abstract",
+            20,
+          ),
+          abstract: "Alpha research evidence supports oversight, although long-term effects remain uncertain.",
+        },
+        {
+          ...rawResearchCandidate(
+            "2607.30002",
+            "Research title Beta absent from the abstract",
+            10,
+          ),
+          abstract: "Beta research evidence supports evaluation, although implementation remains uncertain.",
+        },
+        rawNewsCandidate("canary-world", "world"),
+        rawNewsCandidate("canary-technology", "technology"),
+        rawNewsCandidate("canary-ai-policy", "ai_policy"),
+        rawNewsCandidate("canary-dmv", "dmv"),
+        rawNewsCandidate("canary-baltimore", "baltimore"),
+        {
+          ...rawNewsCandidate("canary-world-second", "world"),
+          title: "Canary reserve opens a separate public service program",
+        },
+      ],
+    });
+    const collected = await context.collect();
+    const normalized = await context.normalize(collected);
+    const enriched = await context.enrich(normalized);
+    const prefiltered = await context.prefilter(enriched);
+    const assessed = await context.assess(prefiltered);
+    const scored = await context.score(assessed);
+    const clustered = await context.cluster(scored);
+    const shortlisted = await context.shortlist(clustered);
+
+    expect(collected).toHaveLength(8);
+    expect(normalized).toHaveLength(8);
+    expect(new Set(normalized.map(({ id }) => id)).size).toBe(8);
+    expect(prefiltered).toHaveLength(8);
+    expect(assessed).toHaveLength(8);
+    expect(assessment.generateRequests).toHaveLength(2);
+    expect(provider.embedRequests).toHaveLength(1);
+    expect(provider.embedRequests[0]).toHaveLength(11);
+    expect(clustered).toHaveLength(8);
+    expect(shortlisted).toHaveLength(8);
+    expect(shortlisted.filter(({ kind }) => kind === "paper")).toHaveLength(2);
+    expect(shortlisted.slice(0, 2).map(({ title }) => title)).toEqual([
+      "Research title Alpha absent from the abstract",
+      "Research title Beta absent from the abstract",
+    ]);
+
+    const summaries = await context.synthesize(shortlisted);
+    const validated = await context.validate(summaries);
+    const composition = await composeEdition(context, validated, normalized);
+
+    expect(summaries).toHaveLength(8);
+    expect(summaries.filter(({ item }) => item.kind === "paper")).toHaveLength(2);
+    expect(provider.requests).toHaveLength(16);
+    expect(provider.requests.filter(({ sourcePacket }) =>
+      sourcePacket.startsWith("VALIDATION ERRORS AND REQUIRED REPAIRS")
+    )).toHaveLength(8);
+    expect(summaries.every(({ summary, item }) =>
+      summary.title === item.title
+    )).toBe(true);
+    for (let index = 0; index < 8; index += 1) {
+      expect(provider.requests[index * 2]?.sourcePacket.startsWith(
+        "VALIDATION ERRORS AND REQUIRED REPAIRS",
+      )).toBe(false);
+      expect(provider.requests[index * 2 + 1]?.sourcePacket).toContain(
+        "UNGROUNDED_PROSE:title",
+      );
+    }
+    expect(validated).toHaveLength(8);
+    expect(validated.every(({ valid }) => valid)).toBe(true);
+    expect(composition).toMatchObject({
+      status: "published",
+      missingSections: [],
+    });
+    expect(composition.entries).toHaveLength(8);
+    expect(composition.entries.map(({ summary }) => summary.title)).toEqual(
+      shortlisted.map(({ title }) => title),
+    );
   });
 
   it("drops hard-stop uncached assessment and caps degraded calls before 120-token radar synthesis", async () => {

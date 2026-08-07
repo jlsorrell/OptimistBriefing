@@ -592,6 +592,115 @@ describe("validateSummary", () => {
     );
   });
 
+  it("accepts prominent provenance copied from every cited source title", () => {
+    const sourceTitle = "A source title absent from excerpt bodies";
+    const fixture = summaryFixture();
+    const result = validateSummary(
+      summaryFixture({
+        title: sourceTitle,
+        provenance: {
+          ...fixture.provenance,
+          title: {
+            sourceIds: ["source-1"],
+            evidenceExcerpt: sourceTitle,
+          },
+        },
+      }),
+      sourcePacketFixture({
+        sources: [{
+          ...sourcePacketFixture().sources[0]!,
+          title: sourceTitle,
+        }],
+      }),
+    );
+
+    expect(result.ok).toBe(true);
+  });
+
+  it("rejects prominent provenance found only in an uncited source title", () => {
+    const uncitedTitle = "Title supplied only by the uncited source";
+    const fixture = summaryFixture();
+    const result = validateSummary(
+      summaryFixture({
+        title: uncitedTitle,
+        provenance: {
+          ...fixture.provenance,
+          title: {
+            sourceIds: ["source-1"],
+            evidenceExcerpt: uncitedTitle,
+          },
+        },
+      }),
+      sourcePacketFixture({
+        sources: [
+          sourcePacketFixture().sources[0]!,
+          {
+            ...sourcePacketFixture().sources[0]!,
+            sourceId: "uncited",
+            title: uncitedTitle,
+            url: "https://example.com/uncited",
+          },
+        ],
+      }),
+    );
+
+    expect(result.errors).toContain("UNGROUNDED_PROSE:title");
+  });
+
+  it("requires prominent provenance evidence in every cited source", () => {
+    const sharedTitle = "Title supplied by only one cited source";
+    const fixture = summaryFixture();
+    const result = validateSummary(
+      summaryFixture({
+        title: sharedTitle,
+        provenance: {
+          ...fixture.provenance,
+          title: {
+            sourceIds: ["source-1", "source-2"],
+            evidenceExcerpt: sharedTitle,
+          },
+        },
+      }),
+      sourcePacketFixture({
+        sources: [
+          {
+            ...sourcePacketFixture().sources[0]!,
+            title: sharedTitle,
+          },
+          {
+            ...sourcePacketFixture().sources[0]!,
+            sourceId: "source-2",
+            title: "A different source title",
+            url: "https://example.com/source-2",
+          },
+        ],
+      }),
+    );
+
+    expect(result.errors).toContain("UNGROUNDED_PROSE:title");
+  });
+
+  it("does not allow a source title to ground a factual claim", () => {
+    const sourceTitle = "A title-only factual assertion";
+    const result = validateSummary(
+      summaryFixture({
+        claims: [{
+          text: sourceTitle,
+          sourceIds: ["source-1"],
+          evidenceExcerpt: sourceTitle,
+        }],
+      }),
+      sourcePacketFixture({
+        sources: [{
+          ...sourcePacketFixture().sources[0]!,
+          title: sourceTitle,
+        }],
+      }),
+    );
+
+    expect(result.errors).toContain("EVIDENCE_NOT_FOUND:0");
+  });
+
   it("rejects a cited paraphrase that is not extractively supported", () => {
     const result = validateSummary(
       summaryFixture({

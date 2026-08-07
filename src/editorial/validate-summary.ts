@@ -350,6 +350,20 @@ function normalizedText(value: string): string {
     .trim();
 }
 
+function prominentEvidenceMatchesSource(
+  evidence: string,
+  source: SourcePacket["sources"][number],
+): boolean {
+  const normalizedEvidence = normalizedText(evidence);
+  if (normalizedEvidence.length === 0) {
+    return false;
+  }
+  return [source.title, ...source.excerpts.map(({ text }) => text)]
+    .some((candidate) =>
+      normalizedText(candidate).includes(normalizedEvidence)
+    );
+}
+
 export function claimEvidenceMatchesAllSources(
   evidenceExcerpt: string,
   sourceIds: readonly string[],
@@ -741,14 +755,16 @@ export function validateSummary(
       normalizedEvidence.length === 0
         ? []
         : citedSources.filter((source) =>
-            source.excerpts.some((excerpt) =>
-              normalizedText(excerpt.text).includes(
-                normalizedEvidence,
-              ),
+            prominentEvidenceMatchesSource(
+              provenance.evidenceExcerpt,
+              source,
             ),
           );
+    const evidenceMatchesEveryCitedSource =
+      citedSources.length > 0 &&
+      evidenceSources.length === citedSources.length;
     if (
-      evidenceSources.length === 0 ||
+      !evidenceMatchesEveryCitedSource ||
       !extractivelySupports(
         prose,
         provenance.evidenceExcerpt,

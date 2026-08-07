@@ -3,6 +3,8 @@ import {
   type StructuredSummary,
 } from "../contracts/editorial";
 import type { ModelProvider } from "../models/provider";
+import { canonicalSummaryRejectionCodes } from "./summary-rejection-code";
+import { buildSummaryRepairGuidance } from "./summary-repair-guidance";
 import {
   serializeSourcePacket,
   SourcePacketSchema,
@@ -14,10 +16,17 @@ const GROUNDING_SYSTEM_PROMPT = `Use only the supplied source packet.
 Every factual claim must cite one or more supplied source IDs.
 State uncertainty and disagreement.
 Do not imply full-paper access when access_level is abstract or metadata.
-Copy concise supported wording exactly from cited source titles or excerpts for every factual claim and prominent field.
-Copy uncertainty exactly from cited source titles or excerpts.
+For each prominent field, provenance evidence must appear in the title or a numbered excerpt of every cited source.
+For each factual claim, evidence must appear in a numbered excerpt of every cited source; source titles alone do not ground claims.
 For forecast items, prefix one prose field with "Forecast, not fact."; this fixed editorial label does not require source support, but all remaining prose does.
 Return only data matching the supplied JSON schema.`;
+
+const PROMINENT_FIELD_DESCRIPTION =
+  "Copy wording exactly from a cited source title or numbered excerpt in every cited source.";
+const PROMINENT_EVIDENCE_DESCRIPTION =
+  "Provide exact evidence from the title or a numbered excerpt of every cited source.";
+const CLAIM_EVIDENCE_DESCRIPTION =
+  "Copy exact evidence from a numbered excerpt of every cited source; source titles alone do not ground claims.";
 
 const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
   type: "object",
@@ -35,30 +44,28 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
     title: {
       type: "string",
       minLength: 1,
-      description:
-        "Copy a concise exact substring from a cited source title or excerpt.",
+      description: PROMINENT_FIELD_DESCRIPTION,
     },
     oneSentence: {
       type: "string",
       minLength: 1,
-      description:
-        "Copy one concise supported sentence exactly from a cited source excerpt.",
+      description: PROMINENT_FIELD_DESCRIPTION,
     },
     whyItMatters: {
       type: "string",
       minLength: 1,
-      description:
-        "Copy concise supported wording exactly from a cited source excerpt.",
+      description: PROMINENT_FIELD_DESCRIPTION,
     },
     uncertainty: {
       type: "string",
       minLength: 1,
-      description:
-        "Copy uncertainty exactly from a cited source title or excerpt.",
+      description: PROMINENT_FIELD_DESCRIPTION,
     },
     claims: {
       type: "array",
       minItems: 1,
+      description:
+        "For each factual claim, evidence must appear in a numbered excerpt of every cited source; source titles alone do not ground claims.",
       items: {
         type: "object",
         additionalProperties: false,
@@ -68,7 +75,7 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
             type: "string",
             minLength: 1,
             description:
-              "Copy the factual assertion exactly from its cited evidence excerpt or source.",
+              "Copy the factual assertion exactly from its evidence or cited source text; evidence must come from a numbered excerpt of every cited source.",
           },
           sourceIds: {
             type: "array",
@@ -79,6 +86,7 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
             type: "string",
             minLength: 1,
             maxLength: 800,
+            description: CLAIM_EVIDENCE_DESCRIPTION,
           },
         },
       },
@@ -90,6 +98,8 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
     provenance: {
       type: "object",
       additionalProperties: false,
+      description:
+        "For each prominent field, evidence must be exact wording from the title or a numbered excerpt of every cited source.",
       required: [
         "title",
         "oneSentence",
@@ -115,6 +125,7 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
               type: "string",
               minLength: 1,
               maxLength: 800,
+              description: PROMINENT_EVIDENCE_DESCRIPTION,
             },
           },
         },
@@ -136,6 +147,7 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
               type: "string",
               minLength: 1,
               maxLength: 800,
+              description: PROMINENT_EVIDENCE_DESCRIPTION,
             },
           },
         },
@@ -157,6 +169,7 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
               type: "string",
               minLength: 1,
               maxLength: 800,
+              description: PROMINENT_EVIDENCE_DESCRIPTION,
             },
           },
         },
@@ -178,8 +191,7 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
               type: "string",
               minLength: 1,
               maxLength: 800,
-              description:
-                "Provide non-whitespace evidence copied from the cited source.",
+              description: PROMINENT_EVIDENCE_DESCRIPTION,
             },
           },
         },
@@ -203,8 +215,8 @@ function repairPacket(
   sourcePacket: string,
 ): string {
   return [
-    "VALIDATION ERRORS",
-    ...errors.map((error) => `- ${error}`),
+    "VALIDATION ERRORS AND REQUIRED REPAIRS",
+    buildSummaryRepairGuidance(errors),
     "",
     "ORIGINAL SOURCE PACKET",
     sourcePacket,
@@ -243,10 +255,10 @@ Repair every listed validation error. Do not add unsupported claims.`,
     return StructuredSummarySchema.parse(repaired);
   }
 
-  throw new SummaryRejectedError([
-    ...new Set([
+  throw new SummaryRejectedError(
+    canonicalSummaryRejectionCodes([
       ...initialValidation.errors,
       ...repairValidation.errors,
     ]),
-  ]);
+  );
 }
