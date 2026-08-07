@@ -199,6 +199,11 @@ export function normalizeCandidate(raw: unknown): Item {
   const content = candidate.content === null
     ? null
     : normalizeProviderText(candidate.content);
+  const selectedNormalizedText = candidate.content !== null
+    ? content ?? ""
+    : candidate.abstract !== null
+      ? abstract ?? ""
+      : title;
   const canonicalUrl = candidateCanonicalUrl(
     candidate.originalUrl,
     candidate.metadata,
@@ -398,7 +403,7 @@ export function normalizeCandidate(raw: unknown): Item {
       ...stringArray(candidate.metadata.tags),
       ...(section === null ? [] : [section]),
     ]),
-    normalizedText: content ?? abstract ?? title,
+    normalizedText: selectedNormalizedText,
     metadata: {
       ...candidate.metadata,
       externalId: canonicalIdentifier(candidate.externalId),

@@ -86,6 +86,20 @@ describe("research normalization", () => {
     );
   });
 
+  it("fails closed for selected blank evidence while falling back for absent evidence", () => {
+    const blankAbstract = normalizeCandidate(candidate({
+      abstract: "   ",
+      content: null,
+    }));
+    const absentEvidence = normalizeCandidate(candidate({
+      abstract: null,
+      content: null,
+    }));
+
+    expect(blankAbstract.normalizedText).toBe("");
+    expect(absentEvidence.normalizedText).toBe("A normalized paper");
+  });
+
   it("stores conservative author keys and primary research source IDs", () => {
     const paper = normalizeCandidate(candidate());
     const commentary = normalizeCandidate(candidate({

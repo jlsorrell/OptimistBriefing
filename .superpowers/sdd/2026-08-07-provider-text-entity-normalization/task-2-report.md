@@ -127,6 +127,67 @@ Result: exit 0; `tsc --noEmit` passed.
 
 - None.
 
+## Fix Round 3
+
+Normalizing a non-null evidence field can produce `null` for whitespace-only text. The earlier nullish coalescing then incorrectly treated that normalized result as absent and fell back to the title. This round restores the original raw-field precedence: a non-null `content` or `abstract` remains selected and fails closed to an empty normalized value; title fallback occurs only when both source fields are null.
+
+### TDD evidence
+
+RED command:
+
+```sh
+npx vitest run tests/unit/editorial/normalize.test.ts -t "selected blank evidence"
+```
+
+Result: exit 1. A candidate with `content: null` and `abstract: "   "` produced the title instead of an empty `normalizedText`.
+
+GREEN command:
+
+```sh
+npx vitest run tests/unit/editorial/normalize.test.ts -t "selected blank evidence"
+```
+
+Result: exit 0; 1 targeted test passed.
+
+Task 2 focused/adjacent command:
+
+```sh
+npx vitest run tests/unit/sources/provider-text.test.ts tests/unit/editorial/normalize.test.ts tests/unit/sources/publication-collector.test.ts tests/unit/sources/news-collector.test.ts
+```
+
+Result: exit 0; 4 test files passed, 61 tests passed.
+
+Affected worker regression command:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "attributes invalid research, access overclaims, and uncached assessment caps"
+```
+
+Result: exit 0; 1 targeted worker test passed. The run emitted existing third-party missing-sourcemap warnings, but no test failures.
+
+Typecheck command:
+
+```sh
+npm run check
+```
+
+Result: exit 0; `tsc --noEmit` passed.
+
+### Files changed
+
+- `src/editorial/normalize.ts`
+- `tests/unit/editorial/normalize.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/task-2-report.md`
+
+### Self-review
+
+- `normalizedText` now selects by raw `content`/`abstract` nullish presence, then uses the decoded normalized value or an empty string.
+- Content-over-abstract-over-title precedence, entity decoding, material text, topic mapping, URL boundaries, and extraction behavior remain unchanged.
+
+### Concerns
+
+- None. Non-fatal missing-sourcemap warnings came from third-party dependencies during the worker test.
+
 ## Fix Round 2
 
 Fix Round 1 correctly protected structural arrays, including `primaryDocumentUrls`, but its raw-only shared array helper also stopped normalizing human-readable provider topics. This round introduces a dedicated provider-topic array path while retaining raw structural-array processing.
