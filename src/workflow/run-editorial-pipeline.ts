@@ -67,6 +67,7 @@ import { OpenAlexAdapter } from "../sources/openalex";
 import { ResearchCollector } from "../sources/research-collector";
 import { normalizeProviderText } from "../sources/provider-text";
 import {
+  MAX_PROVIDER_ARRAY_ITEMS,
   MAX_PROVIDER_TITLE_CHARACTERS,
   RawNewsCandidateSchema,
   RawPublicationCandidateSchema,
@@ -1123,21 +1124,7 @@ function upstreamCandidateIdentity(
 function normalizedCandidate(candidate: CollectedCandidate): Item | null {
   const storedItem = ItemSchema.safeParse(candidate);
   if (storedItem.success) {
-    const normalizedStored = normalizedStoredItem(storedItem.data);
-    const existing = normalizedStored.metadata.workflow === undefined
-      ? null
-      : workflowPayload(normalizedStored);
-    return withWorkflowPayload(
-      normalizedStored,
-      existing?.rawResearch === undefined
-        ? {}
-        : {
-            rawResearch: compactResearchCandidate(
-              normalizedStored,
-              existing.rawResearch,
-            ),
-          },
-    );
+    return normalizedStoredWorkflowItem(storedItem.data, true);
   }
   const publication = RawPublicationCandidateSchema.safeParse(candidate);
   const routed = publication.success
@@ -1179,25 +1166,43 @@ function normalizedCandidate(candidate: CollectedCandidate): Item | null {
     normalizedWithLineage,
     research.success
       ? {
+          providerTextNormalizationVersion:
+            PROVIDER_TEXT_NORMALIZATION_VERSION,
           rawResearch: compactResearchCandidate(
             normalizedWithLineage,
             research.data,
           ),
         }
-      : {},
+      : {
+          providerTextNormalizationVersion:
+            PROVIDER_TEXT_NORMALIZATION_VERSION,
+        },
   );
 }
 
+function normalizedStoredDisplay(value: string): string {
+  return normalizeProviderText(value, {
+    maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+  }) ?? "";
+}
+
+const PROVIDER_TEXT_NORMALIZATION_VERSION = 1;
+
+function normalizedStoredArray(value: unknown): string[] {
+  const seen = new Set<string>();
+  const normalized: string[] = [];
+  for (const entry of itemStringArray(value)) {
+    const display = normalizedStoredDisplay(entry);
+    if (display.length === 0 || seen.has(display)) continue;
+    seen.add(display);
+    normalized.push(display);
+    if (normalized.length === MAX_PROVIDER_ARRAY_ITEMS) break;
+  }
+  return normalized;
+}
+
 function normalizedStoredItem(item: Item): Item {
-  const normalizedDisplay = (value: string): string =>
-    normalizeProviderText(value, {
-      maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
-    }) ?? "";
-  const normalizedArray = (value: unknown): string[] =>
-    itemStringArray(value)
-      .map(normalizedDisplay)
-      .filter((entry) => entry.length > 0);
-  const metadata = { ...item.metadata };
+  const metadata: Record<string, unknown> = { ...item.metadata };
   for (const key of [
     "authors",
     "institutions",
@@ -1206,7 +1211,7 @@ function normalizedStoredItem(item: Item): Item {
     "topics",
   ] as const) {
     if (Array.isArray(metadata[key])) {
-      metadata[key] = normalizedArray(metadata[key]);
+      metadata[key] = normalizedStoredArray(metadata[key]);
     }
   }
   if (typeof metadata.venue === "string") {
@@ -1214,16 +1219,101 @@ function normalizedStoredItem(item: Item): Item {
       maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
     });
   }
+  if (Array.isArray(metadata.provenance)) {
+    metadata.provenance = metadata.provenance.map((entry) => {
+      if (
+        entry === null ||
+        typeof entry !== "object" ||
+        Array.isArray(entry) ||
+        typeof (entry as Record<string, unknown>).sourceName !== "string"
+      ) {
+        return entry;
+      }
+      return {
+        ...(entry as Record<string, unknown>),
+        sourceName: normalizedStoredDisplay(
+          (entry as Record<string, unknown>).sourceName as string,
+        ),
+      };
+    });
+  }
   return ItemSchema.parse({
     ...item,
-    title: normalizedDisplay(item.title),
+    title: normalizedStoredDisplay(item.title),
     sourceRefs: item.sourceRefs.map((source) => ({
       ...source,
-      name: normalizedDisplay(source.name),
+      name: normalizedStoredDisplay(source.name),
     })),
     normalizedText: normalizeProviderText(item.normalizedText) ?? "",
     metadata,
   });
+}
+
+function hasNormalizedStoredWorkflow(item: Item): boolean {
+  const parsed = WorkflowItemPayloadSchema.safeParse(item.metadata.workflow);
+  if (
+    !parsed.success ||
+    parsed.data.providerTextNormalizationVersion !==
+      PROVIDER_TEXT_NORMALIZATION_VERSION
+  ) {
+    return false;
+  }
+  const development = parsed.data.development;
+  return development === undefined || (
+    hasNormalizedStoredWorkflow(development.representativeItem) &&
+    development.items.every((nestedItem) =>
+      hasNormalizedStoredWorkflow(nestedItem)
+    )
+  );
+}
+
+function normalizedStoredWorkflowItem(
+  item: Item,
+  ensureWorkflow = false,
+): Item {
+  if (hasNormalizedStoredWorkflow(item)) return item;
+  const normalizedStored = normalizedStoredItem(item);
+  if (
+    normalizedStored.metadata.workflow === undefined &&
+    !ensureWorkflow
+  ) {
+    return normalizedStored;
+  }
+  const existing = normalizedStored.metadata.workflow === undefined
+    ? null
+    : workflowPayload(normalizedStored);
+  const development = existing?.development === undefined
+    ? undefined
+    : NewsDevelopmentSchema.parse({
+        ...existing.development,
+        title: normalizedStoredDisplay(existing.development.title),
+        items: existing.development.items.map((nestedItem) =>
+          normalizedStoredWorkflowItem(nestedItem)
+        ),
+        representativeItem: normalizedStoredWorkflowItem(
+          existing.development.representativeItem,
+        ),
+        sourceRefs: existing.development.sourceRefs.map((source) => ({
+          ...source,
+          name: normalizedStoredDisplay(source.name),
+        })),
+      });
+  return withWorkflowPayload(
+    normalizedStored,
+    {
+      providerTextNormalizationVersion:
+        PROVIDER_TEXT_NORMALIZATION_VERSION,
+      ...(existing?.rawResearch === undefined
+        ? {}
+        : {
+            rawResearch: compactResearchCandidate(
+              normalizedStored,
+              existing.rawResearch,
+            ),
+          }),
+      ...(development === undefined ? {} : { development }),
+    },
+  );
 }
 
 function compactResearchCandidate(
@@ -1233,6 +1323,11 @@ function compactResearchCandidate(
   const sourceName = item.sourceRefs.find(
     ({ id }) => id === research.sourceId,
   )?.name ?? item.sourceRefs[0]?.name ?? research.sourceName;
+  const preferredInstitutionMatches = Array.isArray(
+      item.metadata.preferredInstitutionMatches,
+    )
+    ? normalizedStoredArray(item.metadata.preferredInstitutionMatches)
+    : normalizedStoredArray(research.preferredInstitutionMatches);
   return RawResearchCandidateSchema.parse({
     kind: research.kind,
     sourceId: research.sourceId,
@@ -1245,18 +1340,16 @@ function compactResearchCandidate(
     publishedAt: research.publishedAt,
     retrievedAt: research.retrievedAt,
     accessLevel: research.accessLevel,
-    authors: itemStringArray(item.metadata.authors),
-    institutions: itemStringArray(item.metadata.institutions),
+    authors: normalizedStoredArray(item.metadata.authors),
+    institutions: normalizedStoredArray(item.metadata.institutions),
     abstract: null,
     content: null,
     relatedPaperIds: research.relatedPaperIds,
     metadata: {},
-    preferredInstitutionMatches: itemStringArray(
-      item.metadata.preferredInstitutionMatches,
-    ),
+    preferredInstitutionMatches,
     citationCount: research.citationCount,
     influentialCitationCount: research.influentialCitationCount,
-    topics: itemStringArray(item.metadata.providerTopics),
+    topics: normalizedStoredArray(item.metadata.providerTopics),
   });
 }
 
@@ -2783,6 +2876,52 @@ function result(
   return { runId, status, missingSections };
 }
 
+function normalizedRestoredCheckpointOutput(
+  step: PipelineStep,
+  output: unknown,
+): unknown {
+  switch (step) {
+    case "collect":
+      return (output as readonly CollectedCandidate[]).map((candidate) => {
+        const stored = ItemSchema.safeParse(candidate);
+        return stored.success
+          ? normalizedStoredWorkflowItem(stored.data, true)
+          : candidate;
+      });
+    case "normalize":
+    case "enrich":
+    case "prefilter":
+    case "assess":
+    case "score":
+    case "cluster":
+    case "shortlist":
+      return (output as readonly Item[]).map((item) =>
+        normalizedStoredWorkflowItem(item)
+      );
+    case "synthesize":
+    case "validate":
+      return (output as readonly {
+        item: Item;
+        [key: string]: unknown;
+      }[]).map((candidate) => ({
+        ...candidate,
+        item: normalizedStoredWorkflowItem(candidate.item),
+      }));
+    case "compose":
+    case "publish":
+      return output;
+  }
+}
+
+function restoredCheckpointOutput<T>(
+  step: PipelineStep,
+  schema: z.ZodType<T, z.ZodTypeDef, unknown>,
+  output: unknown,
+): T {
+  const parsed = schema.parse(output);
+  return schema.parse(normalizedRestoredCheckpointOutput(step, parsed));
+}
+
 async function currentRun(context: PipelineContext): Promise<PipelineRun> {
   const existing = await context.store.getRun(context.runId);
   if (existing !== null) return existing;
@@ -2834,7 +2973,7 @@ async function checkpoint<T>(
           failureCode: null,
         });
       }
-      return outputSchema.parse(artifact.output);
+      return restoredCheckpointOutput(step, outputSchema, artifact.output);
     }
     const attempt = await context.store.beginAttempt(context.runId, step);
     const startedAt = Date.parse(context.now());
@@ -2879,7 +3018,7 @@ async function readCheckpointOutput<T>(
 ): Promise<T> {
   const artifact = await context.store.readArtifact(context.runId, step);
   if (artifact === null) throw new Error(`MISSING_CHECKPOINT_ARTIFACT:${step}`);
-  return schema.parse(artifact.output);
+  return restoredCheckpointOutput(step, schema, artifact.output);
 }
 
 async function collectAndNormalize(

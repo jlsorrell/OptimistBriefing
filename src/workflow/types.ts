@@ -58,6 +58,7 @@ export type CollectedCandidate = z.infer<typeof CollectedCandidateSchema>;
 
 export const WorkflowItemPayloadSchema = z.object({
   version: z.literal(1),
+  providerTextNormalizationVersion: z.literal(1).optional(),
   rawResearch: RawResearchCandidateSchema.optional(),
   embedding: z.array(z.number().finite()).min(1).max(4_096).optional(),
   topicalFit: z.number().finite().min(0).max(1).optional(),
