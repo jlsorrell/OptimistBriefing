@@ -65,7 +65,9 @@ import { createPaperDiscoveryAdapters } from "../sources/paper-discovery";
 import { SemanticScholarAdapter } from "../sources/semantic-scholar";
 import { OpenAlexAdapter } from "../sources/openalex";
 import { ResearchCollector } from "../sources/research-collector";
+import { normalizeProviderText } from "../sources/provider-text";
 import {
+  MAX_PROVIDER_TITLE_CHARACTERS,
   RawNewsCandidateSchema,
   RawPublicationCandidateSchema,
   RawResearchCandidateSchema,
@@ -1121,7 +1123,21 @@ function upstreamCandidateIdentity(
 function normalizedCandidate(candidate: CollectedCandidate): Item | null {
   const storedItem = ItemSchema.safeParse(candidate);
   if (storedItem.success) {
-    return withWorkflowPayload(storedItem.data, {});
+    const normalizedStored = normalizedStoredItem(storedItem.data);
+    const existing = normalizedStored.metadata.workflow === undefined
+      ? null
+      : workflowPayload(normalizedStored);
+    return withWorkflowPayload(
+      normalizedStored,
+      existing?.rawResearch === undefined
+        ? {}
+        : {
+            rawResearch: compactResearchCandidate(
+              normalizedStored,
+              existing.rawResearch,
+            ),
+          },
+    );
   }
   const publication = RawPublicationCandidateSchema.safeParse(candidate);
   const routed = publication.success
@@ -1163,14 +1179,85 @@ function normalizedCandidate(candidate: CollectedCandidate): Item | null {
     normalizedWithLineage,
     research.success
       ? {
-          rawResearch: RawResearchCandidateSchema.parse({
-            ...research.data,
-            abstract: null,
-            content: null,
-          }),
+          rawResearch: compactResearchCandidate(
+            normalizedWithLineage,
+            research.data,
+          ),
         }
       : {},
   );
+}
+
+function normalizedStoredItem(item: Item): Item {
+  const normalizedDisplay = (value: string): string =>
+    normalizeProviderText(value, {
+      maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+    }) ?? "";
+  const normalizedArray = (value: unknown): string[] =>
+    itemStringArray(value)
+      .map(normalizedDisplay)
+      .filter((entry) => entry.length > 0);
+  const metadata = { ...item.metadata };
+  for (const key of [
+    "authors",
+    "institutions",
+    "providerTopics",
+    "preferredInstitutionMatches",
+    "topics",
+  ] as const) {
+    if (Array.isArray(metadata[key])) {
+      metadata[key] = normalizedArray(metadata[key]);
+    }
+  }
+  if (typeof metadata.venue === "string") {
+    metadata.venue = normalizeProviderText(metadata.venue, {
+      maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+    });
+  }
+  return ItemSchema.parse({
+    ...item,
+    title: normalizedDisplay(item.title),
+    sourceRefs: item.sourceRefs.map((source) => ({
+      ...source,
+      name: normalizedDisplay(source.name),
+    })),
+    normalizedText: normalizeProviderText(item.normalizedText) ?? "",
+    metadata,
+  });
+}
+
+function compactResearchCandidate(
+  item: Item,
+  research: RawResearchCandidate,
+): RawResearchCandidate {
+  const sourceName = item.sourceRefs.find(
+    ({ id }) => id === research.sourceId,
+  )?.name ?? item.sourceRefs[0]?.name ?? research.sourceName;
+  return RawResearchCandidateSchema.parse({
+    kind: research.kind,
+    sourceId: research.sourceId,
+    sourceName,
+    sourceRole: research.sourceRole,
+    title: item.title,
+    originalUrl: research.originalUrl,
+    externalId: research.externalId,
+    externalIds: research.externalIds,
+    publishedAt: research.publishedAt,
+    retrievedAt: research.retrievedAt,
+    accessLevel: research.accessLevel,
+    authors: itemStringArray(item.metadata.authors),
+    institutions: itemStringArray(item.metadata.institutions),
+    abstract: null,
+    content: null,
+    relatedPaperIds: research.relatedPaperIds,
+    metadata: {},
+    preferredInstitutionMatches: itemStringArray(
+      item.metadata.preferredInstitutionMatches,
+    ),
+    citationCount: research.citationCount,
+    influentialCitationCount: research.influentialCitationCount,
+    topics: itemStringArray(item.metadata.providerTopics),
+  });
 }
 
 function assessmentCandidate(

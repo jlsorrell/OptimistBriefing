@@ -41,6 +41,11 @@ export type ProviderTextOptions = {
   maxCharacters?: number;
 };
 
+export type ProviderTextNormalizationResult = {
+  value: string | null;
+  truncated: boolean;
+};
+
 function truncateAtCodePointBoundary(
   value: string,
   maximum: number,
@@ -54,11 +59,11 @@ function truncateAtCodePointBoundary(
   return value.slice(0, end);
 }
 
-export function normalizeProviderText(
+export function normalizeProviderTextDetailed(
   value: string | null | undefined,
   options: ProviderTextOptions = {},
-): string | null {
-  if (value == null) return null;
+): ProviderTextNormalizationResult {
+  if (value == null) return { value: null, truncated: false };
   const maximum = options.maxCharacters ?? MAX_PROVIDER_TEXT_INPUT_CHARACTERS;
   if (!Number.isSafeInteger(maximum) || maximum < 0 ||
       maximum > MAX_PROVIDER_TEXT_INPUT_CHARACTERS) {
@@ -69,7 +74,23 @@ export function normalizeProviderText(
     ? decoded.replace(/<[^>]+>/g, " ")
     : decoded;
   const normalized = plain.normalize("NFKC").replace(/\s+/g, " ").trim();
-  return normalized.length === 0
-    ? null
-    : truncateAtCodePointBoundary(normalized, maximum);
+  if (normalized.length === 0) {
+    return {
+      value: null,
+      truncated: value.length > MAX_PROVIDER_TEXT_INPUT_CHARACTERS,
+    };
+  }
+  return {
+    value: truncateAtCodePointBoundary(normalized, maximum),
+    truncated:
+      value.length > MAX_PROVIDER_TEXT_INPUT_CHARACTERS ||
+      normalized.length > maximum,
+  };
+}
+
+export function normalizeProviderText(
+  value: string | null | undefined,
+  options: ProviderTextOptions = {},
+): string | null {
+  return normalizeProviderTextDetailed(value, options).value;
 }

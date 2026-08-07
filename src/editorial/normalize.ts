@@ -9,6 +9,7 @@ import {
 } from "../sources/identifiers";
 import {
   EditorialSignalRecordSchema,
+  MAX_PROVIDER_TITLE_CHARACTERS,
   ScopedNewsMaterialFactSchema,
   RawItemSchema,
   type ScopedNewsMaterialFact,
@@ -33,6 +34,12 @@ const CANDIDATE_RETENTION_MS = 90 * 24 * 60 * 60 * 1_000;
 
 function normalizedWhitespace(value: string): string {
   return normalizeProviderText(value) ?? "";
+}
+
+function normalizedProviderDisplayText(value: string): string {
+  return normalizeProviderText(value, {
+    maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+  }) ?? "";
 }
 
 function rawWhitespace(value: string): string {
@@ -103,7 +110,7 @@ function providerTextArray(value: unknown): string[] {
   return Array.isArray(value)
     ? value
         .filter((entry): entry is string => typeof entry === "string")
-        .map(normalizedWhitespace)
+        .map(normalizedProviderDisplayText)
         .filter((entry) => entry.length > 0)
     : [];
 }
@@ -196,7 +203,7 @@ export function normalizeCandidate(raw: unknown): Item {
     retrievedAt: optionalDate(input.retrievedAt) ?? input.retrievedAt,
   };
   const candidate = RawItemSchema.parse(normalizedInput);
-  const title = normalizedWhitespace(candidate.title);
+  const title = normalizedProviderDisplayText(candidate.title);
   const abstract = candidate.abstract === null
     ? null
     : normalizeProviderText(candidate.abstract);
@@ -218,6 +225,18 @@ export function normalizeCandidate(raw: unknown): Item {
     ),
   );
   const topics = providerTextArray(input.topics);
+  const preferredInstitutionMatches = providerTextArray(
+    input.preferredInstitutionMatches ??
+      candidate.metadata.preferredInstitutionMatches,
+  );
+  const metadataVenue = typeof candidate.metadata.venue === "string"
+    ? normalizeProviderText(candidate.metadata.venue, {
+        maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+      })
+    : undefined;
+  const metadataTopics = Array.isArray(candidate.metadata.topics)
+    ? uniqueSorted(providerTextArray(candidate.metadata.topics))
+    : undefined;
   const configuredTopics =
     candidate.kind === "paper" || candidate.kind === "blog"
       ? mapResearchTopicIds([
@@ -395,7 +414,7 @@ export function normalizeCandidate(raw: unknown): Item {
     sourceRefs: [
       {
         id: candidate.sourceId,
-        name: normalizedWhitespace(candidate.sourceName),
+        name: normalizedProviderDisplayText(candidate.sourceName),
         url: sourceUrl,
         role: candidate.sourceRole,
         retrievedAt: new Date(candidate.retrievedAt).toISOString(),
@@ -412,20 +431,31 @@ export function normalizeCandidate(raw: unknown): Item {
     normalizedText: selectedNormalizedText,
     metadata: {
       ...candidate.metadata,
+      ...(metadataVenue === undefined ? {} : { venue: metadataVenue }),
+      ...(metadataTopics === undefined ? {} : { topics: metadataTopics }),
       externalId: canonicalIdentifier(candidate.externalId),
       externalIds,
       normalizedTitle: normalizeTitleKey(title),
       originalUrl: candidate.originalUrl,
-      authors: uniqueSorted(candidate.authors.map(normalizedWhitespace)),
+      authors: uniqueSorted(
+        candidate.authors
+          .map(normalizedProviderDisplayText)
+          .filter((author) => author.length > 0),
+      ),
       normalizedAuthors: uniqueSorted(
         candidate.authors
           .map(normalizeAuthorKey)
           .filter((author) => author.length > 0),
       ),
       institutions: uniqueSorted(
-        candidate.institutions.map(normalizedWhitespace),
+        candidate.institutions
+          .map(normalizedProviderDisplayText)
+          .filter((institution) => institution.length > 0),
       ),
       providerTopics: uniqueSorted(topics),
+      preferredInstitutionMatches: uniqueSorted(
+        preferredInstitutionMatches,
+      ),
       configuredTopics,
       sectionEligibility: uniqueSorted(sectionEligibility),
       namedEntities: uniqueSorted(namedEntities),
@@ -440,7 +470,7 @@ export function normalizeCandidate(raw: unknown): Item {
           itemId: id,
           itemKind: candidate.kind,
           sourceId: candidate.sourceId,
-          sourceName: normalizedWhitespace(candidate.sourceName),
+          sourceName: normalizedProviderDisplayText(candidate.sourceName),
           sourceUrl,
           sourceRole: candidate.sourceRole,
           accessLevel: candidate.accessLevel,
@@ -465,7 +495,7 @@ export function normalizeCandidate(raw: unknown): Item {
       provenance: [
         {
           sourceId: candidate.sourceId,
-          sourceName: candidate.sourceName,
+          sourceName: normalizedProviderDisplayText(candidate.sourceName),
           role: candidate.sourceRole,
           accessLevel: candidate.accessLevel,
           url: candidate.originalUrl,

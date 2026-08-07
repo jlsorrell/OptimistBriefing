@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   decodeProviderTextEntities,
   normalizeProviderText,
+  normalizeProviderTextDetailed,
 } from "../../../src/sources/provider-text";
 
 describe("provider text normalization", () => {
@@ -88,5 +89,12 @@ describe("provider text normalization", () => {
 
     expect(normalized).toBe("A");
     expect(normalized).not.toMatch(/[\uD800-\uDFFF]/u);
+  });
+
+  it("reports truncation caused by NFKC expansion", () => {
+    const normalized = normalizeProviderTextDetailed("ﬃ".repeat(60_000));
+
+    expect(normalized.value).toHaveLength(100_000);
+    expect(normalized.truncated).toBe(true);
   });
 });

@@ -1504,6 +1504,231 @@ describe("manual editorial run", () => {
     );
   });
 
+  it("persists compact normalized research display text and assesses only normalized evidence", async () => {
+    const assessmentProvider = new FakeModelProvider({
+      generatedObjects: [researchAssessment],
+    });
+    const originalUrl =
+      "https://research.example.com/paper?cursor=a%26amp%3Bb";
+    const candidate: RawResearchCandidate = {
+      ...rawResearchCandidate("2607.encoded", "Mechanistic &#105;nterpretability &amp; oversight"),
+      sourceName: "arXiv &amp; Labs",
+      originalUrl,
+      externalId: "Corpus:record-1",
+      externalIds: ["Corpus:record-1", "Corpus:related-2"],
+      authors: ["Ada &#69;xample"],
+      institutions: ["&#83;tanford"],
+      abstract:
+        "Mechanistic &#105;nterpretability improves oversight &amp; evaluation.",
+      relatedPaperIds: ["Corpus:related&#65;"],
+      preferredInstitutionMatches: ["&#83;tanford"],
+      topics: ["&#73;nterpretability"],
+      metadata: {
+        venue: "Journal &amp; Review",
+        topics: ["&#73;nterpretability", "AI &amp; Society"],
+        arbitraryProviderDisplay: "Do not persist &#82;aw provider metadata",
+      },
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-12",
+      runId: "run-normalized-research-display-text",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: assessmentProvider,
+      },
+      collectCandidates: async () => [candidate],
+    });
+
+    const [item] = await context.normalize(await context.collect());
+    expect(item).toBeDefined();
+    expect(item).toMatchObject({
+      title: "Mechanistic interpretability & oversight",
+      sourceRefs: [{ name: "arXiv & Labs", url: originalUrl }],
+      metadata: {
+        authors: ["Ada Example"],
+        institutions: ["Stanford"],
+        providerTopics: ["Interpretability"],
+        preferredInstitutionMatches: ["Stanford"],
+        venue: "Journal & Review",
+        topics: ["AI & Society", "Interpretability"],
+        provenance: [{ sourceName: "arXiv & Labs" }],
+      },
+    });
+    await new D1BriefingRepository(env.DB).upsertItems([item!]);
+    const row = await env.DB.prepare(
+      "SELECT normalized_json FROM items WHERE id = ?",
+    ).bind(item!.id).first<{ normalized_json: string }>();
+    const persistedItem = ItemSchema.parse(JSON.parse(row!.normalized_json));
+    const rawResearch = (persistedItem.metadata.workflow as {
+      rawResearch: RawResearchCandidate;
+    }).rawResearch;
+    expect(rawResearch).toMatchObject({
+      kind: "paper",
+      title: "Mechanistic interpretability & oversight",
+      sourceId: "arxiv",
+      sourceName: "arXiv & Labs",
+      sourceRole: "primary",
+      originalUrl,
+      externalId: "Corpus:record-1",
+      externalIds: ["Corpus:record-1", "Corpus:related-2"],
+      publishedAt: now,
+      retrievedAt: now,
+      accessLevel: "abstract",
+      authors: ["Ada Example"],
+      institutions: ["Stanford"],
+      abstract: null,
+      content: null,
+      relatedPaperIds: ["Corpus:related&#65;"],
+      preferredInstitutionMatches: ["Stanford"],
+      citationCount: 4,
+      influentialCitationCount: 1,
+      topics: ["Interpretability"],
+      metadata: {},
+    });
+    expect(JSON.stringify(rawResearch)).not.toContain(
+      "arbitraryProviderDisplay",
+    );
+
+    await context.assess([persistedItem]);
+    const sourcePacket = assessmentProvider.generateRequests[0]?.sourcePacket;
+    expect(sourcePacket).toContain(
+      "title: Mechanistic interpretability & oversight",
+    );
+    expect(sourcePacket).toContain("source_name: arXiv & Labs");
+    expect(sourcePacket).toContain(
+      "Mechanistic interpretability improves oversight & evaluation.",
+    );
+    expect(sourcePacket).not.toContain("&#");
+  });
+
+  it("bounds normalized research display fields after NFKC expansion", async () => {
+    const expanding = "ﬃ".repeat(200);
+    const candidate: RawResearchCandidate = {
+      ...rawResearchCandidate("2607.expanding", expanding),
+      sourceName: expanding,
+      authors: [expanding, "&nbsp;"],
+      institutions: [expanding, "&nbsp;"],
+      preferredInstitutionMatches: [expanding],
+      topics: [expanding],
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-13",
+      runId: "run-bounded-research-display-text",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [candidate],
+    });
+
+    const [item] = await context.normalize(await context.collect());
+    const rawResearch = (item!.metadata.workflow as {
+      rawResearch: RawResearchCandidate;
+    }).rawResearch;
+
+    expect(item!.title).toHaveLength(500);
+    expect(item!.sourceRefs[0]!.name).toHaveLength(500);
+    expect(item!.metadata.authors).toEqual(["ffi".repeat(166) + "ff"]);
+    expect(item!.metadata.institutions).toEqual(["ffi".repeat(166) + "ff"]);
+    expect(rawResearch.title).toHaveLength(500);
+    expect(rawResearch.sourceName).toHaveLength(500);
+    expect(rawResearch.authors[0]).toHaveLength(500);
+    expect(rawResearch.institutions[0]).toHaveLength(500);
+    expect(rawResearch.preferredInstitutionMatches[0]).toHaveLength(500);
+    expect(rawResearch.topics[0]).toHaveLength(500);
+  });
+
+  it("recompacts legacy Item workflow research before persistence and assessment", async () => {
+    const legacyRaw: RawResearchCandidate = {
+      ...rawResearchCandidate(
+        "2607.legacy",
+        "Legacy &#114;esearch title",
+      ),
+      sourceName: "Legacy &amp; Source",
+      authors: ["Legacy &#65;uthor"],
+      institutions: ["Legacy &#73;nstitute"],
+      preferredInstitutionMatches: ["Legacy &#73;nstitute"],
+      topics: ["&#73;nterpretability"],
+      metadata: { arbitraryRawDisplay: "Legacy &#82;aw metadata" },
+    };
+    const legacyItem = ItemSchema.parse({
+      ...fixtureItem("legacy-research-item", "research"),
+      title: "Stored &#114;esearch title",
+      sourceRefs: [{
+        ...fixtureItem("legacy-source", "research").sourceRefs[0]!,
+        id: "arxiv",
+        name: "Legacy &amp; Source",
+        url: legacyRaw.originalUrl,
+      }],
+      normalizedText: "Stored &#101;vidence for assessment.",
+      metadata: {
+        authors: ["Stored &#65;uthor"],
+        institutions: ["Stored &#73;nstitute"],
+        providerTopics: ["&#73;nterpretability"],
+        preferredInstitutionMatches: ["Stored &#73;nstitute"],
+        venue: "Stored &amp; Venue",
+        topics: ["AI &amp; Society"],
+        workflow: { version: 1, rawResearch: legacyRaw },
+      },
+    });
+    const assessmentProvider = new FakeModelProvider({
+      generatedObjects: [researchAssessment],
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-14",
+      runId: "run-recompact-legacy-item",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: assessmentProvider,
+      },
+      collectCandidates: async () => [legacyItem],
+    });
+
+    const [item] = await context.normalize(await context.collect());
+    const compact = (item!.metadata.workflow as {
+      rawResearch: RawResearchCandidate;
+    }).rawResearch;
+
+    expect(item).toMatchObject({
+      title: "Stored research title",
+      normalizedText: "Stored evidence for assessment.",
+      sourceRefs: [{ name: "Legacy & Source" }],
+      metadata: {
+        authors: ["Stored Author"],
+        institutions: ["Stored Institute"],
+        providerTopics: ["Interpretability"],
+        preferredInstitutionMatches: ["Stored Institute"],
+        venue: "Stored & Venue",
+        topics: ["AI & Society"],
+      },
+    });
+    expect(compact).toMatchObject({
+      title: "Stored research title",
+      sourceName: "Legacy & Source",
+      authors: ["Stored Author"],
+      institutions: ["Stored Institute"],
+      preferredInstitutionMatches: ["Stored Institute"],
+      topics: ["Interpretability"],
+      abstract: null,
+      content: null,
+      metadata: {},
+    });
+
+    await context.assess([item!]);
+    expect(assessmentProvider.generateRequests[0]?.sourcePacket).toContain(
+      "Stored evidence for assessment.",
+    );
+    expect(assessmentProvider.generateRequests[0]?.sourcePacket).not.toContain(
+      "&#",
+    );
+  });
+
   it("updates real-lane diagnostics through assessment and applies research context scoring", async () => {
     const diagnosticWrites: Array<readonly unknown[]> = [];
     let persistedDiagnostics: DiscoveryDiagnosticsState | undefined;

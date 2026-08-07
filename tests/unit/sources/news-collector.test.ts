@@ -10,6 +10,7 @@ import {
 } from "../../../src/sources/article-extractor";
 import { GdeltAdapter } from "../../../src/sources/gdelt";
 import { SourceHttpClient } from "../../../src/sources/http-client";
+import { hasExplicitAiPolicyEvidence } from "../../../src/sources/news-signals";
 import {
   createNewsCollectorFromCatalog,
   NewsCollector,
@@ -255,6 +256,83 @@ describe("NewsCollector", () => {
         "https://mgaleg.maryland.gov/mgawebsite/Legislation/Details/hb0001",
     });
     expect(items.filter((item) => item.kind === "forecast")).toHaveLength(1);
+  });
+
+  it("decodes Polymarket questions before deriving AI-policy signals", async () => {
+    const encodedQuestion =
+      "Will artificial&#32;intelligence regulation advance in 2026?";
+    const adapter = new PolymarketAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json([{
+          id: "encoded-ai-policy",
+          question: encodedQuestion,
+          slug: "encoded-ai-policy",
+          outcomes: "[\"Yes\",\"No\"]",
+          outcomePrices: "[\"0.64\",\"0.36\"]",
+          oneDayPriceChange: 0.16,
+          liquidity: "250000",
+          active: true,
+          closed: false,
+          archived: false,
+          acceptingOrders: true,
+          updatedAt: "2026-07-29T08:20:00.000Z",
+          endDate: "2026-12-31T23:59:59.000Z",
+          resolutionSource: "https://www.congress.gov/",
+        }])),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      source({
+        ...polymarketSource,
+        sectionEligibility: ["forecast", "ai_policy"],
+      }),
+      {
+        minimumLiquidity: 100_000,
+        minimumAbsoluteChange: 0.1,
+      },
+    );
+
+    const candidate = (await adapter.collect(fixedWindow()))[0]!;
+
+    expect(candidate.title).toBe(
+      "Will artificial intelligence regulation advance in 2026?",
+    );
+    expect(candidate.sectionEligibility).toContain("ai_policy");
+    expect(hasExplicitAiPolicyEvidence([candidate.title])).toBe(true);
+    expect(candidate.metadata.primarySection).toBe("forecast");
+  });
+
+  it("bounds Polymarket questions after NFKC expansion", async () => {
+    const adapter = new PolymarketAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json([{
+          id: "expanding-question",
+          question: "ﬃ".repeat(200),
+          slug: "expanding-question",
+          outcomes: "[\"Yes\",\"No\"]",
+          outcomePrices: "[\"0.64\",\"0.36\"]",
+          oneDayPriceChange: 0.16,
+          liquidity: "250000",
+          active: true,
+          closed: false,
+          archived: false,
+          acceptingOrders: true,
+          updatedAt: "2026-07-29T08:20:00.000Z",
+          endDate: "2026-12-31T23:59:59.000Z",
+          resolutionSource: "https://www.congress.gov/",
+        }])),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      polymarketSource,
+      {
+        minimumLiquidity: 100_000,
+        minimumAbsoluteChange: 0.1,
+      },
+    );
+
+    const candidate = (await adapter.collect(fixedWindow()))[0]!;
+
+    expect(candidate.title).toHaveLength(500);
+    expect(candidate.title).toBe("ffi".repeat(166) + "ff");
   });
 
   it("keeps GDELT as non-corroborating discovery metadata, not article truth", async () => {
@@ -1633,6 +1711,35 @@ describe("extractReadableArticle", () => {
       const article = extractReadableArticle(
         "<article><p>Fallback text.</p></article>",
         "https://example.com/direct-readability-long-report",
+        "text/html",
+      );
+
+      expect(article.text).toHaveLength(100_000);
+      expect(article.extractionLevel).toBe("partial");
+    } finally {
+      parse.mockRestore();
+    }
+  });
+
+  it("classifies NFKC-expanded readability text as truncated and partial", () => {
+    const readabilityText = "ﬃ".repeat(60_000);
+    const parse = vi.spyOn(Readability.prototype, "parse").mockReturnValue({
+      title: "Compatibility expansion report",
+      content: "<p>Compatibility expansion report</p>",
+      textContent: readabilityText,
+      length: readabilityText.length,
+      excerpt: null,
+      byline: null,
+      dir: null,
+      siteName: null,
+      lang: null,
+      publishedTime: null,
+    });
+
+    try {
+      const article = extractReadableArticle(
+        "<article><p>Fallback text.</p></article>",
+        "https://example.com/nfkc-expansion-report",
         "text/html",
       );
 

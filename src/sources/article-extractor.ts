@@ -3,7 +3,10 @@ import { parseHTML } from "linkedom";
 import { z } from "zod";
 
 import { assertSafeOutboundUrl } from "./outbound-url";
-import { normalizeProviderText } from "./provider-text";
+import {
+  normalizeProviderText,
+  normalizeProviderTextDetailed,
+} from "./provider-text";
 
 export const MAX_EXTRACTED_ARTICLE_CHARACTERS = 100_000;
 export const MIN_COMPLETE_ARTICLE_CHARACTERS = 500;
@@ -56,7 +59,10 @@ export function extractReadableArticle(
   }
   const fallbackSourceText =
     document.querySelector("article, main")?.textContent;
-  const fallbackText = normalized(fallbackSourceText);
+  const fallbackNormalization = normalizeProviderTextDetailed(
+    fallbackSourceText,
+  );
+  const fallbackText = fallbackNormalization.value;
   const fallbackTitle = normalized(
     document.querySelector("h1")?.textContent ??
       document.querySelector("title")?.textContent,
@@ -71,7 +77,10 @@ export function extractReadableArticle(
     { charThreshold: 100 },
   ).parse();
   const readabilitySourceText = article?.textContent;
-  const readabilityText = normalized(readabilitySourceText);
+  const readabilityNormalization = normalizeProviderTextDetailed(
+    readabilitySourceText,
+  );
+  const readabilityText = readabilityNormalization.value;
   const fullText = readabilityText ?? fallbackText;
   if (fullText === null) {
     return metadataOnly();
@@ -79,16 +88,18 @@ export function extractReadableArticle(
   const sourceText = readabilityText === null
     ? fallbackSourceText
     : readabilitySourceText;
+  const selectedNormalization = readabilityText === null
+    ? fallbackNormalization
+    : readabilityNormalization;
   const wasTruncated =
-    (sourceText?.length ?? 0) > MAX_EXTRACTED_ARTICLE_CHARACTERS;
+    (sourceText?.length ?? 0) > MAX_EXTRACTED_ARTICLE_CHARACTERS ||
+    selectedNormalization.truncated;
 
   return ExtractedArticleSchema.parse({
     title: normalized(article?.title) ?? fallbackTitle,
     byline: normalized(article?.byline),
     excerpt: normalized(article?.excerpt) ?? fallbackExcerpt,
-    text: wasTruncated
-      ? fullText.slice(0, MAX_EXTRACTED_ARTICLE_CHARACTERS)
-      : fullText,
+    text: fullText,
     extractionLevel:
       wasTruncated ||
       readabilityText === null ||
