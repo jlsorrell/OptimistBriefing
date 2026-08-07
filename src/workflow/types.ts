@@ -24,6 +24,10 @@ import {
 } from "../sources/types";
 import type { BudgetPolicy } from "../models/cost-ledger";
 import type { ReaderPreferences } from "../db/repository";
+export { SummaryRejectionCodeSchema } from
+  "../editorial/summary-rejection-code";
+import { SummaryRejectionCodeSchema } from
+  "../editorial/summary-rejection-code";
 
 export const PIPELINE_STEPS = [
   "collect",
@@ -159,11 +163,6 @@ export type ValidatedSummaryCandidate = SummaryCandidate & {
   valid: boolean;
   validationErrors?: readonly string[] | undefined;
 };
-
-export const SummaryRejectionCodeSchema = z.string()
-  .min(1)
-  .max(200)
-  .regex(/^(?:SCHEMA_INVALID:[A-Za-z0-9_.-]+|UNKNOWN_SOURCE|EMPTY_EVIDENCE:\d+|EVIDENCE_NOT_FOUND:\d+|CLAIM_EVIDENCE_NOT_EXACT|UNGROUNDED_CLAIM:\d+|PRIMARY_RESEARCH_SOURCE_REQUIRED:\d+|ACCESS_LEVEL_OVERCLAIM|UNGROUNDED_PROSE:(?:title|oneSentence|whyItMatters|uncertainty)|EMPTY_UNCERTAINTY|FORECAST_LABEL_MISSING)$/);
 
 export const SummaryRejectionEventSchema = z.object({
   section: EditionSectionSchema,

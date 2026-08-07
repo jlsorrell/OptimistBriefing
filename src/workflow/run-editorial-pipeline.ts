@@ -37,6 +37,7 @@ import {
   summarizeItem,
   SummaryRejectedError,
 } from "../editorial/summarize";
+import { canonicalSummaryRejectionCodes } from "../editorial/summary-rejection-code";
 import { claimEvidenceMatchesAllSources } from "../editorial/validate-summary";
 import type { ModelProvider } from "../models/provider";
 import { assessResearch } from "../editorial/assess-research";
@@ -332,14 +333,6 @@ const CompositionSchema = z.object({
     });
   }
 });
-
-function normalizedSummaryRejectionErrors(
-  errors: readonly string[],
-): string[] {
-  return errors.map((error) =>
-    error.startsWith("UNKNOWN_SOURCE:") ? "UNKNOWN_SOURCE" : error
-  );
-}
 
 async function summaryRejectionAuditId(
   runId: string,
@@ -646,12 +639,8 @@ export class D1PipelineStore implements PipelineStore {
   ): Promise<void> {
     const valid = SummaryRejectionEventSchema.parse({
       ...event,
-      errors: normalizedSummaryRejectionErrors(event.errors),
+      errors: canonicalSummaryRejectionCodes(event.errors),
     });
-    const normalized = {
-      ...valid,
-      errors: [...new Set(valid.errors)].sort(),
-    };
     const id = await summaryRejectionAuditId(runId, itemId);
     await this.db.prepare(
       `INSERT OR IGNORE INTO audit_events (
@@ -660,7 +649,7 @@ export class D1PipelineStore implements PipelineStore {
     ).bind(
       id,
       runId,
-      JSON.stringify(normalized),
+      JSON.stringify(valid),
       valid.createdAt,
     ).run();
   }
@@ -2385,9 +2374,7 @@ export function createProductionPipelineContext(
             }
             await options.store.recordSummaryRejection(options.runId, item.id, {
               section: synthesisSection(item),
-              errors: [
-                ...new Set(normalizedSummaryRejectionErrors(error.errors)),
-              ].slice(0, 64),
+              errors: canonicalSummaryRejectionCodes(error.errors),
               createdAt: options.now(),
             });
             continue;

@@ -3,6 +3,8 @@ import {
   type StructuredSummary,
 } from "../contracts/editorial";
 import type { ModelProvider } from "../models/provider";
+import { canonicalSummaryRejectionCodes } from "./summary-rejection-code";
+import { buildSummaryRepairGuidance } from "./summary-repair-guidance";
 import {
   serializeSourcePacket,
   SourcePacketSchema,
@@ -14,8 +16,8 @@ const GROUNDING_SYSTEM_PROMPT = `Use only the supplied source packet.
 Every factual claim must cite one or more supplied source IDs.
 State uncertainty and disagreement.
 Do not imply full-paper access when access_level is abstract or metadata.
-Copy concise supported wording exactly from cited source titles or excerpts for every factual claim and prominent field.
-Copy uncertainty exactly from cited source titles or excerpts.
+For each prominent field, provenance evidence must appear in the title or a numbered excerpt of every cited source.
+For each factual claim, evidence must appear in a numbered excerpt of every cited source; source titles alone do not ground claims.
 For forecast items, prefix one prose field with "Forecast, not fact."; this fixed editorial label does not require source support, but all remaining prose does.
 Return only data matching the supplied JSON schema.`;
 
@@ -59,6 +61,8 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
     claims: {
       type: "array",
       minItems: 1,
+      description:
+        "For each factual claim, evidence must appear in a numbered excerpt of every cited source; source titles alone do not ground claims.",
       items: {
         type: "object",
         additionalProperties: false,
@@ -90,6 +94,8 @@ const STRUCTURED_SUMMARY_JSON_SCHEMA: Record<string, unknown> = {
     provenance: {
       type: "object",
       additionalProperties: false,
+      description:
+        "For each prominent field, provenance evidence must appear in the title or a numbered excerpt of every cited source.",
       required: [
         "title",
         "oneSentence",
@@ -203,8 +209,8 @@ function repairPacket(
   sourcePacket: string,
 ): string {
   return [
-    "VALIDATION ERRORS",
-    ...errors.map((error) => `- ${error}`),
+    "VALIDATION ERRORS AND REQUIRED REPAIRS",
+    buildSummaryRepairGuidance(errors),
     "",
     "ORIGINAL SOURCE PACKET",
     sourcePacket,
@@ -243,10 +249,10 @@ Repair every listed validation error. Do not add unsupported claims.`,
     return StructuredSummarySchema.parse(repaired);
   }
 
-  throw new SummaryRejectedError([
-    ...new Set([
+  throw new SummaryRejectedError(
+    canonicalSummaryRejectionCodes([
       ...initialValidation.errors,
       ...repairValidation.errors,
     ]),
-  ]);
+  );
 }

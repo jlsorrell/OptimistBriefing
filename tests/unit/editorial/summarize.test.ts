@@ -5,6 +5,8 @@ import type {
   StructuredSummary,
 } from "../../../src/contracts/editorial";
 import { assessResearch } from "../../../src/editorial/assess-research";
+import { canonicalSummaryRejectionCodes } from "../../../src/editorial/summary-rejection-code";
+import { buildSummaryRepairGuidance } from "../../../src/editorial/summary-repair-guidance";
 import {
   SummaryRejectedError,
   summarizeItem,
@@ -118,6 +120,65 @@ function researchCandidate(): RawResearchCandidate {
   };
 }
 
+describe("summary rejection repair diagnostics", () => {
+  it("redacts unknown-source payloads, deduplicates, and sorts canonical codes", () => {
+    expect(canonicalSummaryRejectionCodes([
+      "UNKNOWN_SOURCE:secret%40example.com",
+      "UNKNOWN_SOURCE:another-value",
+      "UNGROUNDED_PROSE:title",
+      "UNGROUNDED_PROSE:title",
+    ])).toEqual(["UNGROUNDED_PROSE:title", "UNKNOWN_SOURCE"]);
+  });
+
+  it("maps malformed and oversized raw values without discarding valid codes", () => {
+    expect(canonicalSummaryRejectionCodes([
+      "not-a-code",
+      `UNKNOWN_SOURCE:${"x".repeat(1_000)}`,
+    ])).toEqual(["SCHEMA_INVALID:root", "UNKNOWN_SOURCE"]);
+
+    expect(canonicalSummaryRejectionCodes([
+      "not-a-code",
+      "UNGROUNDED_CLAIM:2",
+    ])).toEqual(["SCHEMA_INVALID:root", "UNGROUNDED_CLAIM:2"]);
+  });
+
+  it("builds fixed actionable guidance without interpolating raw payloads", () => {
+    const guidance = buildSummaryRepairGuidance([
+      "UNGROUNDED_PROSE:title",
+      "UNKNOWN_SOURCE:anything-sensitive",
+    ]);
+
+    expect(guidance).toContain("UNGROUNDED_PROSE:title");
+    expect(guidance).toContain("copy the field exactly");
+    expect(guidance).toContain("UNKNOWN_SOURCE");
+    expect(guidance).not.toContain("anything-sensitive");
+    expect(guidance.split("\n")).toHaveLength(2);
+    expect(new TextEncoder().encode(guidance).byteLength).toBeLessThanOrEqual(
+      16_384,
+    );
+  });
+
+  it("uses the deterministic fallback for more than 64 distinct codes", () => {
+    expect(buildSummaryRepairGuidance(
+      Array.from({ length: 65 }, (_, index) => `UNGROUNDED_CLAIM:${index}`),
+    )).toBe(
+      "SCHEMA_INVALID:root — return a complete object matching the schema; use only supplied source IDs and exact source wording.",
+    );
+  });
+
+  it("uses the deterministic fallback when fixed guidance exceeds 16 KiB", () => {
+    const bytePressureCodes = Array.from(
+      { length: 64 },
+      (_, index) =>
+        `UNGROUNDED_CLAIM:${"1".repeat(177)}${String(index).padStart(3, "0")}`,
+    );
+
+    expect(buildSummaryRepairGuidance(bytePressureCodes)).toBe(
+      "SCHEMA_INVALID:root — return a complete object matching the schema; use only supplied source IDs and exact source wording.",
+    );
+  });
+});
+
 describe("summarizeItem", () => {
   it("returns a grounded structured summary without a repair call", async () => {
     const provider = new FakeModelProvider({
@@ -150,7 +211,10 @@ describe("summarizeItem", () => {
       "Return only data matching the supplied JSON schema.",
     );
     expect(request?.system).toContain(
-      "Copy concise supported wording exactly from cited source titles or excerpts",
+      "For each prominent field, provenance evidence must appear in the title or a numbered excerpt of every cited source.",
+    );
+    expect(request?.system).toContain(
+      "For each factual claim, evidence must appear in a numbered excerpt of every cited source; source titles alone do not ground claims.",
     );
     expect(request?.system).toContain(
       'For forecast items, prefix one prose field with "Forecast, not fact."',
@@ -181,7 +245,7 @@ describe("summarizeItem", () => {
 
     const request = provider.generateRequests[0];
     expect(request?.system).toContain(
-      "Copy uncertainty exactly from cited source titles or excerpts.",
+      "For each prominent field, provenance evidence must appear in the title or a numbered excerpt of every cited source.",
     );
     expect(request?.jsonSchema).toMatchObject({
       properties: {
@@ -223,7 +287,16 @@ describe("summarizeItem", () => {
     );
     expect(provider.generateRequests).toHaveLength(2);
     expect(provider.generateRequests[1]?.sourcePacket).toContain(
+      "VALIDATION ERRORS AND REQUIRED REPAIRS",
+    );
+    expect(provider.generateRequests[1]?.sourcePacket).toContain(
+      "UNKNOWN_SOURCE",
+    );
+    expect(provider.generateRequests[1]?.sourcePacket).not.toContain(
       "UNKNOWN_SOURCE:unknown",
+    );
+    expect(provider.generateRequests[1]?.sourcePacket).toContain(
+      "ORIGINAL SOURCE PACKET",
     );
     expect(provider.generateRequests[1]?.sourcePacket).toContain(
       "source_id: source-1",
@@ -257,7 +330,7 @@ describe("summarizeItem", () => {
     expect(rejection).toBeInstanceOf(SummaryRejectedError);
     expect((rejection as SummaryRejectedError).errors).toEqual(
       expect.arrayContaining([
-        "UNKNOWN_SOURCE:unknown",
+        "UNKNOWN_SOURCE",
         "SCHEMA_INVALID:uncertainty",
       ]),
     );

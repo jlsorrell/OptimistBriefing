@@ -518,9 +518,9 @@ class UnknownSourceThenAcceptanceProvider implements ModelProvider {
         whyItMatters: evidence,
         uncertainty: evidence,
         claims: [{
-          text: evidence,
-          sourceIds: [this.unknownSourceId],
-          evidenceExcerpt: evidence,
+          text: "Unsupported model claim",
+          sourceIds: [sourceId, this.unknownSourceId],
+          evidenceExcerpt: "Unsupported model evidence",
         }],
         accessLevel,
         provenance: {
@@ -2933,9 +2933,12 @@ describe("manual editorial run", () => {
     ).bind(runId).first<{ event_json: string }>();
 
     expect(event).not.toBeNull();
-    expect(JSON.parse(event!.event_json)).toMatchObject({
-      errors: expect.arrayContaining(["UNKNOWN_SOURCE"]),
-    });
+    expect(JSON.parse(event!.event_json).errors).toEqual([
+      "CLAIM_EVIDENCE_NOT_EXACT",
+      "EVIDENCE_NOT_FOUND:0",
+      "UNGROUNDED_CLAIM:0",
+      "UNKNOWN_SOURCE",
+    ]);
     expect(event!.event_json).not.toContain(maliciousSourceId);
     expect(event!.event_json).not.toContain(
       encodeURIComponent(maliciousSourceId),
@@ -2983,8 +2986,9 @@ describe("manual editorial run", () => {
     );
   });
 
-  it("rejects malformed synthesis rejection events before writing SQL", async () => {
-    // This fails if malformed diagnostics reach the audit table.
+  it("rejects invalid event envelopes and fail-closes malformed rejection codes", async () => {
+    // This fails if invalid envelopes are stored or malformed codes are not
+    // replaced by the shared deterministic fallback.
     const runId = "run-bounded-synthesis-rejection";
     const store = createD1PipelineStore(env.DB);
     await store.createRun({
@@ -3006,17 +3010,20 @@ describe("manual editorial run", () => {
         event: unknown,
       ) => Promise<void>;
     };
-    const invalidEvents = [
-      {
+    await expect(
+      recorder.recordSummaryRejection(runId, "invalid-envelope", {
         section: "not-a-section",
         errors: ["CLAIM_EVIDENCE_NOT_EXACT"],
         createdAt: now,
-      },
+      }),
+    ).rejects.toBeDefined();
+
+    const malformedEvents = [
       {
         section: "world",
         errors: Array.from(
           { length: 65 },
-          () => "CLAIM_EVIDENCE_NOT_EXACT",
+          (_, index) => `UNGROUNDED_CLAIM:${index}`,
         ),
         createdAt: now,
       },
@@ -3027,16 +3034,21 @@ describe("manual editorial run", () => {
       },
     ];
 
-    for (const event of invalidEvents) {
+    for (const [index, event] of malformedEvents.entries()) {
       await expect(
-        recorder.recordSummaryRejection(runId, "transient-item-id", event),
-      ).rejects.toBeDefined();
+        recorder.recordSummaryRejection(runId, `malformed-${index}`, event),
+      ).resolves.toBeUndefined();
     }
     const events = await env.DB.prepare(
-      `SELECT id FROM audit_events
+      `SELECT event_json FROM audit_events
        WHERE run_id = ? AND event_type = 'summary_rejected'`,
-    ).bind(runId).all<{ id: string }>();
-    expect(events.results).toEqual([]);
+    ).bind(runId).all<{ event_json: string }>();
+    expect(events.results.map(({ event_json }) =>
+      JSON.parse(event_json).errors
+    )).toEqual([
+      ["SCHEMA_INVALID:root"],
+      ["SCHEMA_INVALID:root"],
+    ]);
   });
 
   it("fails closed when recording a synthesis rejection fails", async () => {
