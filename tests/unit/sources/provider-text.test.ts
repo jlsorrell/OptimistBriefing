@@ -38,12 +38,29 @@ describe("provider text normalization", () => {
   });
 
   it("does not split a surrogate pair at the input inspection bound", () => {
-    const decoded = decodeProviderTextEntities(
-      `${"a".repeat(99_999)}😀outside`,
-    );
+    const input = `${"a".repeat(99_999)}😀outside`;
+    const originalIterator = String.prototype[Symbol.iterator];
+    let inspectedCodeUnits = 0;
+    let inspectedPastBound = false;
+    let decoded = "";
+    String.prototype[Symbol.iterator] = function* ():
+      Generator<string, undefined, unknown> {
+      for (const character of originalIterator.call(this)) {
+        inspectedCodeUnits += character.length;
+        if (inspectedCodeUnits > 100_000) inspectedPastBound = true;
+        yield character;
+      }
+      return undefined;
+    };
+    try {
+      decoded = decodeProviderTextEntities(input);
+    } finally {
+      String.prototype[Symbol.iterator] = originalIterator;
+    }
 
     expect(decoded).toHaveLength(99_999);
     expect(decoded).not.toMatch(/[\uD800-\uDFFF]/u);
+    expect(inspectedPastBound).toBe(false);
   });
 
   it("leaves a third decode pass inert", () => {

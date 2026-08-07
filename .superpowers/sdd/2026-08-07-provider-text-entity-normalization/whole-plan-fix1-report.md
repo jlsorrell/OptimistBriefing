@@ -115,3 +115,84 @@ Result: exit 0; no whitespace errors.
 ## Concerns
 
 - None.
+
+## Whole-plan Fix Round 2
+
+This round restores Federal Register access classification from raw provider evidence presence while retaining normalized human-readable evidence. It also replaces the input-cap iterator with an exact bounded-index truncation that never reads a code unit at or beyond the configured maximum.
+
+### RED evidence
+
+Federal Register command:
+
+```sh
+npx vitest run tests/unit/sources/news-collector.test.ts -t "raw abstract presence"
+```
+
+Result: exit 1. A provider-present `&nbsp;` abstract normalized to `null` and was incorrectly classified as `metadata`; a raw-null abstract remained `metadata` as expected.
+
+Exact input-cap command:
+
+```sh
+npx vitest run tests/unit/sources/provider-text.test.ts -t "input inspection bound"
+```
+
+Result: exit 1. Output was already surrogate-safe, but instrumentation showed the string iterator consumed the scalar crossing the 100,000-code-unit boundary.
+
+### GREEN evidence
+
+Targeted commands:
+
+```sh
+npx vitest run tests/unit/sources/news-collector.test.ts -t "raw abstract presence"
+npx vitest run tests/unit/sources/provider-text.test.ts -t "input inspection bound"
+```
+
+Results: both exited 0; one targeted test passed in each file.
+
+Affected focused suites:
+
+```sh
+npx vitest run tests/unit/sources/provider-text.test.ts tests/unit/editorial/normalize.test.ts tests/unit/editorial/route-publication.test.ts tests/unit/sources/publication-collector.test.ts tests/unit/sources/research-collector.test.ts tests/unit/sources/news-collector.test.ts tests/unit/sources/news-signals.test.ts tests/unit/editorial/pipeline.test.ts
+```
+
+Result: exit 0; 8 test files passed, 207 tests passed.
+
+Typecheck:
+
+```sh
+npm run check
+```
+
+The first run identified a test-only `StringIterator` generator return-type mismatch. After correcting that annotation, the fresh run exited 0 with `tsc --noEmit` passing.
+
+Diff validation:
+
+```sh
+git diff --check
+```
+
+Result: exit 0; no whitespace errors.
+
+### Files changed
+
+- `src/sources/news-collector.ts`
+- `src/sources/provider-text.ts`
+- `tests/unit/sources/news-collector.test.ts`
+- `tests/unit/sources/provider-text.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+
+### Commit
+
+Planned message: `fix: preserve provider access and exact text bounds`. The resulting SHA is recorded in the task handoff.
+
+### Self-review
+
+- Federal Register access level uses only the original nullable/optional abstract presence; decoded abstract remains the sole value persisted and supplied to `deriveNewsSignals`.
+- A provider-present entity-only abstract can normalize to `null` without downgrading the prior `secondary` access classification; a raw-null/absent abstract remains `metadata`.
+- Input truncation reads only `maximum - 1` to detect a boundary high surrogate, drops that high surrogate without inspecting the following unit, and otherwise slices at the exact maximum.
+- Complete surrogate pairs fully inside the cap remain intact; output never exceeds the existing numeric bounds.
+- All Whole-plan Fix Round 1 behavior and earlier URL/ID, evidence precedence, topic, schema, and extraction/access invariants remain covered by the affected suites.
+
+### Concerns
+
+- None.

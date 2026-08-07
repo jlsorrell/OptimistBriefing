@@ -941,6 +941,79 @@ describe("catalog-driven news collection", () => {
     });
   });
 
+  it("preserves Federal Register raw abstract presence for access classification", async () => {
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({
+          results: [
+            {
+              document_number: "2026-present-blank",
+              title: "Present blank abstract",
+              html_url:
+                "https://www.federalregister.gov/documents/2026/07/29/2026-present-blank/present-blank",
+              publication_date: "2026-07-29",
+              type: "Notice",
+              abstract: "&nbsp;",
+            },
+            {
+              document_number: "2026-null-abstract",
+              title: "Null abstract",
+              html_url:
+                "https://www.federalregister.gov/documents/2026/07/29/2026-null-abstract/null-abstract",
+              publication_date: "2026-07-29",
+              type: "Notice",
+              abstract: null,
+            },
+          ],
+        })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      sources: [
+        catalogSource({
+          id: "federal-register",
+          canonicalName: "Federal Register",
+          canonicalUrl: "https://www.federalregister.gov/",
+          role: "primary",
+          discoveryMechanism: "api",
+          sectionEligibility: ["world"],
+          restrictions: {
+            bodyRetrieval: "permitted",
+            paywall: "none",
+            contentUse: "open-government",
+            apiUrl:
+              "https://www.federalregister.gov/api/v1/documents.json",
+            apiFormat: "federal-register-v1",
+            urlPolicy: policy("www.federalregister.gov", [
+              "/api/v1/documents.json",
+              "/documents/",
+            ]),
+          },
+        }),
+      ],
+    });
+
+    const candidates = (await collector.collect(fixedWindow())).candidates;
+    const presentBlank = candidates.find(
+      (candidate) =>
+        candidate.externalId ===
+        "FederalRegister:2026-present-blank",
+    );
+    const nullAbstract = candidates.find(
+      (candidate) =>
+        candidate.externalId ===
+        "FederalRegister:2026-null-abstract",
+    );
+
+    expect(presentBlank).toMatchObject({
+      abstract: null,
+      accessLevel: "secondary",
+    });
+    expect(nullAbstract).toMatchObject({
+      abstract: null,
+      accessLevel: "metadata",
+    });
+  });
+
   it.each([
     {
       id: "associated-press",

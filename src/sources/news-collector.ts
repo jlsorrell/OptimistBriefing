@@ -472,6 +472,8 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
       }
       const title = normalizeProviderText(item.title);
       if (title === null) return [];
+      const abstractPresent =
+        item.abstract !== null && item.abstract !== undefined;
       const abstract = normalizeProviderText(item.abstract);
       const metadata = {
         documentNumber: item.document_number,
@@ -491,9 +493,7 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
           publishedAt,
           retrievedAt: response.retrievedAt,
           accessLevel:
-            abstract === null
-              ? "metadata"
-              : "secondary",
+            abstractPresent ? "secondary" : "metadata",
           authors: [],
           institutions: [],
           abstract,

@@ -46,12 +46,12 @@ function truncateAtCodePointBoundary(
   maximum: number,
 ): string {
   if (value.length <= maximum) return value;
-  let truncated = "";
-  for (const character of value) {
-    if (truncated.length + character.length > maximum) break;
-    truncated += character;
-  }
-  return truncated;
+  if (maximum === 0) return "";
+  const finalCodeUnit = value.charCodeAt(maximum - 1);
+  const end = finalCodeUnit >= 0xd800 && finalCodeUnit <= 0xdbff
+    ? maximum - 1
+    : maximum;
+  return value.slice(0, end);
 }
 
 export function normalizeProviderText(
