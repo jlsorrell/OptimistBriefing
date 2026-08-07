@@ -126,3 +126,57 @@ Result: exit 0; `tsc --noEmit` passed.
 ### Concerns
 
 - None.
+
+## Fix Round 2
+
+Fix Round 1 correctly protected structural arrays, including `primaryDocumentUrls`, but its raw-only shared array helper also stopped normalizing human-readable provider topics. This round introduces a dedicated provider-topic array path while retaining raw structural-array processing.
+
+### TDD evidence
+
+RED command:
+
+```sh
+npx vitest run tests/unit/editorial/normalize.test.ts -t "provider topic arrays"
+```
+
+Result: exit 1. The provider topic persisted as literal `&#115;ecure computation` instead of `secure computation`.
+
+GREEN command:
+
+```sh
+npx vitest run tests/unit/editorial/normalize.test.ts -t "provider topic arrays"
+```
+
+Result: exit 0; 1 targeted test passed.
+
+Task 2 focused/adjacent command:
+
+```sh
+npx vitest run tests/unit/sources/provider-text.test.ts tests/unit/editorial/normalize.test.ts tests/unit/sources/publication-collector.test.ts tests/unit/sources/news-collector.test.ts
+```
+
+Result: exit 0; 4 test files passed, 60 tests passed.
+
+Typecheck command:
+
+```sh
+npm run check
+```
+
+Result: exit 0; `tsc --noEmit` passed.
+
+### Files changed
+
+- `src/editorial/normalize.ts`
+- `tests/unit/editorial/normalize.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/task-2-report.md`
+
+### Self-review
+
+- `primaryDocumentUrls` and other structural arrays continue through raw whitespace processing only.
+- Provider topic arrays are decoded via `normalizeProviderText`, then drive both `providerTopics` persistence and configured-topic mapping.
+- No URL, ID, metadata-key, date, evidence-bound, or extraction-classification path changed in this round.
+
+### Concerns
+
+- None.

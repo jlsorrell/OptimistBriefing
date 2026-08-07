@@ -95,6 +95,15 @@ function stringArray(value: unknown): string[] {
     : [];
 }
 
+function providerTextArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value
+        .filter((entry): entry is string => typeof entry === "string")
+        .map(normalizedWhitespace)
+        .filter((entry) => entry.length > 0)
+    : [];
+}
+
 function scopedMaterialFacts(
   value: unknown,
 ): ScopedNewsMaterialFact[] {
@@ -199,7 +208,7 @@ export function normalizeCandidate(raw: unknown): Item {
       canonicalIdentifier,
     ),
   );
-  const topics = stringArray(input.topics);
+  const topics = providerTextArray(input.topics);
   const configuredTopics =
     candidate.kind === "paper" || candidate.kind === "blog"
       ? mapResearchTopicIds([

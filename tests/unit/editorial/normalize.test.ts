@@ -73,6 +73,19 @@ describe("research normalization", () => {
     );
   });
 
+  it("decodes provider topic arrays before mapping and persistence", () => {
+    const normalized = normalizeCandidate(candidate({
+      topics: ["&#115;ecure computation"],
+    }));
+
+    expect(normalized.metadata.providerTopics).toEqual([
+      "secure computation",
+    ]);
+    expect(normalized.metadata.configuredTopics).toContain(
+      "secure-computation-ml",
+    );
+  });
+
   it("stores conservative author keys and primary research source IDs", () => {
     const paper = normalizeCandidate(candidate());
     const commentary = normalizeCandidate(candidate({
