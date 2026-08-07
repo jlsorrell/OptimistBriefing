@@ -400,6 +400,57 @@ class ConcurrencyTrackingSummaryProvider implements ModelProvider {
   }
 }
 
+class TitleRepairingSummaryProvider implements ModelProvider {
+  readonly requests: GenerateObjectRequest[] = [];
+
+  async embed(
+    texts: readonly string[],
+  ): Promise<readonly (readonly number[])[]> {
+    return texts.map(() => [1, 0]);
+  }
+
+  async generateObject(input: GenerateObjectRequest): Promise<unknown> {
+    this.requests.push(input);
+    const sourceId = packetValue(input.sourcePacket, "source_id");
+    const title = packetValue(input.sourcePacket, "title");
+    const evidence = packetExcerpt(input.sourcePacket);
+    const repairing = input.sourcePacket.startsWith(
+      "VALIDATION ERRORS AND REQUIRED REPAIRS",
+    );
+    const provenance = {
+      sourceIds: [sourceId],
+      evidenceExcerpt: repairing ? title : evidence,
+    };
+    return {
+      title: repairing ? title : "Unsupported paraphrased headline",
+      oneSentence: evidence,
+      whyItMatters: evidence,
+      uncertainty: evidence,
+      claims: [{
+        text: evidence,
+        sourceIds: [sourceId],
+        evidenceExcerpt: evidence,
+      }],
+      accessLevel: packetAccessLevel(input.sourcePacket),
+      provenance: {
+        title: provenance,
+        oneSentence: {
+          sourceIds: [sourceId],
+          evidenceExcerpt: evidence,
+        },
+        whyItMatters: {
+          sourceIds: [sourceId],
+          evidenceExcerpt: evidence,
+        },
+        uncertainty: {
+          sourceIds: [sourceId],
+          evidenceExcerpt: evidence,
+        },
+      },
+    };
+  }
+}
+
 class WrongSourceGroundingProvider implements ModelProvider {
   async embed(
     texts: readonly string[],
@@ -3566,6 +3617,63 @@ describe("manual editorial run", () => {
 
     await expect(context.synthesize(normalized)).resolves.toHaveLength(2);
     expect(summary.maximumActive).toBe(1);
+  });
+
+  it("repairs canary-like extractive titles", async () => {
+    // This fails if title provenance rejects source titles, repair packets omit
+    // the original source packet, or synthesis retries more than once per item.
+    const provider = new TitleRepairingSummaryProvider();
+    const context = createProductionPipelineContext({
+      editionDate: "2033-03-13",
+      runId: "canary-like-title-repair",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: provider,
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [
+        {
+          ...rawResearchCandidate(
+            "2607.30001",
+            "Research title Alpha absent from the abstract",
+            20,
+          ),
+          abstract: "Alpha research evidence supports oversight, although long-term effects remain uncertain.",
+        },
+        {
+          ...rawResearchCandidate(
+            "2607.30002",
+            "Research title Beta absent from the abstract",
+            10,
+          ),
+          abstract: "Beta research evidence supports evaluation, although implementation remains uncertain.",
+        },
+        rawNewsCandidate("canary-world", "world"),
+        rawNewsCandidate("canary-technology", "technology"),
+        rawNewsCandidate("canary-ai-policy", "ai_policy"),
+        rawNewsCandidate("canary-dmv", "dmv"),
+        rawNewsCandidate("canary-baltimore", "baltimore"),
+        {
+          ...rawNewsCandidate("canary-world-second", "world"),
+          title: "Canary reserve opens a separate public service program",
+        },
+      ],
+    });
+    const normalized = await context.normalize(await context.collect());
+    expect(normalized).toHaveLength(8);
+
+    const summaries = await context.synthesize(normalized);
+
+    expect(summaries).toHaveLength(8);
+    expect(summaries.filter(({ item }) => item.kind === "paper")).toHaveLength(2);
+    expect(provider.requests).toHaveLength(16);
+    expect(provider.requests.filter(({ sourcePacket }) =>
+      sourcePacket.startsWith("VALIDATION ERRORS AND REQUIRED REPAIRS")
+    )).toHaveLength(8);
+    expect(summaries.every(({ summary, item }) =>
+      summary.title === item.title
+    )).toBe(true);
   });
 
   it("drops hard-stop uncached assessment and caps degraded calls before 120-token radar synthesis", async () => {
