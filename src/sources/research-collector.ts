@@ -20,6 +20,7 @@ import {
 } from "./types";
 import type { PaperContentRetriever } from "./paper-content";
 import {
+  InvalidPreparedCandidateTextError,
   markPreparedRawCandidate,
   prepareRawCandidateForPipeline,
 } from "../editorial/normalize";
@@ -451,26 +452,55 @@ export class ResearchCollector {
       );
     }
 
-    const candidates = enriched.map((rawCandidate) => {
-      const candidate = RawResearchCandidateSchema.parse(
-        prepareRawCandidateForPipeline(rawCandidate),
-      );
-      const institutions = unique(
-        candidate.institutions.map(normalizeInstitutionName),
-      );
-      return markPreparedRawCandidate(RawResearchCandidateSchema.parse({
-        ...candidate,
-        institutions,
-        preferredInstitutionMatches: institutions.filter((institution) =>
-          this.preferredInstitutions.has(institution),
-        ),
-      }));
+    const qualityRejectedByLane = new Map<string, number>();
+    const candidates = enriched.flatMap((rawCandidate) => {
+      try {
+        const candidate = RawResearchCandidateSchema.parse(
+          prepareRawCandidateForPipeline(rawCandidate),
+        );
+        const institutions = unique(
+          candidate.institutions.map(normalizeInstitutionName),
+        );
+        return [markPreparedRawCandidate(RawResearchCandidateSchema.parse({
+          ...candidate,
+          institutions,
+          preferredInstitutionMatches: institutions.filter((institution) =>
+            this.preferredInstitutions.has(institution),
+          ),
+        }))];
+      } catch (error) {
+        if (error instanceof InvalidPreparedCandidateTextError) {
+          for (const laneId of metadataStringArray(
+            rawCandidate.metadata,
+            "discoveryLaneIds",
+          )) {
+            qualityRejectedByLane.set(
+              laneId,
+              (qualityRejectedByLane.get(laneId) ?? 0) + 1,
+            );
+          }
+          return [];
+        }
+        throw error;
+      }
     });
     return {
       candidates,
       succeededSourceIds: unique(succeededSourceIds),
       failures,
-      discoveryDiagnostics,
+      discoveryDiagnostics: discoveryDiagnostics.map((diagnostic) => {
+        const qualityRejected = qualityRejectedByLane.get(diagnostic.laneId) ??
+          0;
+        return qualityRejected === 0
+          ? diagnostic
+          : DiscoveryLaneDiagnosticSchema.parse({
+              ...diagnostic,
+              rejectionCounts: {
+                ...diagnostic.rejectionCounts,
+                quality_rejected: qualityRejected,
+              },
+            });
+      }),
     };
   }
 }

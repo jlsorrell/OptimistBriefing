@@ -54,12 +54,14 @@ import {
 import { CONFIGURED_RESEARCH_TOPIC_IDS } from "../../../src/editorial/research-topics";
 import { composeEdition } from "../../../src/workflow/compose-edition";
 import { sourcePacketForItem } from "../../../src/workflow/source-packet";
+import { normalizeCandidate } from "../../../src/editorial/normalize";
 import type {
   GenerateObjectRequest,
   ModelProvider,
 } from "../../../src/models/provider";
 import type {
   DiscoveryDiagnosticsState,
+  DiscoveryLaneDiagnostic,
   DiscoveryObservation,
   RawNewsCandidate,
   RawPublicationCandidate,
@@ -909,6 +911,71 @@ async function publishD1FixtureEdition(
 }
 
 describe("manual editorial run", () => {
+  it("isolates an empty prepared title without swallowing structural errors", async () => {
+    const laneId = "official-publication:empty-prepared-title";
+    const diagnosticWrites: DiscoveryLaneDiagnostic[][] = [];
+    const emptyTitle = {
+      ...rawNewsCandidate("empty-prepared-title", "world"),
+      title: "&#32;",
+      metadata: {
+        discoveryFamily: "official-publication",
+        discoveryLaneIds: [laneId],
+      },
+    };
+    const valid = {
+      ...rawNewsCandidate("valid-prepared-title", "world"),
+      metadata: {
+        discoveryFamily: "official-publication",
+        discoveryLaneIds: [laneId],
+      },
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-01",
+      runId: "run-isolate-empty-prepared-title",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [emptyTitle, valid],
+      loadDiscoveryDiagnostics: () => [{
+        laneId,
+        sourceId: "custom",
+        discoveryFamily: "official-publication",
+        discovered: 2,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "success",
+        rejectionCounts: {},
+      }],
+      researchRepository: {
+        getDiscoveryObservations: async () => [],
+        upsertDiscoveryObservations: async () => undefined,
+        getCachedResearchAssessment: async () => null,
+        putCachedResearchAssessment: async () => undefined,
+        recordDiscoveryDiagnostics: async (_runId, diagnostics) => {
+          diagnosticWrites.push(structuredClone([...diagnostics]));
+        },
+      },
+    });
+
+    const collected = await context.collect();
+    expect(diagnosticWrites[0]?.[0]?.rejectionCounts).toEqual({
+      quality_rejected: 1,
+    });
+    const normalized = await context.normalize(collected);
+
+    expect(collected).toHaveLength(1);
+    expect(normalized).toHaveLength(1);
+    expect(normalized[0]?.title).toBe(valid.title);
+    await expect(context.normalize([{
+      ...valid,
+      originalUrl: "javascript:alert(1)",
+    }])).rejects.toThrow();
+  });
+
   it("prepares publication text before routing without changing structure", async () => {
     const publication: RawPublicationCandidate = {
       ...rawOfficialPublicationCandidate(
@@ -1244,6 +1311,7 @@ describe("manual editorial run", () => {
 
   it("normalizes legacy completed checkpoints in memory before assessment", async () => {
     const store = new FixtureStore();
+    const observedEvidenceFingerprints: string[] = [];
     const legacyRaw: RawResearchCandidate = {
       ...rawResearchCandidate(
         "2607.checkpoint-legacy",
@@ -1290,6 +1358,13 @@ describe("manual editorial run", () => {
           sourceName: "Signal &#83;ource",
           structuralValue: "keep&#65;",
         }],
+        namedEntities: ["Stale &#69;ntity"],
+        eventFamilies: ["stale-event-family"],
+        eventInstances: [{ stale: "&#69;vent" }],
+        materialFacts: [{ stale: "&#70;act" }],
+        scopedMaterialFacts: [{ stale: "&#83;coped fact" }],
+        contentFingerprint: "content:stale-legacy-value",
+        evidenceFingerprint: "evidence:stale-legacy-value",
         configuredTopics: ["stale-topic"],
         primaryTopic: "stale-topic",
         workflow: {
@@ -1297,6 +1372,36 @@ describe("manual editorial run", () => {
           rawResearch: legacyRaw,
           topicalFit: 0.9,
         },
+      },
+    });
+    const rawLegacyNews: RawNewsCandidate = {
+      ...rawNewsCandidate("legacy-news-signals", "world"),
+      title: "Federal Reserve raises interest rates to 5%",
+      abstract:
+        "Federal Reserve raises interest rates to 5% after the meeting.",
+      namedEntities: [],
+      eventFamilies: [],
+      materialFacts: [],
+    };
+    const freshNews = normalizeCandidate(rawLegacyNews);
+    const legacyNews = ItemSchema.parse({
+      ...freshNews,
+      title: "F&#101;deral Reserve raises interest rates to 5%",
+      normalizedText:
+        "F&#101;deral Reserve raises interest rates to 5% after the meeting.",
+      metadata: {
+        ...freshNews.metadata,
+        namedEntities: ["Stale &#69;ntity"],
+        eventFamilies: ["stale-event-family"],
+        eventInstances: [{ stale: "&#69;vent" }],
+        materialFacts: [{ stale: "&#70;act" }],
+        scopedMaterialFacts: [{ stale: "&#83;coped fact" }],
+        editorialSignals: [{
+          ...(freshNews.metadata.editorialSignals as
+            Record<string, unknown>[])[0],
+          namedEntities: ["Stale &#69;ntity"],
+          eventFamilies: ["stale-event-family"],
+        }],
       },
     });
     const assessmentProvider = new FakeModelProvider({
@@ -1313,6 +1418,18 @@ describe("manual editorial run", () => {
       },
       collectCandidates: async () => {
         throw new Error("completed collect must not run");
+      },
+      researchRepository: {
+        getDiscoveryObservations: async () => [],
+        upsertDiscoveryObservations: async () => undefined,
+        getCachedResearchAssessment: async (
+          _canonicalId,
+          evidenceFingerprint,
+        ) => {
+          observedEvidenceFingerprints.push(evidenceFingerprint);
+          return null;
+        },
+        putCachedResearchAssessment: async () => undefined,
       },
     });
     context.normalize = async () => {
@@ -1334,10 +1451,10 @@ describe("manual editorial run", () => {
     });
     for (const step of ["collect", "normalize", "enrich", "prefilter"] as const) {
       await store.saveCheckpoint(context.runId, step, {
-        output: [legacyItem],
+        output: [legacyItem, legacyNews],
         attempts: 1,
         durationMs: 0,
-        itemCount: 1,
+        itemCount: 2,
         estimatedCostUsd: 0,
       });
     }
@@ -1355,6 +1472,7 @@ describe("manual editorial run", () => {
       `${context.runId}:assess`,
     ) as CheckpointArtifact<readonly Item[]>;
     const assessed = assessedArtifact.output[0]!;
+    const assessedNews = assessedArtifact.output[1]!;
     const compact = (assessed.metadata.workflow as {
       rawResearch: RawResearchCandidate;
     }).rawResearch;
@@ -1364,6 +1482,19 @@ describe("manual editorial run", () => {
       sourceName: "Checkpoint & Source",
     }]);
     expect(assessed.metadata.normalizedAuthors).toEqual([]);
+    expect(assessed.metadata.contentFingerprint).toBeUndefined();
+    expect(assessed.metadata.evidenceFingerprint).toBeUndefined();
+    expect(observedEvidenceFingerprints).toEqual([
+      researchFingerprints(assessed).evidenceFingerprint,
+    ]);
+    expect(observedEvidenceFingerprints).not.toContain(
+      "evidence:stale-legacy-value",
+    );
+    expect(assessed.metadata.namedEntities).toEqual([]);
+    expect(assessed.metadata.eventFamilies).toEqual([]);
+    expect(assessed.metadata.eventInstances).toEqual([]);
+    expect(assessed.metadata.materialFacts).toEqual([]);
+    expect(assessed.metadata.scopedMaterialFacts).toEqual([]);
     expect(assessed.metadata.configuredTopics).toContain(
       "alignment-interpretability",
     );
@@ -1374,18 +1505,35 @@ describe("manual editorial run", () => {
         excerpt: "Attached evidence excerpt.",
       }),
     ]);
-    expect(assessed.metadata.editorialSignals).toEqual([
-      {
-        sourceName: "Signal Source",
-        structuralValue: "keep&#65;",
-      },
-    ]);
+    expect(JSON.stringify(assessed.metadata.editorialSignals)).not.toContain(
+      "&#",
+    );
     expect(JSON.stringify(sourcePacketForItem(assessed))).toContain(
       "Attached Commentary",
     );
     expect(JSON.stringify(sourcePacketForItem(assessed))).toContain(
       "Attached evidence excerpt.",
     );
+    for (const field of [
+      "namedEntities",
+      "eventFamilies",
+      "eventInstances",
+      "materialFacts",
+      "scopedMaterialFacts",
+      "editorialSignals",
+    ] as const) {
+      expect(assessedNews.metadata[field]).toEqual(freshNews.metadata[field]);
+    }
+    expect(assessedNews).toMatchObject({
+      title: freshNews.title,
+      normalizedText: freshNews.normalizedText,
+      primaryTopic: freshNews.primaryTopic,
+      tags: freshNews.tags,
+    });
+    expect(clusterNews([assessedNews], {})).toEqual(
+      clusterNews([freshNews], {}),
+    );
+    expect(JSON.stringify(assessedNews)).not.toContain("Stale &#");
     expect(triageResearch([assessed], {
       maximum: 1,
       maximumPerFamily: 1,

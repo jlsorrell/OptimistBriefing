@@ -166,6 +166,43 @@ async function newsCollectorWithFixtures() {
 }
 
 describe("NewsCollector", () => {
+  it("drops an entity-only GDELT title without losing its valid sibling", async () => {
+    const adapter = new GdeltAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({
+          articles: [
+            {
+              url: "https://news.example.com/empty-title",
+              title: "&nbsp;",
+              seendate: "20260729T081500Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/valid-title",
+              title: "Artificial intelligence regulation advances",
+              seendate: "20260729T081600Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+          ],
+        })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      gdeltSource,
+      { query: "AI policy", maxRecords: 2 },
+    );
+
+    const candidates = await adapter.collect(fixedWindow());
+
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.originalUrl).toBe(
+      "https://news.example.com/valid-title",
+    );
+  });
+
   it("keeps triple-encoded GDELT text inert after central normalization", async () => {
     const adapter = new GdeltAdapter(
       new SourceHttpClient({

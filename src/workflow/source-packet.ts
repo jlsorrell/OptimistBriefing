@@ -63,6 +63,13 @@ function sourceDocumentForItem(item: Item): SourcePacket {
   for (const source of item.sourceRefs) {
     if (sources.has(source.id)) continue;
     const commentary = attachedCommentary.get(source.id);
+    const commentaryExcerpt = commentary === undefined
+      ? ""
+      : truncateProviderTextAtCodePointBoundary(commentary.excerpt, 4_000);
+    const itemExcerpt = truncateProviderTextAtCodePointBoundary(
+      item.normalizedText,
+      4_000,
+    );
     sources.set(source.id, {
       sourceId: source.id,
       sourceName: source.name,
@@ -78,10 +85,11 @@ function sourceDocumentForItem(item: Item): SourcePacket {
       accessLevel: commentary?.accessLevel ?? item.accessLevel,
       excerpts: [{
         number: 1,
-        text: truncateProviderTextAtCodePointBoundary(
-          commentary?.excerpt ?? item.normalizedText,
-          4_000,
-        ) || item.title,
+        text: commentaryExcerpt.trim().length > 0
+          ? commentaryExcerpt
+          : itemExcerpt.trim().length > 0
+            ? itemExcerpt
+            : item.title,
       }],
     });
   }

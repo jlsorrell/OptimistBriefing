@@ -241,6 +241,7 @@ const DISCOVERY_REJECTION_STAGE_OWNERS: Record<
     "unchanged_observation",
     "identity_merged",
     "route_excluded",
+    "quality_rejected",
     "capacity_limited",
   ]),
   prefilter: new Set([

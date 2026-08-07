@@ -124,6 +124,13 @@ export type PreparedRawCandidate = Record<string, unknown> & {
   readonly [PREPARED_RAW_CANDIDATE]: true;
 };
 
+export class InvalidPreparedCandidateTextError extends Error {
+  constructor(readonly field: "title") {
+    super(`INVALID_PREPARED_CANDIDATE_TEXT:${field}`);
+    this.name = "InvalidPreparedCandidateTextError";
+  }
+}
+
 export function isPreparedRawCandidate(
   value: unknown,
 ): value is PreparedRawCandidate {
@@ -204,12 +211,16 @@ export function prepareRawCandidateForPipeline(
       metadata.preferredInstitutionMatches,
     );
   }
+  const title = normalizeProviderText(candidate.title, {
+    maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+  });
+  if (title === null) {
+    throw new InvalidPreparedCandidateTextError("title");
+  }
   return markPreparedRawCandidate({
     ...input,
     ...candidate,
-    title: normalizeProviderText(candidate.title, {
-      maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
-    }) ?? "",
+    title,
     sourceName: normalizeProviderText(candidate.sourceName, {
       maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
     }) ?? "",

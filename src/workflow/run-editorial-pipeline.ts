@@ -17,12 +17,15 @@ import {
 } from "../sources/collection-settlement";
 import { durableCollectedCandidate } from "../sources/durable-evidence";
 import {
+  InvalidPreparedCandidateTextError,
   isPreparedRawCandidate,
   markPreparedRawCandidate,
   normalizePreparedAuthorKey,
+  normalizePreparedTitleKey,
   normalizePreparedCandidate,
   prepareRawCandidateForPipeline,
 } from "../editorial/normalize";
+import { deriveNewsSignals } from "../sources/news-signals";
 import { routePublication } from "../editorial/route-publication";
 import {
   deduplicateItems,
@@ -1270,8 +1273,12 @@ function normalizedStoredArray(value: unknown): string[] {
   return normalized;
 }
 
-function normalizedStoredItem(item: Item): Item {
+function normalizedStoredItem(item: Item, refreshDerived = false): Item {
   const metadata: Record<string, unknown> = { ...item.metadata };
+  if (refreshDerived) {
+    delete metadata.contentFingerprint;
+    delete metadata.evidenceFingerprint;
+  }
   for (const key of [
     "authors",
     "institutions",
@@ -1325,7 +1332,7 @@ function normalizedStoredItem(item: Item): Item {
       return normalized;
     });
   }
-  if (Array.isArray(metadata.editorialSignals)) {
+  if (!refreshDerived && Array.isArray(metadata.editorialSignals)) {
     metadata.editorialSignals = metadata.editorialSignals.map((entry) => {
       if (entry === null || typeof entry !== "object" || Array.isArray(entry)) {
         return entry;
@@ -1355,12 +1362,76 @@ function normalizedStoredItem(item: Item): Item {
       ])
     : [];
   if (research) metadata.configuredTopics = configuredTopics;
-  const primaryTopic = configuredTopics[0] ??
+  let primaryTopic = configuredTopics[0] ??
     normalizedStoredDisplay(item.primaryTopic);
-  return ItemSchema.parse({
+  let tags = [...item.tags];
+  if (refreshDerived) {
+    metadata.normalizedTitle = normalizePreparedTitleKey(title);
+    const derivedFields = [
+      "namedEntities",
+      "eventFamilies",
+      "eventInstances",
+      "materialFacts",
+      "scopedMaterialFacts",
+      "editorialSignals",
+    ] as const;
+    for (const field of derivedFields) delete metadata[field];
+
+    if (item.kind === "paper" || item.kind === "blog") {
+      metadata.namedEntities = [];
+      metadata.eventFamilies = [];
+      metadata.eventInstances = [];
+      metadata.materialFacts = [];
+      metadata.scopedMaterialFacts = [];
+    } else {
+      const sectionEligibility = itemStringArray(metadata.sectionEligibility)
+        .flatMap((section): EditionSection[] => {
+          const parsed = EditionSectionSchema.safeParse(section);
+          return parsed.success ? [parsed.data] : [];
+        });
+      const signals = deriveNewsSignals({
+        kind: item.kind,
+        title,
+        abstract: normalizedText,
+        content: null,
+        originalUrl: item.canonicalUrl,
+        sectionEligibility,
+        metadata,
+        preferredSection: undefined,
+      });
+      metadata.sectionEligibility = signals.sectionEligibility;
+      metadata.namedEntities = signals.namedEntities;
+      metadata.primaryDocumentUrl = signals.primaryDocumentUrl;
+      metadata.primaryDocumentUrls = signals.primaryDocumentUrls;
+      metadata.eventFamilies = signals.eventFamilies;
+      metadata.eventInstances = signals.eventInstances;
+      metadata.materialFacts = signals.materialFacts;
+      metadata.scopedMaterialFacts = signals.scopedMaterialFacts;
+      metadata.primarySection = signals.metadata.primarySection;
+      const section = EditionSectionSchema.parse(
+        signals.metadata.primarySection,
+      );
+      primaryTopic = section;
+      const sectionNames = new Set<EditionSection>([
+        "world",
+        "technology",
+        "ai_policy",
+        "dmv",
+        "baltimore",
+        "research",
+      ]);
+      tags = [...new Set([
+        ...item.tags.filter((tag) => !sectionNames.has(tag as EditionSection)),
+        ...signals.sectionEligibility,
+        section,
+      ])].sort((left, right) => left.localeCompare(right));
+    }
+  }
+  const normalized = ItemSchema.parse({
     ...item,
     title,
     primaryTopic,
+    tags,
     sourceRefs: item.sourceRefs.map((source) => ({
       ...source,
       name: normalizedStoredDisplay(source.name),
@@ -1368,13 +1439,23 @@ function normalizedStoredItem(item: Item): Item {
     normalizedText,
     metadata,
   });
+  return refreshDerived
+    ? ItemSchema.parse({
+        ...normalized,
+        metadata: {
+          ...normalized.metadata,
+          editorialSignals: editorialSignals(normalized),
+        },
+      })
+    : normalized;
 }
 
 function normalizedStoredWorkflowItem(
   item: Item,
   ensureWorkflow = false,
+  refreshDerived = false,
 ): Item {
-  const normalizedStored = normalizedStoredItem(item);
+  const normalizedStored = normalizedStoredItem(item, refreshDerived);
   if (
     normalizedStored.metadata.workflow === undefined &&
     !ensureWorkflow
@@ -1390,10 +1471,12 @@ function normalizedStoredWorkflowItem(
         ...existing.development,
         title: normalizedStoredDisplay(existing.development.title),
         items: existing.development.items.map((nestedItem) =>
-          normalizedStoredWorkflowItem(nestedItem)
+          normalizedStoredWorkflowItem(nestedItem, false, refreshDerived)
         ),
         representativeItem: normalizedStoredWorkflowItem(
           existing.development.representativeItem,
+          false,
+          refreshDerived,
         ),
         sourceRefs: existing.development.sourceRefs.map((source) => ({
           ...source,
@@ -2028,19 +2111,32 @@ export function createProductionPipelineContext(
       ? {}
       : { cleanupTerminalReservations: options.cleanupTerminalReservations }),
     collect: async () => {
-      const prepared = (await options.collectCandidates()).map((candidate) => {
-        if (!isRawCollectedCandidate(candidate)) return candidate;
+      const prepared: unknown[] = [];
+      const invalidContent: DiscoveryDiagnosticRef[] = [];
+      for (const candidate of await options.collectCandidates()) {
+        if (!isRawCollectedCandidate(candidate)) {
+          prepared.push(candidate);
+          continue;
+        }
         const durable = durableCollectedCandidate(candidate);
-        return isPreparedRawCandidate(candidate)
-          ? markPreparedRawCandidate(durable)
-          : prepareRawCandidateForPipeline(durable);
-      });
+        try {
+          prepared.push(isPreparedRawCandidate(candidate)
+            ? markPreparedRawCandidate(durable)
+            : prepareRawCandidateForPipeline(durable));
+        } catch (error) {
+          if (!(error instanceof InvalidPreparedCandidateTextError)) {
+            throw error;
+          }
+          invalidContent.push(...rawDiagnosticRefs(candidate));
+        }
+      }
       const collected = z.array(CollectedCandidateSchema).parse(prepared)
         .map((candidate) =>
           isRawCollectedCandidate(candidate)
             ? markPreparedRawCandidate(candidate)
             : candidate
         );
+      await rejectDiscoveryDiagnostics("quality_rejected", invalidContent);
       await recordDiscoveryDiagnostics();
       return collected;
     },
@@ -2050,14 +2146,25 @@ export function createProductionPipelineContext(
       });
       const normalized: Item[] = [];
       const routeExcluded: DiscoveryDiagnosticRef[] = [];
+      const invalidContent: DiscoveryDiagnosticRef[] = [];
       for (const candidate of candidates) {
-        const routed = normalizedCandidate(candidate);
+        let routed: Item | null;
+        try {
+          routed = normalizedCandidate(candidate);
+        } catch (error) {
+          if (!(error instanceof InvalidPreparedCandidateTextError)) {
+            throw error;
+          }
+          invalidContent.push(...rawDiagnosticRefs(candidate));
+          continue;
+        }
         if (routed === null) {
           routeExcluded.push(...rawDiagnosticRefs(candidate));
         } else {
           normalized.push(routed);
         }
       }
+      await rejectDiscoveryDiagnostics("quality_rejected", invalidContent);
       await rejectDiscoveryDiagnostics("route_excluded", routeExcluded);
       const unboundedResearch = normalized.filter(isResearchItem);
       const boundedResearch = boundResearchDiscoveryPool(
@@ -3003,7 +3110,7 @@ function normalizedRestoredCheckpointOutput(
     case "cluster":
     case "shortlist":
       return (output as readonly Item[]).map((item) =>
-        normalizedStoredWorkflowItem(item)
+        normalizedStoredWorkflowItem(item, false, true)
       );
     case "synthesize":
     case "validate":
@@ -3012,7 +3119,7 @@ function normalizedRestoredCheckpointOutput(
         [key: string]: unknown;
       }[]).map((candidate) => ({
         ...candidate,
-        item: normalizedStoredWorkflowItem(candidate.item),
+        item: normalizedStoredWorkflowItem(candidate.item, false, true),
       }));
     case "compose":
     case "publish":

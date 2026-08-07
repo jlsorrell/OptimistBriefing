@@ -41,6 +41,40 @@ function sourceItem(
 }
 
 describe("sourcePacketForItem", () => {
+  it.each([
+    ["empty", ""],
+    ["malformed-surrogate", "\uDC00"],
+  ])(
+    "falls back from an %s commentary excerpt to the item's normalized evidence",
+    (_label, excerpt) => {
+      const item = sourceItem(
+        "source-a",
+        "Title must be the last fallback",
+        "Primary normalized evidence.",
+        "abstract",
+      );
+      const packet = sourcePacketForItem(ItemSchema.parse({
+        ...item,
+        metadata: {
+          ...item.metadata,
+          attachedCommentary: [{
+            sourceId: "source-a",
+            title: "Attached commentary",
+            url: "https://example.com/commentary/source-a",
+            retrievedAt,
+            accessLevel: "secondary",
+            excerpt,
+          }],
+        },
+      }));
+
+      expect(packet.sources[0]!.excerpts).toEqual([{
+        number: 1,
+        text: "Primary normalized evidence.",
+      }]);
+    },
+  );
+
   it("keeps each clustered development source's bounded evidence separate", () => {
     // This fails if a development's aggregate normalized text is copied to every source.
     const sourceA = sourceItem(

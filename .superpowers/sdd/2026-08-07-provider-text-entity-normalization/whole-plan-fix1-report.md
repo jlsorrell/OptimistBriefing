@@ -461,6 +461,157 @@ Planned message: `fix: trust provider normalization checkpoint envelope`. The re
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 9
+
+Round 9 makes provider-text normalization fail open per candidate, refreshes
+stale derived state only when restoring legacy Item checkpoints without a
+normalization envelope, and restores the intended source-packet evidence
+fallback order. No database migration, deployment, history rewrite, or
+unrelated OAuth change was made.
+
+### RED evidence
+
+The GDELT and research sibling-isolation regressions were first run with:
+
+```sh
+npx vitest run tests/unit/sources/news-collector.test.ts tests/unit/sources/research-collector.test.ts
+```
+
+Result: exit 1; 2 intended failures and 103 surrounding passes. GDELT retained
+the entity-only title as an empty candidate, while final research preparation
+threw and aborted the successful lane rather than retaining its valid sibling.
+
+The production custom/legacy normalization regression was first run with:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "isolates an empty prepared title"
+```
+
+Result: exit 1; the entity-only title caused the production collect stage to
+throw a Zod minimum-length error. The same regression also requires a malformed
+structural URL to continue throwing and now verifies the lane's
+`quality_rejected` diagnostic.
+
+The source-packet fallback regressions were first run with:
+
+```sh
+npx vitest run tests/unit/workflow/source-packet.test.ts
+```
+
+Result: exit 1; 2 intended failures and 1 surrounding pass. Both an empty
+commentary excerpt and a lone low surrogate skipped normalized evidence and
+fell directly back to the title.
+
+The legacy checkpoint regression was extended with stale research fingerprints
+and stale research/news signal fields, then run against the real pipeline
+restoration path. It failed because the stale fingerprints survived into the
+assessment cache key and stale literal entity signal values survived
+restoration. The news expectations compare routing fields, editorial signals,
+and clustering against a fresh normalized Item.
+
+### Implementation
+
+- Added `InvalidPreparedCandidateTextError` as the sole catchable signal for a
+  title that becomes unusable after provider-text preparation. GDELT, research
+  collection, production collection, and the raw normalization loop omit only
+  that candidate; unrelated schema, URL, and infrastructure errors still
+  propagate. Valid siblings continue through the lane/stage.
+- Production discovery diagnostics now own `quality_rejected` at normalize and
+  count rejected custom candidates when lineage is available. Research
+  collection records the same reason against each affected discovery lane.
+- Scoped derived-state refresh to legacy checkpoint restoration when the
+  provider-text normalization envelope is absent. It deletes stored research
+  content/evidence fingerprints, recomputes the normalized title and research
+  topic identity, invalidates research news-signal arrays, derives news
+  classification/entities/events/facts from the once-normalized title and
+  evidence, and reconstructs editorial signal records from the refreshed Item.
+  Current in-memory Items and current envelopes retain their existing derived
+  state, preserving compact checkpoint clustering.
+- Structural provenance, access levels, source and canonical URLs, IDs, and
+  dates remain unchanged. Generic metadata is not recursively decoded.
+- Source packets separately apply code-point-safe truncation to commentary and
+  Item evidence. Empty/whitespace/surrogate-only commentary falls back to
+  bounded `normalizedText`, then to the title only if that evidence is also
+  empty.
+
+### GREEN evidence
+
+Affected unit/editorial/workflow suites:
+
+```sh
+npx vitest run tests/unit/sources tests/unit/editorial tests/unit/workflow
+```
+
+Result: exit 0; 21 files and 514 tests passed.
+
+Full Worker suite:
+
+```sh
+npm run test:worker
+```
+
+Result: exit 0; 11 files and 216 tests passed. The run emitted only the existing
+third-party missing-sourcemap warnings.
+
+Remaining non-Worker suite excluding the unrelated managed-OAuth fixture:
+
+```sh
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+```
+
+Result: exit 0; 39 files and 743 tests passed.
+
+Static, evaluation, build, and diff verification:
+
+```sh
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results: all exited 0. TypeScript passed, the golden evaluation passed every
+relevance/identity/routing/grounding check, Vite built 53 modules, and the diff
+contained no whitespace errors.
+
+### Files changed
+
+- `src/editorial/normalize.ts`
+- `src/sources/gdelt.ts`
+- `src/sources/research-collector.ts`
+- `src/sources/types.ts`
+- `src/workflow/run-editorial-pipeline.ts`
+- `src/workflow/source-packet.ts`
+- `tests/integration/workflow/manual-run.test.ts`
+- `tests/unit/sources/news-collector.test.ts`
+- `tests/unit/sources/research-collector.test.ts`
+- `tests/unit/workflow/source-packet.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+
+### Self-review
+
+- Catch sites match the dedicated invalid-text class, not generic Zod or
+  adapter failures, so structural and infrastructure errors are not hidden.
+- The legacy refresh flag is passed only by missing-envelope checkpoint
+  restoration, including nested clustered Items. A full Worker regression
+  caught and prevented accidental refresh of current in-memory Items.
+- Fingerprints are removed before cache identity is requested. The regression
+  captures the repository's actual evidence-fingerprint argument and proves it
+  equals the refreshed Item's fingerprint rather than the stale literal.
+- Research signal arrays are invalidated because Item-only research checkpoints
+  do not retain a trustworthy raw abstract/content split. News fields are
+  rebuilt from normalized title/evidence plus bounded known section metadata.
+- No new entity-decoding pass was added. Derived fields consume the already
+  normalized Item strings.
+
+### Concerns
+
+- The repository-wide `npm test` command still has 13 failures confined to the
+  pre-existing managed-OAuth fixture. Authorization-server metadata is rejected
+  before the mocked registration stage; this round does not touch OAuth code or
+  tests. All 743 other non-Worker tests pass.
+- Worker runs emit existing third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 8
 
 Round 8 closes three post-preparation correctness gaps without changing the Round 7 Symbol or checkpoint-envelope lifecycle: Item identity keys no longer entity-decode prepared display text, legacy author keys are always freshly derived or cleared, and the shared truncator sanitizes malformed UTF-16 throughout its bounded prefix.

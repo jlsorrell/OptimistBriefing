@@ -190,6 +190,37 @@ async function collectorWithFixtures() {
 }
 
 describe("ResearchCollector", () => {
+  it("drops an entity-only research title without losing its valid sibling", async () => {
+    const collector = new ResearchCollector({
+      discoveryAdapters: [{
+        sourceId: "arxiv",
+        collect: async () => [
+          { ...rawPaper(), title: "&#32;" },
+          {
+            ...rawPaper(),
+            externalId: "arXiv:2607.00002",
+            externalIds: ["arXiv:2607.00002"],
+            originalUrl: "https://arxiv.org/abs/2607.00002",
+            title: "A valid sibling research result",
+          },
+        ],
+      }],
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates).toHaveLength(1);
+    expect(result.candidates[0]?.title).toBe(
+      "A valid sibling research result",
+    );
+    expect(result.discoveryDiagnostics?.[0]?.rejectionCounts).toEqual({
+      quality_rejected: 1,
+    });
+  });
+
   it("decodes institutions before preferred-institution matching", async () => {
     const candidate = {
       ...rawPaper(),

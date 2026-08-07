@@ -129,7 +129,8 @@ export class GdeltAdapter implements NewsSourceAdapter {
       if (title === null) return [];
       const signalTitle = normalizeProviderText(title, {
         maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
-      }) ?? "";
+      });
+      if (signalTitle === null) return [];
       const metadata = {
         discoveryOnly: true,
         discoveryProvider: "GDELT",
