@@ -1,7 +1,7 @@
 # Research Relevance and Source Reliability Design
 
 **Date:** 2026-08-07
-**Status:** Approved direction; awaiting written-spec review
+**Status:** Approved for implementation planning
 
 ## Problem
 
