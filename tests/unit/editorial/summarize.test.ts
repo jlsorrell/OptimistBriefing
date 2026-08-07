@@ -121,6 +121,71 @@ function researchCandidate(): RawResearchCandidate {
 }
 
 describe("summary rejection repair diagnostics", () => {
+  it.each([
+    {
+      code: "SCHEMA_INVALID:claims.0.text",
+      instruction:
+        "return a complete object matching the schema; use only supplied source IDs and exact source wording.",
+    },
+    {
+      code: "UNKNOWN_SOURCE",
+      instruction: "use only IDs present in the source packet.",
+    },
+    {
+      code: "EMPTY_EVIDENCE:0",
+      instruction:
+        "provide non-whitespace evidence copied from a numbered excerpt in every cited source, and cite only sources that contain that evidence.",
+    },
+    {
+      code: "EVIDENCE_NOT_FOUND:1",
+      instruction:
+        "copy evidence exactly from a numbered excerpt in every cited source, and cite only sources that contain that evidence.",
+    },
+    {
+      code: "CLAIM_EVIDENCE_NOT_EXACT",
+      instruction:
+        "cite only source IDs whose numbered excerpts contain the exact evidence text; use one source when only one contains it.",
+    },
+    {
+      code: "UNGROUNDED_CLAIM:2",
+      instruction:
+        "copy the claim assertion exactly from its evidence or cited source text.",
+    },
+    {
+      code: "PRIMARY_RESEARCH_SOURCE_REQUIRED:3",
+      instruction:
+        "cite eligible primary research for the assertion, or make exact named attribution to cited commentary.",
+    },
+    {
+      code: "ACCESS_LEVEL_OVERCLAIM",
+      instruction: "do not imply access beyond supplied access levels.",
+    },
+    {
+      code: "UNGROUNDED_PROSE:whyItMatters",
+      instruction:
+        "copy the field exactly from its provenance evidence; that evidence must occur in the title or a numbered excerpt of every cited source; field: whyItMatters.",
+    },
+    {
+      code: "EMPTY_UNCERTAINTY",
+      instruction:
+        "copy a non-empty uncertainty statement from supplied source wording.",
+    },
+    {
+      code: "FORECAST_LABEL_MISSING",
+      instruction:
+        "add the literal `Forecast, not fact.` label while keeping remaining prose extractive.",
+    },
+  ] as const)(
+    "maps $code to validator-aligned repair guidance",
+    ({ code, instruction }) => {
+      // This fails if a rejection family tells the repair model to make a
+      // change that the authoritative validator still rejects.
+      expect(buildSummaryRepairGuidance([code])).toBe(
+        `${code} — ${instruction}`,
+      );
+    },
+  );
+
   it("redacts unknown-source payloads, deduplicates, and sorts canonical codes", () => {
     expect(canonicalSummaryRejectionCodes([
       "UNKNOWN_SOURCE:secret%40example.com",
@@ -155,6 +220,28 @@ describe("summary rejection repair diagnostics", () => {
     expect(guidance.split("\n")).toHaveLength(2);
     expect(new TextEncoder().encode(guidance).byteLength).toBeLessThanOrEqual(
       16_384,
+    );
+  });
+
+  it("repairs multi-source evidence by retaining only sources containing the exact excerpt", () => {
+    // This fails if repair guidance permits an evidence excerpt to imply
+    // corroboration by a cited source that does not contain it.
+    expect(buildSummaryRepairGuidance([
+      "EMPTY_EVIDENCE:0",
+      "EVIDENCE_NOT_FOUND:0",
+      "CLAIM_EVIDENCE_NOT_EXACT",
+    ])).toContain(
+      "cite only source IDs whose numbered excerpts contain the exact evidence text; use one source when only one contains it.",
+    );
+  });
+
+  it("offers exact named commentary attribution when primary research is unavailable", () => {
+    // This fails if commentary-only research can be repaired only by adding a
+    // primary source, despite the validator's exact-attribution branch.
+    expect(buildSummaryRepairGuidance([
+      "PRIMARY_RESEARCH_SOURCE_REQUIRED:0",
+    ])).toContain(
+      "cite eligible primary research for the assertion, or make exact named attribution to cited commentary.",
     );
   });
 
@@ -259,6 +346,79 @@ describe("summarizeItem", () => {
           properties: {
             uncertainty: {
               required: ["sourceIds", "evidenceExcerpt"],
+            },
+          },
+        },
+      },
+    });
+  });
+
+  it("describes prominent provenance as title-or-excerpt while keeping claims excerpt-only", async () => {
+    // This fails if the schema invites the model to apply different grounding
+    // contracts to prominent fields, or lets a source title ground claim
+    // evidence that the validator accepts only from numbered excerpts.
+    const provider = new FakeModelProvider({
+      generatedObjects: [generatedSummary()],
+    });
+
+    await summarizeItem(packet, provider);
+
+    const prominentDescription =
+      "Copy wording exactly from a cited source title or numbered excerpt in every cited source.";
+    const prominentEvidenceDescription =
+      "Provide exact evidence from the title or a numbered excerpt of every cited source.";
+    const claimEvidenceDescription =
+      "Copy exact evidence from a numbered excerpt of every cited source; source titles alone do not ground claims.";
+    expect(provider.generateRequests[0]?.jsonSchema).toMatchObject({
+      properties: {
+        title: { description: prominentDescription },
+        oneSentence: { description: prominentDescription },
+        whyItMatters: { description: prominentDescription },
+        uncertainty: { description: prominentDescription },
+        claims: {
+          description:
+            "For each factual claim, evidence must appear in a numbered excerpt of every cited source; source titles alone do not ground claims.",
+          items: {
+            properties: {
+              text: {
+                description:
+                  "Copy the factual assertion exactly from its evidence or cited source text; evidence must come from a numbered excerpt of every cited source.",
+              },
+              evidenceExcerpt: { description: claimEvidenceDescription },
+            },
+          },
+        },
+        provenance: {
+          description:
+            "For each prominent field, evidence must be exact wording from the title or a numbered excerpt of every cited source.",
+          properties: {
+            title: {
+              properties: {
+                evidenceExcerpt: {
+                  description: prominentEvidenceDescription,
+                },
+              },
+            },
+            oneSentence: {
+              properties: {
+                evidenceExcerpt: {
+                  description: prominentEvidenceDescription,
+                },
+              },
+            },
+            whyItMatters: {
+              properties: {
+                evidenceExcerpt: {
+                  description: prominentEvidenceDescription,
+                },
+              },
+            },
+            uncertainty: {
+              properties: {
+                evidenceExcerpt: {
+                  description: prominentEvidenceDescription,
+                },
+              },
             },
           },
         },

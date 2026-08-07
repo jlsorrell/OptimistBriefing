@@ -16,16 +16,16 @@ function instructionFor(code: SummaryRejectionCode): string {
     return "return a complete object matching the schema; use only supplied source IDs and exact source wording.";
   }
   if (code.startsWith("EMPTY_EVIDENCE:")) {
-    return "provide non-whitespace evidence copied from the cited numbered excerpt.";
+    return "provide non-whitespace evidence copied from a numbered excerpt in every cited source, and cite only sources that contain that evidence.";
   }
   if (code.startsWith("EVIDENCE_NOT_FOUND:")) {
-    return "copy claim evidence from a numbered excerpt in every cited source.";
+    return "copy evidence exactly from a numbered excerpt in every cited source, and cite only sources that contain that evidence.";
   }
   if (code.startsWith("UNGROUNDED_CLAIM:")) {
-    return "copy claim text exactly from evidence found in every cited source.";
+    return "copy the claim assertion exactly from its evidence or cited source text.";
   }
   if (code.startsWith("PRIMARY_RESEARCH_SOURCE_REQUIRED:")) {
-    return "cite an eligible primary research source for the research claim.";
+    return "cite eligible primary research for the assertion, or make exact named attribution to cited commentary.";
   }
   if (code.startsWith("UNGROUNDED_PROSE:")) {
     const field = code.slice("UNGROUNDED_PROSE:".length);
@@ -36,7 +36,7 @@ function instructionFor(code: SummaryRejectionCode): string {
     case "UNKNOWN_SOURCE":
       return "use only IDs present in the source packet.";
     case "CLAIM_EVIDENCE_NOT_EXACT":
-      return "make claim text an exact extractive match to its evidence.";
+      return "cite only source IDs whose numbered excerpts contain the exact evidence text; use one source when only one contains it.";
     case "ACCESS_LEVEL_OVERCLAIM":
       return "do not imply access beyond supplied access levels.";
     case "EMPTY_UNCERTAINTY":

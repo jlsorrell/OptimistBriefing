@@ -402,10 +402,12 @@ class ConcurrencyTrackingSummaryProvider implements ModelProvider {
 
 class TitleRepairingSummaryProvider implements ModelProvider {
   readonly requests: GenerateObjectRequest[] = [];
+  readonly embedRequests: (readonly string[])[] = [];
 
   async embed(
     texts: readonly string[],
   ): Promise<readonly (readonly number[])[]> {
+    this.embedRequests.push([...texts]);
     return texts.map(() => [1, 0]);
   }
 
@@ -3620,9 +3622,17 @@ describe("manual editorial run", () => {
   });
 
   it("repairs canary-like extractive titles", async () => {
-    // This fails if title provenance rejects source titles, repair packets omit
-    // the original source packet, or synthesis retries more than once per item.
+    // This fails if production qualification or clustering drops a canary
+    // candidate, shortlist reservation moves qualified research behind news,
+    // title repair exceeds one attempt, or repaired summaries fail downstream
+    // validation and coverage composition.
     const provider = new TitleRepairingSummaryProvider();
+    const assessment = new FakeModelProvider({
+      generatedObjects: Array.from(
+        { length: 2 },
+        () => researchAssessment,
+      ),
+    });
     const context = createProductionPipelineContext({
       editionDate: "2033-03-13",
       runId: "canary-like-title-repair",
@@ -3630,7 +3640,7 @@ describe("manual editorial run", () => {
       now: () => now,
       providers: {
         summary: provider,
-        assessment: new FakeModelProvider(),
+        assessment,
       },
       collectCandidates: async () => [
         {
@@ -3660,10 +3670,34 @@ describe("manual editorial run", () => {
         },
       ],
     });
-    const normalized = await context.normalize(await context.collect());
-    expect(normalized).toHaveLength(8);
+    const collected = await context.collect();
+    const normalized = await context.normalize(collected);
+    const enriched = await context.enrich(normalized);
+    const prefiltered = await context.prefilter(enriched);
+    const assessed = await context.assess(prefiltered);
+    const scored = await context.score(assessed);
+    const clustered = await context.cluster(scored);
+    const shortlisted = await context.shortlist(clustered);
 
-    const summaries = await context.synthesize(normalized);
+    expect(collected).toHaveLength(8);
+    expect(normalized).toHaveLength(8);
+    expect(new Set(normalized.map(({ id }) => id)).size).toBe(8);
+    expect(prefiltered).toHaveLength(8);
+    expect(assessed).toHaveLength(8);
+    expect(assessment.generateRequests).toHaveLength(2);
+    expect(provider.embedRequests).toHaveLength(1);
+    expect(provider.embedRequests[0]).toHaveLength(11);
+    expect(clustered).toHaveLength(8);
+    expect(shortlisted).toHaveLength(8);
+    expect(shortlisted.filter(({ kind }) => kind === "paper")).toHaveLength(2);
+    expect(shortlisted.slice(0, 2).map(({ title }) => title)).toEqual([
+      "Research title Alpha absent from the abstract",
+      "Research title Beta absent from the abstract",
+    ]);
+
+    const summaries = await context.synthesize(shortlisted);
+    const validated = await context.validate(summaries);
+    const composition = await composeEdition(context, validated, normalized);
 
     expect(summaries).toHaveLength(8);
     expect(summaries.filter(({ item }) => item.kind === "paper")).toHaveLength(2);
@@ -3674,6 +3708,24 @@ describe("manual editorial run", () => {
     expect(summaries.every(({ summary, item }) =>
       summary.title === item.title
     )).toBe(true);
+    for (let index = 0; index < 8; index += 1) {
+      expect(provider.requests[index * 2]?.sourcePacket.startsWith(
+        "VALIDATION ERRORS AND REQUIRED REPAIRS",
+      )).toBe(false);
+      expect(provider.requests[index * 2 + 1]?.sourcePacket).toContain(
+        "UNGROUNDED_PROSE:title",
+      );
+    }
+    expect(validated).toHaveLength(8);
+    expect(validated.every(({ valid }) => valid)).toBe(true);
+    expect(composition).toMatchObject({
+      status: "published",
+      missingSections: [],
+    });
+    expect(composition.entries).toHaveLength(8);
+    expect(composition.entries.map(({ summary }) => summary.title)).toEqual(
+      shortlisted.map(({ title }) => title),
+    );
   });
 
   it("drops hard-stop uncached assessment and caps degraded calls before 120-token radar synthesis", async () => {

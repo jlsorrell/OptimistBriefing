@@ -399,11 +399,11 @@ Implement `instructionFor` as a total switch/prefix mapping over these families:
 
 - `SCHEMA_INVALID:*`: return a complete schema-valid object.
 - `UNKNOWN_SOURCE`: use only IDs present in the source packet.
-- `EMPTY_EVIDENCE:*`: provide non-whitespace evidence copied from the cited numbered excerpt.
-- `EVIDENCE_NOT_FOUND:*`: copy claim evidence from a numbered excerpt in every cited source.
-- `CLAIM_EVIDENCE_NOT_EXACT`: make claim text an exact extractive match to its evidence.
-- `UNGROUNDED_CLAIM:*`: copy claim text exactly from evidence found in every cited source.
-- `PRIMARY_RESEARCH_SOURCE_REQUIRED:*`: cite an eligible primary research source for the research claim.
+- `EMPTY_EVIDENCE:*`: provide non-whitespace evidence copied from a numbered excerpt in every cited source, and cite only sources that contain that evidence.
+- `EVIDENCE_NOT_FOUND:*`: copy evidence exactly from a numbered excerpt in every cited source, and cite only sources that contain that evidence.
+- `CLAIM_EVIDENCE_NOT_EXACT`: cite only source IDs whose numbered excerpts contain the exact evidence text; use one source when only one contains it.
+- `UNGROUNDED_CLAIM:*`: copy the claim assertion exactly from its evidence or cited source text.
+- `PRIMARY_RESEARCH_SOURCE_REQUIRED:*`: cite eligible primary research for the assertion, or make exact named attribution to cited commentary.
 - `ACCESS_LEVEL_OVERCLAIM`: do not imply access beyond supplied access levels.
 - `UNGROUNDED_PROSE:*`: use `PROMINENT_INSTRUCTION` and name the field from the code.
 - `EMPTY_UNCERTAINTY`: copy a non-empty uncertainty statement from supplied source wording.
@@ -413,7 +413,8 @@ The mapping must use only fixed strings plus a schema-validated field/index. It 
 
 ### Step 6: Wire guidance into summarization
 
-Update `GROUNDING_SYSTEM_PROMPT` and the JSON-schema provenance descriptions to say explicitly:
+Update `GROUNDING_SYSTEM_PROMPT`, all four prominent-field descriptions, and
+the JSON-schema provenance descriptions to say explicitly:
 
 ```text
 For each prominent field, provenance evidence must appear in the title or a numbered excerpt of every cited source.
@@ -554,10 +555,18 @@ class TitleRepairingSummaryProvider implements ModelProvider {
 
 Because the repair packet contains the original source packet below the guidance, the existing anchored multiline `packetValue` and `packetExcerpt` helpers should still locate source fields. Confirm this in the test instead of adding a second parser.
 
-Create eight normalized items using the existing raw-candidate fixtures: two primary research papers and six news items. These fixtures already give each source a title that is absent from its excerpt. Normalize through the production context, then call only `context.synthesize(normalized)`:
+Create eight distinct items using the existing raw-candidate fixtures: two
+primary research papers and six news items. These fixtures already give each
+source a title that is absent from its excerpt. Run them through the production
+enrichment, research prefilter and assessment, scoring, clustering, and
+shortlisting stages before synthesis. Then run the synthesized output through
+the production validator and `composeEdition` coverage boundary:
 
 ```ts
 const provider = new TitleRepairingSummaryProvider();
+const assessment = new FakeModelProvider({
+  generatedObjects: Array.from({ length: 2 }, () => researchAssessment),
+});
 const context = createProductionPipelineContext({
   editionDate: "2033-03-13",
   runId: "canary-like-title-repair",
@@ -565,7 +574,7 @@ const context = createProductionPipelineContext({
   now: () => now,
   providers: {
     summary: provider,
-    assessment: new FakeModelProvider(),
+    assessment,
   },
   collectCandidates: async () => [
     rawResearchCandidate(
@@ -586,9 +595,22 @@ const context = createProductionPipelineContext({
     rawNewsCandidate("canary-world-second", "world"),
   ],
 });
-const normalized = await context.normalize(await context.collect());
+const collected = await context.collect();
+const normalized = await context.normalize(collected);
+const enriched = await context.enrich(normalized);
+const prefiltered = await context.prefilter(enriched);
+const assessed = await context.assess(prefiltered);
+const scored = await context.score(assessed);
+const clustered = await context.cluster(scored);
+const shortlisted = await context.shortlist(clustered);
 
-const summaries = await context.synthesize(normalized);
+expect(shortlisted).toHaveLength(8);
+expect(shortlisted.slice(0, 2).every(({ kind }) => kind === "paper"))
+  .toBe(true);
+
+const summaries = await context.synthesize(shortlisted);
+const validated = await context.validate(summaries);
+const composition = await composeEdition(context, validated, normalized);
 
 expect(summaries).toHaveLength(8);
 expect(summaries.filter(({ item }) => item.kind === "paper")).toHaveLength(2);
@@ -599,9 +621,15 @@ expect(provider.requests.filter(({ sourcePacket }) =>
 expect(summaries.every(({ summary, item }) =>
   summary.title === item.title
 )).toBe(true);
+expect(validated.every(({ valid }) => valid)).toBe(true);
+expect(composition).toMatchObject({ status: "published", missingSections: [] });
+expect(composition.entries).toHaveLength(8);
 ```
 
-Assert the research count, not research positions: shortlist reservation ordering is already covered elsewhere, and this regression targets synthesis acceptance and repair behavior.
+Assert the reserved research positions at the shortlist boundary, then assert
+that all eight repaired items pass real downstream validation and coverage
+composition. Also assert exactly two assessment generations, one embedding
+batch, sixteen summary generations, and eight repair packets.
 
 ### Step 2: Run the focused regression and confirm GREEN
 
@@ -619,10 +647,13 @@ If the integration fixture needs adjustment, change only fixture construction or
 
 - eight items;
 - two primary-research items;
+- production prefilter, assessment, scoring, clustering, and shortlist stages;
+- reserved research ordering at the shortlist boundary;
 - one failed initial synthesis per item;
 - one successful repair per item;
 - exact title extraction from source titles;
-- sixteen total calls.
+- sixteen total summary calls and two assessment calls;
+- downstream validation and composition with no missing coverage.
 
 ### Step 4: Run adjacent workflow tests
 
