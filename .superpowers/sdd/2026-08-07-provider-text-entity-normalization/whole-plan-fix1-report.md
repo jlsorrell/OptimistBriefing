@@ -1182,6 +1182,169 @@ written.
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 17
+
+Round 17 narrows Round 16's signal-only residual encoded-tag scrub so it
+removes only conservative bare HTML/XML-like tag tokens. Ordinary comparisons,
+malformed/nested spans, unmatched delimiters, numeric tokens, leading
+whitespace, and unsupported attribute syntax remain exact and available to
+signal derivation. No entity-decoding, compatibility folding, persisted text,
+or structural field behavior changed.
+
+### Design
+
+Three approaches were considered before implementation. The approved approach
+uses a deterministic delimiter scanner plus a small bare-tag token parser. A
+candidate residual tag token may contain an immediate optional closing slash,
+must start its name with an ASCII letter, may continue with ASCII letters,
+digits, colon, period, underscore, or hyphen, and may end with one self-closing
+slash only when it is not a closing tag. Whitespace and attributes are not
+supported and therefore remain untouched as ambiguous provider prose.
+
+The scanner removes a token only when an encoded opening-angle delimiter is
+followed by an encoded closing-angle delimiter with no intervening encoded
+angle token and the exact interior passes that grammar. Consecutive opening
+delimiters enter a nested-ambiguity state through the next close and are
+preserved. Unmatched or malformed syntax is never repaired or decoded.
+
+A quoted-attribute parser was rejected because no current provider case
+requires attributes and it would add parsing and security surface. A tag-name
+allowlist was rejected because it would be brittle when providers introduce a
+new harmless wrapper. The existing named/decimal/hexadecimal ASCII/fullwidth
+delimiter recognition remains unchanged.
+
+The approved design is documented here instead of a separate spec/plan commit
+to preserve this round's single implementation-commit constraint.
+
+### RED evidence
+
+Adversarial primitive and real GDELT adapter-to-Item regressions were added
+before production changes and run with:
+
+```sh
+npm test -- --run tests/unit/sources/provider-text.test.ts tests/unit/sources/news-collector.test.ts -t "preserves ambiguous residual|removes only conservative residual|preserves ambiguous residual GDELT"
+```
+
+Result: exit 1; 8 intended failures and 3 selected surrounding passes. Seven
+primitive cases demonstrated the broad deletion: named and fullwidth numeric
+comparisons became `3 2`; a nested opening delimiter became `A C`; numeric,
+leading-whitespace, attribute, and malformed-name interiors were also deleted.
+The real GDELT candidate lost the visible `Baltimore` inside a comparison,
+derived no named entity, and routed `world` instead of `baltimore`. Unmatched
+opening and closing delimiter cases passed immediately, isolating the defect to
+paired-span validation.
+
+### Implementation
+
+- Added code-unit predicates for ASCII letters and the exact conservative tag-
+  name character set. The parser performs no regular-expression backtracking.
+- Added `isConservativeResidualTagToken`, which recognizes only bare opening,
+  closing, and self-closing tokens under the approved grammar. Closing self-
+  close, numeric-start, leading-whitespace, attribute, and malformed forms fail
+  closed and remain unchanged.
+- Changed `stripResidualEncodedTags` to remove only a validated interior between
+  an adjacent residual encoded open/close delimiter pair. Nested encoded angle
+  tokens suppress deletion through the next close; unmatched tokens remain.
+- The parser receives only text already bounded by the provider normalizer to
+  at most 100,000 UTF-16 code units. Each delimiter and candidate interior is
+  visited a constant number of times, candidate interiors do not overlap, and
+  the scan is linear in bounded input size.
+- Raw GDELT titles remain byte-for-byte unchanged in adapter candidates. The
+  final Item retains the intentionally inert residual entity syntax, while its
+  visible `Baltimore` text is again available to legitimate entity and section
+  derivation. A malformed nested case contains no routing keyword and remains
+  `world`.
+
+### GREEN evidence
+
+Focused provider/news/publication suites:
+
+```sh
+npm test -- --run tests/unit/sources/provider-text.test.ts tests/unit/sources/news-collector.test.ts tests/unit/sources/publication-collector.test.ts
+```
+
+Result: exit 0; 3 files and 110 tests passed.
+
+Affected source/editorial/workflow suites:
+
+```sh
+npx vitest run tests/unit/editorial tests/unit/workflow tests/unit/sources
+```
+
+Result: exit 0; 21 files and 554 tests passed.
+
+Full Worker suite:
+
+```sh
+npm run test:worker
+```
+
+Result: exit 0; 11 files and 233 tests passed, with only existing third-party
+missing-sourcemap warnings.
+
+Remaining non-Worker suite excluding the unrelated managed-OAuth fixture:
+
+```sh
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+```
+
+Result: exit 0; 39 files and 783 tests passed.
+
+Static, evaluation, build, and diff verification:
+
+```sh
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results: all exited 0. TypeScript passed, every golden relevance/identity/
+routing/grounding check passed, Vite built 53 modules, and the diff contained
+no whitespace errors.
+
+Independent read-only review found no Critical, Important, or Minor issues. It
+confirmed the grammar, named/decimal/hexadecimal/fullwidth coverage, bounded
+linear scan, lifecycle preservation, and helper/adapter mutation strength.
+
+### Files changed
+
+- `src/sources/provider-text.ts`
+- `tests/unit/sources/provider-text.test.ts`
+- `tests/unit/sources/news-collector.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+
+### Commit
+
+Planned message: `fix: validate residual provider tag tokens`. The resulting
+SHA is recorded in the task handoff because it is created after this report is
+written.
+
+### Self-review
+
+- Removing the token validator reproduces all seven exact primitive RED
+  failures. Removing comparison preservation from the adapter path loses
+  `Baltimore` and returns the stale `world` route.
+- Valid bare opening, closing, self-closing, namespaced, custom-element,
+  underscore, period, numeric-suffix, named-delimiter, hexadecimal-delimiter,
+  and fullwidth-delimiter forms are covered. Useful wrapper text remains.
+- Numeric comparisons, numeric-start tokens, leading whitespace, unsupported
+  quoted attributes, malformed names, nested openings, unmatched openings, and
+  unmatched closings are covered with independently derived literal outputs.
+- The GDELT regression checks raw candidate persistence, candidate named
+  entities, candidate primary section, normalized Item titles, malformed-world
+  routing, valid self-closing tag removal, and tag-only sibling omission.
+- The production change is confined to the Round 16 signal-only residual scrub.
+  The exactly-two-pass decoder, final NFKC fold, ordinary HTML stripping,
+  persisted adapter text, structural URLs/IDs/dates/metadata, publication
+  routing, and current/legacy checkpoint lifecycles are unchanged.
+- No recursive sanitizer, trusted-HTML insertion, deployment, canary, migration,
+  history rewrite, or unrelated OAuth change was introduced.
+
+### Concerns
+
+- None. Worker runs emit existing third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 12
 
 Round 12 closes the aggregate metadata contamination gap left by the Round 11

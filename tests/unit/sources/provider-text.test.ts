@@ -143,6 +143,76 @@ describe("provider text normalization", () => {
     )).toBe("Useful boundary text");
   });
 
+  it.each([
+    {
+      label: "named numeric comparison",
+      raw: "3 &amp;amp;lt; 5 &amp;amp;gt; 2",
+      expected: "3 &lt; 5 &gt; 2",
+    },
+    {
+      label: "fullwidth numeric comparison",
+      raw: "3 &amp;amp;#65308; 5 &amp;amp;#65310; 2",
+      expected: "3 &#65308; 5 &#65310; 2",
+    },
+    {
+      label: "nested opening delimiter",
+      raw: "A &amp;amp;lt;tag &amp;amp;lt; B &amp;amp;gt; C",
+      expected: "A &lt;tag &lt; B &gt; C",
+    },
+    {
+      label: "unmatched opening delimiter",
+      raw: "A &amp;amp;lt;tag C",
+      expected: "A &lt;tag C",
+    },
+    {
+      label: "unmatched closing delimiter",
+      raw: "A &amp;amp;gt; C",
+      expected: "A &gt; C",
+    },
+    {
+      label: "numeric token",
+      raw: "A &amp;amp;lt;123&amp;amp;gt; C",
+      expected: "A &lt;123&gt; C",
+    },
+    {
+      label: "leading token whitespace",
+      raw: "A &amp;amp;lt; tag&amp;amp;gt; C",
+      expected: "A &lt; tag&gt; C",
+    },
+    {
+      label: "unsupported attribute",
+      raw:
+        "A &amp;amp;lt;span class=&quot;note&quot;&amp;amp;gt; C",
+      expected: "A &lt;span class=\"note\"&gt; C",
+    },
+    {
+      label: "malformed name",
+      raw: "A &amp;amp;lt;-tag&amp;amp;gt; C",
+      expected: "A &lt;-tag&gt; C",
+    },
+  ])("preserves ambiguous residual $label syntax", ({ raw, expected }) => {
+    expect(normalizedProviderSignalText(raw, 500)).toBe(expected);
+  });
+
+  it("removes only conservative residual bare tag tokens", () => {
+    expect(normalizedProviderSignalText(
+      "A &amp;amp;lt;span&amp;amp;gt; B &amp;amp;lt;/span&amp;amp;gt; C",
+      500,
+    )).toBe("A B C");
+    expect(normalizedProviderSignalText(
+      "A &amp;amp;lt;br/&amp;amp;gt; B",
+      500,
+    )).toBe("A B");
+    expect(normalizedProviderSignalText(
+      "A &amp;amp;#x00003c;x-item_2.foo:bar/&amp;amp;#x00003e; B",
+      500,
+    )).toBe("A B");
+    expect(normalizedProviderSignalText(
+      "&amp;amp;lt;/technology&amp;amp;gt;",
+      500,
+    )).toBeNull();
+  });
+
   it("returns bounded plain text after decoding and tag removal", () => {
     expect(normalizeProviderText(
       "&lt;script&gt;bad()&lt;/script&gt; &nbsp; useful   text",

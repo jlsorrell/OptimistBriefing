@@ -57,27 +57,66 @@ function normalizeAndDecodeProviderText(value: string): string {
   return decoded.normalize("NFKC");
 }
 
+function isAsciiLetter(codeUnit: number): boolean {
+  return (codeUnit >= 0x41 && codeUnit <= 0x5a) ||
+    (codeUnit >= 0x61 && codeUnit <= 0x7a);
+}
+
+function isResidualTagNameCharacter(codeUnit: number): boolean {
+  return isAsciiLetter(codeUnit) ||
+    (codeUnit >= 0x30 && codeUnit <= 0x39) ||
+    codeUnit === 0x3a || codeUnit === 0x2e ||
+    codeUnit === 0x5f || codeUnit === 0x2d;
+}
+
+function isConservativeResidualTagToken(value: string): boolean {
+  let index = value.startsWith("/") ? 1 : 0;
+  const closing = index === 1;
+  if (index >= value.length || !isAsciiLetter(value.charCodeAt(index))) {
+    return false;
+  }
+  index += 1;
+  while (
+    index < value.length &&
+    isResidualTagNameCharacter(value.charCodeAt(index))
+  ) {
+    index += 1;
+  }
+  if (index === value.length) return true;
+  return !closing && index === value.length - 1 && value[index] === "/";
+}
+
 function stripResidualEncodedTags(value: string): string {
   let plain = "";
   let cursor = 0;
   let openStart: number | null = null;
   let openEnd = 0;
+  let nested = false;
   for (const match of value.matchAll(RESIDUAL_ENCODED_ANGLE)) {
     const index = match.index;
     const token = match[0];
-    if (RESIDUAL_ENCODED_OPEN_ANGLE.test(token)) {
-      if (openStart === null) {
-        openStart = index;
-        openEnd = index + token.length;
-      }
+    const opening = RESIDUAL_ENCODED_OPEN_ANGLE.test(token);
+    if (nested) {
+      if (!opening) nested = false;
       continue;
     }
-    if (openStart === null) continue;
-    if (index > openEnd) {
-      plain += `${value.slice(cursor, openStart)} `;
-      cursor = index + token.length;
+    if (openStart !== null) {
+      if (opening) {
+        openStart = null;
+        nested = true;
+        continue;
+      }
+      if (isConservativeResidualTagToken(value.slice(openEnd, index))) {
+        plain += `${value.slice(cursor, openStart)} `;
+        cursor = index + token.length;
+      }
+      openStart = null;
+      continue;
     }
-    openStart = null;
+    if (opening) {
+      openStart = index;
+      openEnd = index + token.length;
+    }
   }
   return plain + value.slice(cursor);
 }

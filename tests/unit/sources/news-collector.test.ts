@@ -371,6 +371,83 @@ describe("NewsCollector", () => {
     ]);
   });
 
+  it("preserves ambiguous residual GDELT comparisons for signal routing without treating malformed syntax as a tag", async () => {
+    const adapter = new GdeltAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({
+          articles: [
+            {
+              url: "https://news.example.com/numeric-comparison",
+              title:
+                "Ordinary 3 &amp;amp;lt; 5 Baltimore &amp;amp;gt; 2 update",
+              seendate: "20260729T081500Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/malformed-nested",
+              title:
+                "Ordinary A &amp;amp;lt;tag &amp;amp;lt; B &amp;amp;gt; C update",
+              seendate: "20260729T081600Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/self-closing-tag",
+              title:
+                "&amp;amp;lt;technology/&amp;amp;gt;Ordinary update",
+              seendate: "20260729T081700Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/self-closing-tag-only",
+              title: "&amp;amp;lt;technology/&amp;amp;gt;",
+              seendate: "20260729T081800Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+          ],
+        })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      gdeltSource,
+      { query: "comparison", maxRecords: 4 },
+    );
+
+    const candidates = await adapter.collect(fixedWindow());
+    const items = candidates.map((candidate) => normalizeCandidate(candidate));
+
+    expect(candidates).toHaveLength(3);
+    expect(candidates[0]).toMatchObject({
+      title:
+        "Ordinary 3 &amp;amp;lt; 5 Baltimore &amp;amp;gt; 2 update",
+      namedEntities: expect.arrayContaining(["Baltimore"]),
+      metadata: { primarySection: "baltimore" },
+    });
+    expect(items.map((item) => ({
+      title: item.title,
+      primarySection: item.metadata.primarySection,
+    }))).toEqual([
+      {
+        title: "Ordinary 3 &lt; 5 Baltimore &gt; 2 update",
+        primarySection: "baltimore",
+      },
+      {
+        title: "Ordinary A &lt;tag &lt; B &gt; C update",
+        primarySection: "world",
+      },
+      {
+        title: "&lt;technology/&gt;Ordinary update",
+        primarySection: "world",
+      },
+    ]);
+  });
+
   it("retains direct local results when a discovery adapter fails", async () => {
     const localNews = await loadFixture("local-news.xml");
     const directSource = source({
