@@ -36,6 +36,23 @@ export function decodeProviderTextEntities(value: string): string {
   return decoded;
 }
 
+function normalizeAndDecodeProviderText(value: string): string {
+  let decoded = truncateProviderTextAtCodePointBoundary(
+    value,
+    MAX_PROVIDER_TEXT_INPUT_CHARACTERS,
+  );
+  // Compatibility folding is part of each of the existing two decode passes,
+  // so newly formed entity syntax consumes the same fixed pass budget. A final
+  // fold makes later tag stripping see any ASCII syntax formed on pass two.
+  for (let pass = 0; pass < MAX_ENTITY_DECODE_PASSES; pass += 1) {
+    const compatible = decoded.normalize("NFKC");
+    const next = decodePass(compatible);
+    if (compatible === decoded && next === compatible) break;
+    decoded = next;
+  }
+  return decoded.normalize("NFKC");
+}
+
 export type ProviderTextOptions = {
   stripHtml?: boolean;
   maxCharacters?: number;
@@ -79,11 +96,11 @@ export function normalizeProviderTextDetailed(
       maximum > MAX_PROVIDER_TEXT_INPUT_CHARACTERS) {
     throw new RangeError("Provider text limit is outside the safe bound.");
   }
-  const decoded = decodeProviderTextEntities(value);
+  const decoded = normalizeAndDecodeProviderText(value);
   const plain = options.stripHtml === true
     ? decoded.replace(/<[^>]+>/g, " ")
     : decoded;
-  const normalized = plain.normalize("NFKC").replace(/\s+/g, " ").trim();
+  const normalized = plain.replace(/\s+/g, " ").trim();
   if (normalized.length === 0) {
     return {
       value: null,

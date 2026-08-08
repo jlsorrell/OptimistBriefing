@@ -74,30 +74,69 @@ describe("research normalization", () => {
     },
   );
 
+  it.each(["title", "sourceName"] as const)(
+    "rejects compatibility-created tag-only required provider %s text",
+    (field) => {
+      let observed: unknown;
+      try {
+        normalizeCandidate(candidate({
+          [field]: "&#65308;br&#65310;",
+        }));
+      } catch (error) {
+        observed = error;
+      }
+
+      expect(observed).toBeInstanceOf(
+        InvalidRequiredProviderDisplayTextError,
+      );
+      expect(
+        (observed as InvalidRequiredProviderDisplayTextError).field,
+      ).toBe(field);
+    },
+  );
+
+  it("decodes fullwidth ampersand entity syntax within the two-pass budget", () => {
+    const normalized = normalizeCandidate(candidate({
+      title: "Compatibility ＆#8217; title",
+      sourceName: "Compatibility ＆amp;#8217; source",
+      abstract: "Compatibility ＆#8217; evidence",
+    }));
+
+    expect(normalized.title).toBe("Compatibility ’ title");
+    expect(normalized.sourceRefs[0]?.name).toBe("Compatibility ’ source");
+    expect(normalized.normalizedText).toBe("Compatibility ’ evidence");
+  });
+
   it("decodes and strips encoded wrappers from provider display and evidence", () => {
     const originalUrl =
       "https://custom.example/research?label=%26lt%3Bbr%26gt%3B";
     const normalized = normalizeCandidate(candidate({
       kind: "blog",
-      sourceId: "custom",
-      title: "&lt;script&gt;Useful title&lt;/script&gt;",
-      sourceName: "&lt;em&gt;Useful source&lt;/em&gt;",
+      sourceId: "custom-＆#8217;",
+      title:
+        "&#65308;script&#65310;Useful title&#65308;/script&#65310;",
+      sourceName: "&#65308;em&#65310;Useful source&#65308;/em&#65310;",
       originalUrl,
       externalId: "custom:useful-title",
       externalIds: ["custom:useful-title"],
-      authors: ["&lt;strong&gt;Useful author&lt;/strong&gt;"],
-      abstract: "&lt;p&gt;Useful evidence&lt;/p&gt;",
+      authors: [
+        "&#65308;strong&#65310;Useful author&#65308;/strong&#65310;",
+      ],
+      abstract: "&#65308;p&#65310;Useful evidence&#65308;/p&#65310;",
       metadata: {
         discoveryFamily: "custom",
-        venue: "&lt;em&gt;Useful venue&lt;/em&gt;",
+        venue: "&#65308;em&#65310;Useful venue&#65308;/em&#65310;",
+        structuralId: "structural-＆#8217;",
       },
     }));
 
     expect(normalized.title).toBe("Useful title");
     expect(normalized.sourceRefs[0]?.name).toBe("Useful source");
+    expect(normalized.sourceRefs[0]?.id).toBe("custom-＆#8217;");
     expect(normalized.normalizedText).toBe("Useful evidence");
     expect(normalized.metadata.authors).toEqual(["Useful author"]);
     expect(normalized.metadata.venue).toBe("Useful venue");
+    expect(normalized.metadata.structuralId).toBe("structural-＆#8217;");
     expect(normalized.canonicalUrl).toBe(originalUrl);
     expect(JSON.stringify(normalized)).not.toMatch(
       /<(?:script|em|strong|p)>/i,

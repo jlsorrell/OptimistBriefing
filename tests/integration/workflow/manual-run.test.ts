@@ -912,14 +912,19 @@ async function publishD1FixtureEdition(
 }
 
 describe("manual editorial run", () => {
-  it.each(["title", "sourceName"] as const)(
-    "isolates an empty prepared %s without swallowing structural errors",
-    async (invalidField) => {
+  it.each([
+    ["title", "&lt;br&gt;"],
+    ["sourceName", "&lt;br&gt;"],
+    ["title", "&#65308;br&#65310;"],
+    ["sourceName", "&#65308;br&#65310;"],
+  ] as const)(
+    "isolates an empty prepared %s value %s without swallowing structural errors",
+    async (invalidField, invalidValue) => {
       const laneId = `official-publication:empty-prepared-${invalidField}`;
       const diagnosticWrites: DiscoveryLaneDiagnostic[][] = [];
       const invalid = {
         ...rawNewsCandidate(`empty-prepared-${invalidField}`, "world"),
-        [invalidField]: "&lt;br&gt;",
+        [invalidField]: invalidValue,
         metadata: {
           discoveryFamily: "official-publication",
           discoveryLaneIds: [laneId],
@@ -980,9 +985,14 @@ describe("manual editorial run", () => {
     },
   );
 
-  it.each(["title", "sourceName"] as const)(
-    "isolates an encoded-markup-only stored Item %s from its valid sibling",
-    async (invalidField) => {
+  it.each([
+    ["title", "&lt;br&gt;"],
+    ["sourceName", "&lt;br&gt;"],
+    ["title", "&#65308;br&#65310;"],
+    ["sourceName", "&#65308;br&#65310;"],
+  ] as const)(
+    "isolates an encoded-markup-only stored Item %s value %s from its valid sibling",
+    async (invalidField, invalidValue) => {
       const laneId = `official-publication:stored-item-${invalidField}`;
       const diagnosticWrites: DiscoveryLaneDiagnostic[][] = [];
       const invalidFixture = fixtureItem(
@@ -991,10 +1001,10 @@ describe("manual editorial run", () => {
       );
       const invalid = ItemSchema.parse({
         ...invalidFixture,
-        ...(invalidField === "title" ? { title: "&lt;br&gt;" } : {}),
+        ...(invalidField === "title" ? { title: invalidValue } : {}),
         sourceRefs: invalidFixture.sourceRefs.map((source) => ({
           ...source,
-          ...(invalidField === "sourceName" ? { name: "&lt;br&gt;" } : {}),
+          ...(invalidField === "sourceName" ? { name: invalidValue } : {}),
         })),
         metadata: {
           ...invalidFixture.metadata,
@@ -1059,17 +1069,24 @@ describe("manual editorial run", () => {
     const stored = ItemSchema.parse({
       ...fixture,
       canonicalUrl: originalUrl,
-      title: "&lt;script&gt;Useful stored title&lt;/script&gt;",
+      title:
+        "&#65308;script&#65310;Useful stored title&#65308;/script&#65310;",
       primaryTopic: "&#119;orld",
       sourceRefs: fixture.sourceRefs.map((source) => ({
         ...source,
-        name: "&lt;em&gt;Useful stored source&lt;/em&gt;",
+        name:
+          "&#65308;em&#65310;Useful stored source&#65308;/em&#65310;",
       })),
-      normalizedText: "&lt;p&gt;Useful stored evidence&lt;/p&gt;",
+      normalizedText:
+        "&#65308;p&#65310;Useful stored evidence&#65308;/p&#65310;",
       metadata: {
         ...fixture.metadata,
-        authors: ["&lt;strong&gt;Useful stored author&lt;/strong&gt;"],
-        venue: "&lt;em&gt;Useful stored venue&lt;/em&gt;",
+        authors: [
+          "&#65308;strong&#65310;Useful stored author&#65308;/strong&#65310;",
+        ],
+        venue:
+          "&#65308;em&#65310;Useful stored venue&#65308;/em&#65310;",
+        structuralId: "structural-＆#8217;",
       },
     });
     const context = createProductionPipelineContext({
@@ -1091,6 +1108,7 @@ describe("manual editorial run", () => {
     expect(normalized.normalizedText).toBe("Useful stored evidence");
     expect(normalized.metadata.authors).toEqual(["Useful stored author"]);
     expect(normalized.metadata.venue).toBe("Useful stored venue");
+    expect(normalized.metadata.structuralId).toBe("structural-＆#8217;");
     expect(normalized.canonicalUrl).toBe(originalUrl);
     expect(normalized.primaryTopic).toBe("&#119;orld");
     expect(JSON.stringify(normalized)).not.toMatch(
@@ -1919,9 +1937,14 @@ describe("manual editorial run", () => {
     )).toContain("arbitraryRawDisplay");
   });
 
-  it.each(["title", "sourceName"] as const)(
-    "drops only an encoded-markup-empty Item %s from a legacy normalize checkpoint",
-    async (invalidField) => {
+  it.each([
+    ["title", "&lt;br&gt;"],
+    ["sourceName", "&lt;br&gt;"],
+    ["title", "&#65308;br&#65310;"],
+    ["sourceName", "&#65308;br&#65310;"],
+  ] as const)(
+    "drops only an encoded-markup-empty Item %s value %s from a legacy normalize checkpoint",
+    async (invalidField, invalidValue) => {
       const store = new FixtureStore();
       const invalidFixture = fixtureItem(
         `legacy-normalize-empty-${invalidField}`,
@@ -1929,10 +1952,10 @@ describe("manual editorial run", () => {
       );
       const invalid = ItemSchema.parse({
         ...invalidFixture,
-        ...(invalidField === "title" ? { title: "&lt;br&gt;" } : {}),
+        ...(invalidField === "title" ? { title: invalidValue } : {}),
         sourceRefs: invalidFixture.sourceRefs.map((source) => ({
           ...source,
-          ...(invalidField === "sourceName" ? { name: "&lt;br&gt;" } : {}),
+          ...(invalidField === "sourceName" ? { name: invalidValue } : {}),
         })),
       });
       const valid = fixtureItem("legacy-normalize-valid-title", "world");
@@ -4283,13 +4306,13 @@ describe("manual editorial run", () => {
           "primary",
         ).sourceRefs.map((source) => ({
           ...source,
-          name: "&lt;br&gt;",
+          name: "&#65308;br&#65310;",
         })),
         tags: ["stale&#45;section"],
       });
       const invalidTitleItem = ItemSchema.parse({
         ...freshNewsItem("legacy-development-empty-title", "reporting"),
-        title: "&lt;br&gt;",
+        title: "&#65308;br&#65310;",
         tags: ["stale&#45;section"],
       });
       const freshDevelopment = clusterNews(

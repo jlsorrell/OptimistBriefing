@@ -791,6 +791,191 @@ this report is written.
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 15
+
+Round 15 closes the Unicode compatibility-ordering gap left by Round 14 while
+preserving the exact two-pass entity-decoding lifecycle. Compatibility folding
+now occurs inside each normalization decode pass, and the final tag-removal
+step runs only after the last compatibility fold. Fullwidth entity syntax can
+therefore use the existing pass budget, compatibility-created tags cannot
+bypass plain-text cleanup, and triple-encoded ASCII entities remain inert after
+two passes. The standalone entity decoder retains its original API semantics.
+
+### Design
+
+Three approaches were considered before implementation. The approved approach
+adds an internal compatibility-aware two-pass routine used only by
+`normalizeProviderTextDetailed`: bound input, then for each of exactly two
+passes apply NFKC and one `decodePass`, stop only when both stages are stable,
+apply a final NFKC fold, then optionally strip tags, normalize whitespace, and
+bound output. Changing the exported decoder was rejected because it would alter
+its raw entity-only contract. A post-NFKC third decode/reject phase was rejected
+because it would either exceed the established pass budget or fail to decode
+valid fullwidth-ampersand entity syntax.
+
+The approved design is recorded here rather than in a separate design/plan
+commit because this whole-plan round explicitly requires one new implementation
+commit.
+
+### RED evidence
+
+Primitive/detailed, custom raw, and RSS regressions were added before the
+production change and run with:
+
+```sh
+npm test -- --run tests/unit/sources/provider-text.test.ts tests/unit/editorial/normalize.test.ts tests/unit/sources/publication-collector.test.ts
+```
+
+Result: exit 1; 9 intended failures and 54 surrounding passes. A raw fullwidth
+ampersand left `&#8217;` instead of the apostrophe scalar; numeric entities for
+fullwidth `<`/`>` became literal `<br>` or script/emphasis tags only after the
+old strip phase; required title/source-name isolation did not fire; and custom
+and RSS normalized Items retained the compatibility-created tags. The new
+standalone-decoder characterizations passed, proving its behavior was not the
+defect.
+
+Stored, missing-envelope, nested-development, and current-envelope regressions
+were then run through the real Worker context:
+
+```sh
+npm run test:worker -- tests/integration/workflow/manual-run.test.ts -t "empty prepared|encoded-markup-only stored|stored display and evidence|encoded-markup-empty Item|through exactly one text boundary|current synthesis envelope|stable current envelope"
+```
+
+Result: exit 1; 9 intended failures and 2 passes. Compatibility-created tag-
+only raw/stored/legacy Items were retained, useful stored wrapper tags persisted,
+and both legacy cluster/shortlist developments kept their invalid nested Items.
+The two current-envelope stability cases passed immediately, confirming the
+trusted-envelope bypass was not implicated.
+
+Independent review identified that the first tag fixtures folded at the start
+of pass two and therefore did not uniquely require the final fold. A double-
+encoded numeric fullwidth tag/wrapper regression was added. With the final
+fold temporarily removed, its targeted run exited 1 and returned `＜br＞`
+instead of `null`; restoring the fold made the full focused suite pass.
+
+### Implementation
+
+- Added the internal `normalizeAndDecodeProviderText` routine. It performs one
+  NFKC fold and one entity decode in each of the existing two passes. It exits
+  early only when compatibility folding and decoding are both unchanged.
+- The routine performs a final NFKC fold after pass two. HTML removal therefore
+  sees ASCII angle brackets created either by decoding fullwidth brackets or by
+  the final compatibility fold. Whitespace normalization and code-point-safe
+  output bounding remain after tag removal.
+- `normalizeProviderTextDetailed` uses the internal routine. The exported
+  `decodeProviderTextEntities` still performs entity-only decoding with no
+  compatibility fold, so callers and its input-bound contract are unchanged.
+- No third decode was added. `&amp;amp;#8217;` still stops at the established
+  inert `&#8217;`, while `＆#8217;` and `＆amp;#8217;` consume no more than the
+  same two passes and resolve to the apostrophe scalar.
+- Raw adapter bounding remains non-decoding. Real RSS assertions observe the
+  numeric fullwidth-tag entities unchanged before central normalization.
+
+### GREEN evidence
+
+Focused primitive/custom/RSS suites:
+
+```sh
+npm test -- --run tests/unit/sources/provider-text.test.ts tests/unit/editorial/normalize.test.ts tests/unit/sources/publication-collector.test.ts
+```
+
+Result: exit 0; 3 files and 64 tests passed.
+
+The expanded Worker matrix preserved Round 14 ASCII cases alongside the new
+compatibility cases:
+
+```sh
+npm run test:worker -- tests/integration/workflow/manual-run.test.ts -t "empty prepared|encoded-markup-only stored|stored display and evidence|encoded-markup-empty Item|through exactly one text boundary|current synthesis envelope|stable current envelope"
+```
+
+Result: exit 0; all 17 selected tests passed and 79 unrelated tests were
+skipped.
+
+Affected source/editorial/workflow suites:
+
+```sh
+npx vitest run tests/unit/editorial tests/unit/workflow tests/unit/sources
+```
+
+Result: exit 0; 21 files and 536 tests passed.
+
+Full Worker suite:
+
+```sh
+npm run test:worker
+```
+
+Result: exit 0; 11 files and 233 tests passed, with only existing third-party
+missing-sourcemap warnings.
+
+Remaining non-Worker suite excluding the unrelated managed-OAuth fixture:
+
+```sh
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+```
+
+Result: exit 0; 39 files and 765 tests passed.
+
+Static, evaluation, build, and diff verification:
+
+```sh
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results: all exited 0. TypeScript passed, every golden relevance/identity/
+routing/grounding check passed, Vite built 53 modules, and the diff contained
+no whitespace errors.
+
+### Files changed
+
+- `src/sources/provider-text.ts`
+- `tests/integration/workflow/manual-run.test.ts`
+- `tests/unit/editorial/normalize.test.ts`
+- `tests/unit/sources/provider-text.test.ts`
+- `tests/unit/sources/publication-collector.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+
+### Commit
+
+Planned message: `fix: fold compatibility syntax within decode budget`. The
+resulting SHA is recorded in the task handoff because it is created after this
+report is written.
+
+### Self-review
+
+- Removing either per-pass NFKC fold fails fullwidth ampersand or numeric
+  fullwidth-tag cases. Removing the final fold fails the double-encoded numeric
+  fullwidth tag/wrapper cases; moving tag removal before it fails tag-only
+  isolation. Adding a third decode fails the literal triple-encoded assertion.
+- Primitive tests independently characterize both APIs: the exported decoder
+  retains fullwidth ampersand syntax and produces fullwidth brackets, while the
+  detailed normalizer resolves compatibility syntax and preserves truncation
+  reporting.
+- Raw/custom/RSS, direct stored, missing-envelope checkpoint, and nested
+  cluster/shortlist paths cover both required fields. Useful script/emphasis/
+  paragraph wrappers retain only their text, including optional evidence,
+  authors, and venue.
+- RSS candidate assertions prove raw adapters do not decode. Fullwidth/entity-
+  looking source IDs, arbitrary structural IDs, URL query bytes, stored primary
+  topics, and prior arbitrary metadata remain outside the display decoder.
+- Existing ASCII tag regressions remain in the Worker matrix. Existing triple-
+  encoded raw/prepared/checkpoint tests and two consecutive current-envelope
+  restores remain exact, preventing a hidden later decode.
+- Input inspection, safe scalar filtering, C1 rejection, code-point-safe bounds,
+  typed error discriminators, diagnostics, aggregate reconstruction/allowlist,
+  checkpoint envelopes, and Round 10-14 behavior remain covered by the full
+  gates.
+- No new public API, third decode, recursive sanitizer, deployment, canary,
+  migration, history rewrite, source adapter behavior change, or unrelated
+  OAuth change was introduced.
+
+### Concerns
+
+- None. Worker runs emit existing third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 12
 
 Round 12 closes the aggregate metadata contamination gap left by the Round 11

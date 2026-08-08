@@ -72,6 +72,49 @@ describe("provider text normalization", () => {
     );
   });
 
+  it("keeps the standalone decoder free of compatibility folding", () => {
+    expect(decodeProviderTextEntities("＆#8217;")).toBe("＆#8217;");
+    expect(decodeProviderTextEntities("&#65308;br&#65310;")).toBe(
+      "＜br＞",
+    );
+  });
+
+  it("folds compatibility syntax inside exactly two normalization decode passes", () => {
+    expect(normalizeProviderText("＆#8217;")).toBe("’");
+    expect(normalizeProviderText("＆amp;#8217;")).toBe("’");
+    expect(normalizeProviderText("&amp;amp;#8217;")).toBe("&#8217;");
+    expect(normalizeProviderTextDetailed("＆#8217;")).toEqual({
+      value: "’",
+      truncated: false,
+    });
+  });
+
+  it("strips tags only after final compatibility folding", () => {
+    expect(normalizeProviderText("&#65308;br&#65310;", {
+      stripHtml: true,
+    })).toBeNull();
+    expect(normalizeProviderText(
+      "&#65308;script&#65310;safe text&#65308;/script&#65310;",
+      { stripHtml: true },
+    )).toBe("safe text");
+    expect(normalizeProviderText(
+      "Evidence &#65308;em&#65310;remains&#65308;/em&#65310; useful.",
+      { stripHtml: true },
+    )).toBe("Evidence remains useful.");
+    expect(normalizeProviderText("&#65308;br&#65310;")).toBe("<br>");
+  });
+
+  it("strips compatibility tags formed by the second and final decode pass", () => {
+    expect(normalizeProviderText(
+      "&amp;#65308;br&amp;#65310;",
+      { stripHtml: true },
+    )).toBeNull();
+    expect(normalizeProviderText(
+      "&amp;#65308;script&amp;#65310;safe final text&amp;#65308;/script&amp;#65310;",
+      { stripHtml: true },
+    )).toBe("safe final text");
+  });
+
   it("returns bounded plain text after decoding and tag removal", () => {
     expect(normalizeProviderText(
       "&lt;script&gt;bad()&lt;/script&gt; &nbsp; useful   text",
