@@ -5,6 +5,7 @@ const RESIDUAL_ENCODED_ANGLE =
   /&(?:lt|gt|#0{0,5}(?:60|62)|#0{0,2}(?:65308|65310)|#x0{0,4}(?:3c|3e)|#x0{0,2}(?:ff1c|ff1e));/gi;
 const RESIDUAL_ENCODED_OPEN_ANGLE =
   /^&(?:lt|#0{0,5}60|#0{0,2}65308|#x0{0,4}3c|#x0{0,2}ff1c);$/i;
+const PROVIDER_SIGNAL_WHITESPACE = /\s/u;
 const NAMED = new Map<string, string>([
   ["amp", "&"], ["quot", "\""], ["apos", "'"],
   ["lt", "<"], ["gt", ">"], ["nbsp", " "],
@@ -62,63 +63,47 @@ function isAsciiLetter(codeUnit: number): boolean {
     (codeUnit >= 0x61 && codeUnit <= 0x7a);
 }
 
-function isResidualTagNameCharacter(codeUnit: number): boolean {
-  return isAsciiLetter(codeUnit) ||
-    (codeUnit >= 0x30 && codeUnit <= 0x39) ||
-    codeUnit === 0x3a || codeUnit === 0x2e ||
-    codeUnit === 0x5f || codeUnit === 0x2d;
-}
-
-function isConservativeResidualTagToken(value: string): boolean {
-  let index = value.startsWith("/") ? 1 : 0;
-  const closing = index === 1;
-  if (index >= value.length || !isAsciiLetter(value.charCodeAt(index))) {
-    return false;
-  }
-  index += 1;
+function isPlausibleResidualTagAt(value: string, start: number): boolean {
+  let index = start;
   while (
     index < value.length &&
-    isResidualTagNameCharacter(value.charCodeAt(index))
+    PROVIDER_SIGNAL_WHITESPACE.test(value[index] ?? "")
   ) {
     index += 1;
   }
-  if (index === value.length) return true;
-  return !closing && index === value.length - 1 && value[index] === "/";
+  if (value[index] === "/") index += 1;
+  return index < value.length && isAsciiLetter(value.charCodeAt(index));
 }
 
 function stripResidualEncodedTags(value: string): string {
-  let plain = "";
+  const plain: string[] = [];
   let cursor = 0;
-  let openStart: number | null = null;
-  let openEnd = 0;
-  let nested = false;
+  let dropStart: number | null = null;
   for (const match of value.matchAll(RESIDUAL_ENCODED_ANGLE)) {
     const index = match.index;
     const token = match[0];
     const opening = RESIDUAL_ENCODED_OPEN_ANGLE.test(token);
-    if (nested) {
-      if (!opening) nested = false;
-      continue;
-    }
-    if (openStart !== null) {
-      if (opening) {
-        openStart = null;
-        nested = true;
-        continue;
-      }
-      if (isConservativeResidualTagToken(value.slice(openEnd, index))) {
-        plain += `${value.slice(cursor, openStart)} `;
+    if (dropStart !== null) {
+      if (!opening) {
+        plain.push(value.slice(cursor, dropStart), " ");
         cursor = index + token.length;
+        dropStart = null;
       }
-      openStart = null;
       continue;
     }
-    if (opening) {
-      openStart = index;
-      openEnd = index + token.length;
+    if (
+      opening &&
+      isPlausibleResidualTagAt(value, index + token.length)
+    ) {
+      dropStart = index;
     }
   }
-  return plain + value.slice(cursor);
+  if (dropStart !== null) {
+    plain.push(value.slice(cursor, dropStart), " ");
+    cursor = value.length;
+  }
+  plain.push(value.slice(cursor));
+  return plain.join("");
 }
 
 export type ProviderTextOptions = {
@@ -237,8 +222,18 @@ export function normalizedProviderSignalText(
     stripHtml: true,
     maxCharacters,
   });
-  if (normalized === null) return null;
-  const plain = stripResidualEncodedTags(normalized)
+  return preparedProviderSignalText(normalized);
+}
+
+export function preparedProviderSignalText(
+  value: string | null | undefined,
+): string | null {
+  if (value == null) return null;
+  const inspected = truncateProviderTextAtCodePointBoundary(
+    value,
+    MAX_PROVIDER_TEXT_INPUT_CHARACTERS,
+  );
+  const plain = stripResidualEncodedTags(inspected)
     .replace(/\s+/g, " ")
     .trim();
   return plain.length === 0 ? null : plain;

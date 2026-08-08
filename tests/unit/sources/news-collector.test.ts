@@ -448,6 +448,176 @@ describe("NewsCollector", () => {
     ]);
   });
 
+  it("keeps residual GDELT tag syntax and attributes out of adapter-to-Item signals", async () => {
+    const adapter = new GdeltAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({
+          articles: [
+            {
+              url: "https://news.example.com/tag-name-attribute",
+              title:
+                "&amp;amp;lt;technology class=x&amp;amp;gt;Ordinary update",
+              seendate: "20260729T081500Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/place-attribute",
+              title:
+                "&amp;amp;lt;span data-place=Baltimore&amp;amp;gt;Ordinary update",
+              seendate: "20260729T081600Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/ai-policy-attribute",
+              title:
+                "&amp;amp;lt;span data-note=&quot;artificial intelligence regulation&quot;&amp;amp;gt;Ordinary update",
+              seendate: "20260729T081700Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/leading-slash-tag-only",
+              title:
+                "&amp;amp;lt; /technology class=x&amp;amp;gt;",
+              seendate: "20260729T081800Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/unmatched-tag-only",
+              title: "&amp;amp;lt;technology class=x",
+              seendate: "20260729T081900Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/unmatched-visible-prefix",
+              title:
+                "Ordinary visible update &amp;amp;lt;technology class=x",
+              seendate: "20260729T082000Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/visible-wrapper-content",
+              title:
+                "&amp;amp;lt;span data-place=Virginia&amp;amp;gt;Baltimore transit update&amp;amp;lt;/span&amp;amp;gt;",
+              seendate: "20260729T082100Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/numeric-comparison-visible",
+              title:
+                "Ordinary 3 &amp;amp;lt; 5 &amp;amp;gt; 2 update",
+              seendate: "20260729T082200Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+          ],
+        })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      gdeltSource,
+      { query: "signals", maxRecords: 8 },
+    );
+
+    const candidates = await adapter.collect(fixedWindow());
+    const items = candidates.map((candidate) => normalizeCandidate(candidate));
+
+    expect(candidates).toHaveLength(6);
+    expect(candidates.map((candidate) => ({
+      title: candidate.title,
+      namedEntities: candidate.namedEntities,
+      primarySection: candidate.metadata.primarySection,
+    }))).toEqual([
+      {
+        title:
+          "&amp;amp;lt;technology class=x&amp;amp;gt;Ordinary update",
+        namedEntities: [],
+        primarySection: "world",
+      },
+      {
+        title:
+          "&amp;amp;lt;span data-place=Baltimore&amp;amp;gt;Ordinary update",
+        namedEntities: [],
+        primarySection: "world",
+      },
+      {
+        title:
+          "&amp;amp;lt;span data-note=&quot;artificial intelligence regulation&quot;&amp;amp;gt;Ordinary update",
+        namedEntities: [],
+        primarySection: "world",
+      },
+      {
+        title:
+          "Ordinary visible update &amp;amp;lt;technology class=x",
+        namedEntities: [],
+        primarySection: "world",
+      },
+      {
+        title:
+          "&amp;amp;lt;span data-place=Virginia&amp;amp;gt;Baltimore transit update&amp;amp;lt;/span&amp;amp;gt;",
+        namedEntities: ["Baltimore"],
+        primarySection: "baltimore",
+      },
+      {
+        title:
+          "Ordinary 3 &amp;amp;lt; 5 &amp;amp;gt; 2 update",
+        namedEntities: [],
+        primarySection: "world",
+      },
+    ]);
+    expect(items.map((item) => ({
+      title: item.title,
+      namedEntities: item.metadata.namedEntities,
+      primarySection: item.metadata.primarySection,
+    }))).toEqual([
+      {
+        title: "&lt;technology class=x&gt;Ordinary update",
+        namedEntities: [],
+        primarySection: "world",
+      },
+      {
+        title: "&lt;span data-place=Baltimore&gt;Ordinary update",
+        namedEntities: [],
+        primarySection: "world",
+      },
+      {
+        title:
+          "&lt;span data-note=\"artificial intelligence regulation\"&gt;Ordinary update",
+        namedEntities: [],
+        primarySection: "world",
+      },
+      {
+        title: "Ordinary visible update &lt;technology class=x",
+        namedEntities: [],
+        primarySection: "world",
+      },
+      {
+        title:
+          "&lt;span data-place=Virginia&gt;Baltimore transit update&lt;/span&gt;",
+        namedEntities: ["Baltimore"],
+        primarySection: "baltimore",
+      },
+      {
+        title: "Ordinary 3 &lt; 5 &gt; 2 update",
+        namedEntities: [],
+        primarySection: "world",
+      },
+    ]);
+  });
+
   it("retains direct local results when a discovery adapter fails", async () => {
     const localNews = await loadFixture("local-news.xml");
     const directSource = source({

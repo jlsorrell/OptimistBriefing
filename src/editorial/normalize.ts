@@ -17,7 +17,10 @@ import {
   RawPublicationCandidateSchema,
   type ScopedNewsMaterialFact,
 } from "../sources/types";
-import { normalizeProviderText } from "../sources/provider-text";
+import {
+  normalizeProviderText,
+  preparedProviderSignalText,
+} from "../sources/provider-text";
 import {
   deriveCanonicalEventInstances,
   deriveEventFamilies,
@@ -380,21 +383,27 @@ export function normalizePreparedCandidate(
   const metadataTopics = Array.isArray(candidate.metadata.topics)
     ? uniqueSorted(preparedTextArray(candidate.metadata.topics))
     : undefined;
+  const signalTitle = preparedProviderSignalText(title) ?? "";
+  const signalAbstract = preparedProviderSignalText(abstract);
+  const signalContent = preparedProviderSignalText(content);
+  const signalTopics = topics.flatMap((topic) =>
+    preparedProviderSignalText(topic) ?? []
+  );
   const configuredTopics =
     candidate.kind === "paper" || candidate.kind === "blog"
       ? mapResearchTopicIds([
-          title,
-          ...topics,
-          abstract ?? "",
+          signalTitle,
+          ...signalTopics,
+          signalAbstract ?? "",
         ])
       : [];
   const sectionEligibility = stringArray(
     input.sectionEligibility ?? candidate.metadata.sectionEligibility,
   );
   const materialText = [
-    title,
-    abstract,
-    content,
+    signalTitle,
+    signalAbstract,
+    signalContent,
   ];
   const namedEntities = uniqueSorted([
     ...stringArray(

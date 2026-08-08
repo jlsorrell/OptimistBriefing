@@ -6,6 +6,7 @@ import {
   normalizeProviderText,
   normalizeProviderTextDetailed,
   normalizedProviderSignalText,
+  preparedProviderSignalText,
   truncateProviderTextAtCodePointBoundary,
 } from "../../../src/sources/provider-text";
 
@@ -155,19 +156,14 @@ describe("provider text normalization", () => {
       expected: "3 &#65308; 5 &#65310; 2",
     },
     {
-      label: "nested opening delimiter",
-      raw: "A &amp;amp;lt;tag &amp;amp;lt; B &amp;amp;gt; C",
-      expected: "A &lt;tag &lt; B &gt; C",
-    },
-    {
-      label: "unmatched opening delimiter",
-      raw: "A &amp;amp;lt;tag C",
-      expected: "A &lt;tag C",
-    },
-    {
       label: "unmatched closing delimiter",
       raw: "A &amp;amp;gt; C",
       expected: "A &gt; C",
+    },
+    {
+      label: "unmatched numeric opening delimiter",
+      raw: "A &amp;amp;lt; 5 C",
+      expected: "A &lt; 5 C",
     },
     {
       label: "numeric token",
@@ -175,26 +171,15 @@ describe("provider text normalization", () => {
       expected: "A &lt;123&gt; C",
     },
     {
-      label: "leading token whitespace",
-      raw: "A &amp;amp;lt; tag&amp;amp;gt; C",
-      expected: "A &lt; tag&gt; C",
-    },
-    {
-      label: "unsupported attribute",
-      raw:
-        "A &amp;amp;lt;span class=&quot;note&quot;&amp;amp;gt; C",
-      expected: "A &lt;span class=\"note\"&gt; C",
-    },
-    {
       label: "malformed name",
       raw: "A &amp;amp;lt;-tag&amp;amp;gt; C",
       expected: "A &lt;-tag&gt; C",
     },
-  ])("preserves ambiguous residual $label syntax", ({ raw, expected }) => {
+  ])("preserves residual non-tag $label syntax", ({ raw, expected }) => {
     expect(normalizedProviderSignalText(raw, 500)).toBe(expected);
   });
 
-  it("removes only conservative residual bare tag tokens", () => {
+  it("removes residual plausible tag syntax from visible signals", () => {
     expect(normalizedProviderSignalText(
       "A &amp;amp;lt;span&amp;amp;gt; B &amp;amp;lt;/span&amp;amp;gt; C",
       500,
@@ -211,6 +196,63 @@ describe("provider text normalization", () => {
       "&amp;amp;lt;/technology&amp;amp;gt;",
       500,
     )).toBeNull();
+    expect(normalizedProviderSignalText(
+      "A &amp;amp;lt;tag &amp;amp;lt; B &amp;amp;gt; C",
+      500,
+    )).toBe("A C");
+    expect(normalizedProviderSignalText(
+      "A &amp;amp;lt; tag&amp;amp;gt; C",
+      500,
+    )).toBe("A C");
+    expect(normalizedProviderSignalText(
+      "A &amp;amp;lt; /tag extra&amp;amp;gt; C",
+      500,
+    )).toBe("A C");
+    expect(normalizedProviderSignalText(
+      "A &amp;amp;lt;span class=&quot;technology&quot;&amp;amp;gt; C",
+      500,
+    )).toBe("A C");
+    expect(normalizedProviderSignalText(
+      "A &amp;amp;lt;span data-place=Baltimore&amp;amp;gt; C",
+      500,
+    )).toBe("A C");
+    expect(normalizedProviderSignalText(
+      "A &amp;amp;lt;span data-note=&quot;artificial intelligence regulation&quot;&amp;amp;gt; C",
+      500,
+    )).toBe("A C");
+    expect(normalizedProviderSignalText(
+      "A &amp;amp;lt;technology class=x",
+      500,
+    )).toBe("A");
+    expect(normalizedProviderSignalText(
+      "&amp;amp;lt;technology class=x&amp;amp;gt;",
+      500,
+    )).toBeNull();
+    expect(normalizedProviderSignalText(
+      "&amp;amp;lt;span data-place=Virginia&amp;amp;gt;Baltimore transit update&amp;amp;lt;/span&amp;amp;gt;",
+      500,
+    )).toBe("Baltimore transit update");
+  });
+
+  it("extracts prepared provider signals without another text decode", () => {
+    expect(preparedProviderSignalText(
+      "&lt;technology class=x&gt;Ordinary update",
+    )).toBe("Ordinary update");
+    expect(preparedProviderSignalText(
+      "&lt;span data-place=Baltimore&gt;Ordinary update",
+    )).toBe("Ordinary update");
+    expect(preparedProviderSignalText(
+      "&amp;lt;technology class=x&amp;gt;Ordinary update",
+    )).toBe("&amp;lt;technology class=x&amp;gt;Ordinary update");
+    expect(preparedProviderSignalText(
+      "3 &lt; 5 &gt; 2",
+    )).toBe("3 &lt; 5 &gt; 2");
+    expect(preparedProviderSignalText(
+      "A &lt;\t/span data-place=Baltimore&gt; C",
+    )).toBe("A C");
+    expect(preparedProviderSignalText(
+      "A &lt;\u00a0span data-place=Baltimore&gt; C",
+    )).toBe("A C");
   });
 
   it("returns bounded plain text after decoding and tag removal", () => {

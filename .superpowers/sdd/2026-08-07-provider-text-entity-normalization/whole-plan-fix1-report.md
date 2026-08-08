@@ -1345,6 +1345,208 @@ written.
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 18
+
+Round 18 closes the fail-open signal gap left by Round 17's conservative
+bare-token grammar. Residual encoded syntax is now treated as plausible markup
+when optional whitespace and an optional closing slash are followed by an
+ASCII letter. The complete opener-to-first-close span is removed regardless of
+attributes, malformed interiors, or nested openers; an unmatched plausible
+opener removes its suffix. Numeric/math and other non-letter syntax remains
+visible. Persisted provider and normalized Item text remains unchanged.
+
+### Design
+
+Three approaches were considered. A full HTML parser was rejected because the
+input is residual encoded syntax after bounded normalization, not an HTML
+document, and reparsing would add decoding and recovery behavior outside the
+contract. Extending Round 17's exact interior grammar to selected attributes
+was rejected because malformed or novel attributes would remain a keyword
+side channel. The approved fail-closed scanner recognizes only a plausible tag
+prefix, then ignores interior grammar and drops through the first recognized
+encoded close delimiter. This makes the security boundary independent of tag
+name and attribute validity while retaining arithmetic and numeric tokens.
+
+The scanner accumulates non-overlapping fragments and joins once, so delimiter
+matching, prefix inspection, slicing, and output construction are linear over
+the existing 100,000-code-unit inspection bound. The prepared-text helper
+performs no entity decode or NFKC pass. It is used only to make signal copies;
+raw/structural fields are still returned and persisted through their prior
+paths.
+
+This deliberately supersedes Round 17's expectation that attribute,
+leading-whitespace, nested, and unmatched plausible-opening syntax remain
+visible. Round 17's numeric comparisons, numeric-start tokens, malformed
+non-letter names, and unmatched non-tag delimiter protections remain.
+
+### RED evidence
+
+The primitive and GDELT adapter-to-Item regressions were added before the first
+production change and run with:
+
+```sh
+npm test -- --run tests/unit/sources/provider-text.test.ts tests/unit/sources/news-collector.test.ts -t "preserves residual non-tag|removes residual plausible|extracts prepared provider signals|keeps residual GDELT tag syntax"
+```
+
+Result: exit 1. Three selected tests failed: the plausible nested span remained
+visible, `preparedProviderSignalText` did not exist, and GDELT retained eight
+candidates instead of isolating two tag-only records. Five surrounding
+selected assertions passed.
+
+Independent review then found that official-publication routing still read
+unsanitized prepared fields, and that direct prepared-helper whitespace plus
+engine-independent output construction needed explicit closure. Tests were
+added before those review fixes and run with:
+
+```sh
+npx vitest run tests/unit/sources/provider-text.test.ts tests/unit/editorial/route-publication.test.ts -t "extracts prepared provider signals|does not route commentary from residual|keeps residual attributes out of publication-to-Item"
+```
+
+Result: exit 1. Five tests failed: tab-prefixed closing markup remained, AI
+policy, technology, and research-topic attributes routed commentary, and an
+official publication's AI attribute routed `ai_policy` instead of the visible
+content's `technology` fallback.
+
+### Implementation
+
+- Replaced the Round 17 bare-tag validator with a bounded streaming scanner.
+  After encoded open syntax it skips ECMAScript whitespace, accepts one
+  optional `/`, and requires an ASCII letter. A plausible span is dropped
+  through the first encoded close; nested opens do not restart the span, and an
+  unmatched plausible opener drops the remaining suffix.
+- Non-letter interiors are not opened as markup spans, so numeric comparisons,
+  numeric tokens, malformed `-tag` names, and unmatched non-tag delimiters
+  remain exact. Named, decimal, hexadecimal, and fullwidth encoded delimiters
+  retain their existing recognition.
+- Added `preparedProviderSignalText`, which applies only the bounded residual
+  scrub and whitespace cleanup. It does not decode entities or apply NFKC.
+  `normalizedProviderSignalText` delegates to it after the existing two-pass
+  compatibility-aware provider normalization.
+- `normalizePreparedCandidate` now derives research topics, named entities,
+  event families, canonical event instances, and material facts from sanitized
+  signal copies. Its title, abstract, content, and normalized text persistence
+  are unchanged.
+- Publication routing now uses the same prepared signal copies for topic,
+  substantive-research, technology, AI-policy, and `deriveNewsSignals`
+  decisions while retaining structural URLs/related identifiers and returning
+  the original candidate display fields. Signal-empty publications isolate.
+- Added helper, GDELT adapter-to-Item, and publication-to-Item coverage for tag
+  names and attributes containing technology, Baltimore, AI-policy, research,
+  and product keywords; leading whitespace/slash; tab and NBSP; nested and
+  malformed spans; unmatched plausible suffixes; numeric/non-tag preservation;
+  visible Baltimore wrapper content; isolation; and raw persistence.
+
+### GREEN evidence
+
+Initial exact regression selection:
+
+```sh
+npm test -- --run tests/unit/sources/provider-text.test.ts tests/unit/sources/news-collector.test.ts -t "preserves residual non-tag|removes residual plausible|extracts prepared provider signals|keeps residual GDELT tag syntax"
+```
+
+Result: exit 0; 8 selected tests passed.
+
+Post-review exact regression selection:
+
+```sh
+npx vitest run tests/unit/sources/provider-text.test.ts tests/unit/editorial/route-publication.test.ts -t "extracts prepared provider signals|does not route commentary from residual|keeps residual attributes out of publication-to-Item"
+```
+
+Result: exit 0; 5 selected tests passed.
+
+Focused provider/publication/news suites:
+
+```sh
+npx vitest run tests/unit/sources/provider-text.test.ts tests/unit/editorial/route-publication.test.ts tests/unit/sources/publication-collector.test.ts tests/unit/sources/news-collector.test.ts
+```
+
+Result: exit 0; 4 files and 124 tests passed.
+
+Affected source/editorial/workflow suites:
+
+```sh
+npx vitest run tests/unit/editorial tests/unit/workflow tests/unit/sources
+```
+
+Result: exit 0; 21 files and 557 tests passed.
+
+Full Worker suite:
+
+```sh
+npm run test:worker
+```
+
+Result: exit 0; 11 files and 233 tests passed, with only existing third-party
+missing-sourcemap warnings.
+
+Remaining non-Worker suite excluding the unrelated managed-OAuth fixture:
+
+```sh
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+```
+
+Result: exit 0; 39 files and 786 tests passed.
+
+Static, evaluation, build, and diff verification:
+
+```sh
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results: all exited 0. TypeScript passed, every golden relevance/identity/
+routing/grounding check passed, Vite built 53 modules, and the diff contained
+no whitespace errors.
+
+The first independent read-only review found no Critical issue, one Important
+publication-routing boundary gap, and two Minor whitespace/portable-linearity
+issues. All three were reproduced and fixed under TDD. Its follow-up found no
+Critical, Important, or Minor issues and assessed the change ready to merge.
+
+### Files changed
+
+- `src/sources/provider-text.ts`
+- `src/editorial/normalize.ts`
+- `src/editorial/route-publication.ts`
+- `tests/unit/sources/provider-text.test.ts`
+- `tests/unit/sources/news-collector.test.ts`
+- `tests/unit/editorial/route-publication.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+
+### Commit
+
+Planned message: `fix: fail closed on residual provider markup`. The resulting
+SHA is recorded in the task handoff because it is created after this report is
+written.
+
+### Self-review
+
+- Removing the plausible-prefix scanner reproduces the nested, attribute,
+  leading-whitespace/slash, unmatched-suffix, and tag-only failures. Removing
+  the central prepared-signal path recreates Item-level Baltimore contamination.
+  Removing the publication signal copies recreates all three route leaks.
+- Attribute-only `technology`, `Baltimore`, `artificial intelligence
+  regulation`, `product launch`, and `interpretability study` text does not
+  enter semantic derivation. Visible text outside dropped wrappers remains
+  available for legitimate Baltimore and ordinary publication routing.
+- Candidate raw GDELT titles and normalized Item display titles retain their
+  prior residual entity syntax exactly. Publication route results likewise
+  retain their original prepared display fields.
+- The prepared helper performs truncation, residual scanning, and whitespace
+  cleanup only. It does not spend another decode pass or apply compatibility
+  normalization. Output fragments cover disjoint input ranges and join once.
+- Existing decoder passes, delimiter variants, ordinary HTML stripping,
+  structural URLs/IDs/dates/metadata, access classification, checkpoint
+  lifecycles, and persisted normalized text remain covered by the broad suites.
+- No trusted-HTML insertion, recursive parser, deployment, canary, migration,
+  historical rewrite, OAuth change, or unrelated cleanup was introduced.
+
+### Concerns
+
+- None. Worker runs emit existing third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 12
 
 Round 12 closes the aggregate metadata contamination gap left by the Round 11
