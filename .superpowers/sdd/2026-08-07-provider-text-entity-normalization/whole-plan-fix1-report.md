@@ -618,6 +618,179 @@ no whitespace errors.
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 14
+
+Round 14 closes the encoded-markup gap at provider-text display/evidence
+boundaries and makes every stored news-development aggregate use the same
+canonical nested-Item reconstruction. Encoded tags are decoded and stripped
+before NFKC, whitespace normalization, and bounds; tag-only required titles or
+source names retain the Round 13 typed rejection and sibling isolation.
+Ordinary stored aggregates now filter only typed-invalid nested Items, rebuild
+all aggregate fields from survivors, replay score/section state, and propagate
+structural errors. Current checkpoint envelopes remain byte-stable.
+
+### RED evidence
+
+Raw/custom and RSS encoded-markup regressions were added first and run with:
+
+```sh
+npm test -- --run tests/unit/editorial/normalize.test.ts tests/unit/sources/publication-collector.test.ts tests/integration/workflow/manual-run.test.ts
+```
+
+Result: exit 1; the two unit files reported 6 intended failures and 28 passes.
+Encoded `&lt;br&gt;` titles/source names survived as literal `<br>` instead of
+raising the typed error, and encoded script/emphasis wrappers persisted in
+normalized Item JSON. RSS assertions proved the adapter still returned encoded
+raw text before the central boundary.
+
+Stored, legacy, nested-development, and ordinary-aggregate regressions were
+then run through the real Worker context:
+
+```sh
+npm run test:worker -- tests/integration/workflow/manual-run.test.ts
+```
+
+Result: exit 1; 11 intended cases failed and 78 surrounding tests passed. Raw,
+stored, missing-envelope, and cluster/shortlist tag-only Items were retained.
+An ordinary mixed development dropped the entire aggregate, an all-bad
+development was not recognized after tag decoding, and a schema-valid
+development containing a research Item did not propagate the canonical
+news-only structural error.
+
+The display/evidence field audit added author, venue, normalized evidence,
+URL, and structural-topic assertions. Focused runs failed on the unstripped
+author and stored evidence, while required title/source-name stripping already
+passed after the first implementation step.
+
+### Implementation
+
+- The central required raw and stored display helpers now call the existing
+  provider-text primitive with `stripHtml: true`. The primitive's existing
+  order is decode, regex tag removal, NFKC/whitespace normalization, then safe
+  bounding. Empty results throw the unchanged
+  `InvalidRequiredProviderDisplayTextError` with the exact `title` or
+  `sourceName` discriminator.
+- Known optional provider display arrays/venue and stored display/evidence
+  fields use the same tag-removal option. Raw abstracts/content already used it.
+  Useful wrapper text is retained; only markup is removed. Raw RSS adapter
+  output remains undecoded, and URLs, IDs, enums, and structural primary-topic
+  metadata never enter this display decoder.
+- Both values of `refreshDerived` now traverse stored development Items through
+  the typed filtering result. Any survivors feed `developmentFromItems`; the
+  canonical development feeds the existing schema-only root mapper. The stale
+  aggregate title, representative, source refs, IDs, evidence joins, signals,
+  and open-ended root metadata are never copied as authorities.
+- If no nested Item survives, the first typed required-display error escapes to
+  the existing aggregate-level isolation catch. Non-typed/schema/semantic
+  errors are not caught. Development score and section are replayed whenever a
+  stored development is rebuilt, including ordinary `refreshDerived=false`
+  normalization.
+- The Round 12 aggregate workflow allowlist remains the only carried workflow
+  state: personal relevance, development, development score, section, and
+  selection reasons. Embeddings and arbitrary aggregate-only metadata are
+  discarded; representative-owned structural metadata remains canonical.
+
+### GREEN evidence
+
+Focused raw/RSS suites:
+
+```sh
+npm test -- --run tests/unit/editorial/normalize.test.ts tests/unit/sources/publication-collector.test.ts
+```
+
+Result: exit 0; 2 files and 34 tests passed.
+
+Full manual workflow integration file:
+
+```sh
+npm run test:worker -- tests/integration/workflow/manual-run.test.ts
+```
+
+Result: exit 0; all 90 tests passed. This includes mixed/all-bad/structural
+ordinary aggregates, legacy cluster/shortlist canonical parity, and the second
+restore of current envelopes remaining exact.
+
+Affected source/editorial/workflow suites:
+
+```sh
+npx vitest run tests/unit/editorial tests/unit/workflow tests/unit/sources
+```
+
+Result: exit 0; 21 files and 526 tests passed.
+
+Full Worker suite:
+
+```sh
+npm run test:worker
+```
+
+Result: exit 0; 11 files and 227 tests passed, with only existing third-party
+missing-sourcemap warnings.
+
+Remaining non-Worker suite excluding the unrelated managed-OAuth fixture:
+
+```sh
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+```
+
+Result: exit 0; 39 files and 755 tests passed.
+
+Static, evaluation, build, and diff verification:
+
+```sh
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results: all exited 0. TypeScript passed, every golden relevance/identity/
+routing/grounding check passed, Vite built 53 modules, and the diff contained
+no whitespace errors.
+
+### Files changed
+
+- `src/editorial/normalize.ts`
+- `src/workflow/run-editorial-pipeline.ts`
+- `tests/integration/workflow/manual-run.test.ts`
+- `tests/unit/editorial/normalize.test.ts`
+- `tests/unit/sources/publication-collector.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+
+### Commit
+
+Planned message: `fix: strip encoded markup and rebuild stored aggregates`.
+The resulting SHA is recorded in the task handoff because it is created after
+this report is written.
+
+### Self-review
+
+- Tests cover encoded tag-only and useful wrapped text for both required fields
+  across custom raw, real RSS raw output, direct stored Items, missing-envelope
+  restore, and nested developments. JSON assertions reject literal markup while
+  useful text remains.
+- Adapter assertions prove no decode moved into RSS. URL queries containing
+  encoded-tag bytes remain exact, and an entity-like stored primary topic
+  remains structural instead of being decoded into a classification.
+- The aggregate regression independently computes the expected development
+  from only valid normalized siblings, then checks root ID/title/source refs/
+  evidence/section, score replay, representative metadata ownership, workflow
+  allowlisting, and removal of aggregate-only sentinels.
+- The all-bad regression preserves a valid top-level sibling; the structural
+  regression uses a schema-valid research Item inside a development and proves
+  the semantic news-only error propagates rather than being mistaken for
+  invalid provider text.
+- Canonical development fields cross no second provider-text boundary. The
+  root mapper consumes already-normalized development data, and trusted current
+  checkpoint envelopes still bypass restoration normalization entirely.
+- No new error class, catch broadening, source-name fallback, recursive generic
+  sanitizer, deployment, canary, migration, history rewrite, or unrelated
+  source/OAuth change was introduced.
+
+### Concerns
+
+- None. Worker runs emit existing third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 12
 
 Round 12 closes the aggregate metadata contamination gap left by the Round 11

@@ -55,6 +55,55 @@ describe("research normalization", () => {
     },
   );
 
+  it.each(["title", "sourceName"] as const)(
+    "rejects encoded tag-only required provider %s text",
+    (field) => {
+      let observed: unknown;
+      try {
+        normalizeCandidate(candidate({ [field]: "&lt;br&gt;" }));
+      } catch (error) {
+        observed = error;
+      }
+
+      expect(observed).toBeInstanceOf(
+        InvalidRequiredProviderDisplayTextError,
+      );
+      expect(
+        (observed as InvalidRequiredProviderDisplayTextError).field,
+      ).toBe(field);
+    },
+  );
+
+  it("decodes and strips encoded wrappers from provider display and evidence", () => {
+    const originalUrl =
+      "https://custom.example/research?label=%26lt%3Bbr%26gt%3B";
+    const normalized = normalizeCandidate(candidate({
+      kind: "blog",
+      sourceId: "custom",
+      title: "&lt;script&gt;Useful title&lt;/script&gt;",
+      sourceName: "&lt;em&gt;Useful source&lt;/em&gt;",
+      originalUrl,
+      externalId: "custom:useful-title",
+      externalIds: ["custom:useful-title"],
+      authors: ["&lt;strong&gt;Useful author&lt;/strong&gt;"],
+      abstract: "&lt;p&gt;Useful evidence&lt;/p&gt;",
+      metadata: {
+        discoveryFamily: "custom",
+        venue: "&lt;em&gt;Useful venue&lt;/em&gt;",
+      },
+    }));
+
+    expect(normalized.title).toBe("Useful title");
+    expect(normalized.sourceRefs[0]?.name).toBe("Useful source");
+    expect(normalized.normalizedText).toBe("Useful evidence");
+    expect(normalized.metadata.authors).toEqual(["Useful author"]);
+    expect(normalized.metadata.venue).toBe("Useful venue");
+    expect(normalized.canonicalUrl).toBe(originalUrl);
+    expect(JSON.stringify(normalized)).not.toMatch(
+      /<(?:script|em|strong|p)>/i,
+    );
+  });
+
   it("decodes provider entities before normalized items are persisted", () => {
     const normalized = normalizeCandidate(candidate({
       title: "Inspector finds &#8216;systemic breakdown&#8217;",

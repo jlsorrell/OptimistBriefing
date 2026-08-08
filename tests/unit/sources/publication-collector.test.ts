@@ -411,6 +411,67 @@ describe("PublicationCollector", () => {
 });
 
 describe("RssAdapter feed normalization", () => {
+  it.each(["title", "sourceName"] as const)(
+    "keeps encoded RSS %s markup raw before central typed rejection",
+    async (invalidField) => {
+      const rawTitle = invalidField === "title"
+        ? "&lt;br&gt;"
+        : "&lt;strong&gt;Useful RSS title&lt;/strong&gt;";
+      const feed = rssSource({
+        canonicalName: invalidField === "sourceName"
+          ? "&lt;br&gt;"
+          : "&lt;em&gt;Useful RSS source&lt;/em&gt;",
+      });
+      const rssResult = await rssAdapterFor(
+        feed,
+        `<?xml version="1.0"?><rss><channel><item>
+          <title><![CDATA[${rawTitle}]]></title>
+          <link>https://www.alignmentforum.org/posts/example/encoded-markup?label=%26lt%3Bbr%26gt%3B</link>
+          <pubDate>Sat, 02 Aug 2026 12:00:00 GMT</pubDate>
+          <description>Useful bounded evidence.</description>
+        </item></channel></rss>`,
+      ).collect(window);
+      const candidate = rssResult.candidates[0]!;
+
+      expect(candidate[invalidField]).toBe("&lt;br&gt;");
+      let observed: unknown;
+      try {
+        normalizeCandidate(candidate);
+      } catch (error) {
+        observed = error;
+      }
+      expect(observed).toMatchObject({ field: invalidField });
+    },
+  );
+
+  it("strips useful encoded RSS wrappers without decoding its URL", async () => {
+    const originalUrl =
+      "https://www.alignmentforum.org/posts/example/useful-markup?label=%26lt%3Bbr%26gt%3B";
+    const rssResult = await rssAdapterFor(
+      rssSource({
+        canonicalName: "&lt;em&gt;Useful RSS source&lt;/em&gt;",
+      }),
+      `<?xml version="1.0"?><rss><channel><item>
+        <title><![CDATA[&lt;script&gt;Useful RSS title&lt;/script&gt;]]></title>
+        <link>${originalUrl}</link>
+        <pubDate>Sat, 02 Aug 2026 12:00:00 GMT</pubDate>
+        <description>Useful bounded evidence.</description>
+      </item></channel></rss>`,
+    ).collect(window);
+    const candidate = rssResult.candidates[0]!;
+
+    expect(candidate).toMatchObject({
+      title: "&lt;script&gt;Useful RSS title&lt;/script&gt;",
+      sourceName: "&lt;em&gt;Useful RSS source&lt;/em&gt;",
+      originalUrl,
+    });
+    const normalized = normalizeCandidate(candidate);
+    expect(normalized.title).toBe("Useful RSS title");
+    expect(normalized.sourceRefs[0]?.name).toBe("Useful RSS source");
+    expect(normalized.canonicalUrl).toBe(originalUrl);
+    expect(JSON.stringify(normalized)).not.toMatch(/<(?:script|em)>/i);
+  });
+
   it("keeps triple-encoded RSS text inert after central normalization", async () => {
     const rssResult = await rssAdapterFor(
       rssSource(),

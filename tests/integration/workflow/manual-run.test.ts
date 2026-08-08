@@ -919,7 +919,7 @@ describe("manual editorial run", () => {
       const diagnosticWrites: DiscoveryLaneDiagnostic[][] = [];
       const invalid = {
         ...rawNewsCandidate(`empty-prepared-${invalidField}`, "world"),
-        [invalidField]: "&#32;",
+        [invalidField]: "&lt;br&gt;",
         metadata: {
           discoveryFamily: "official-publication",
           discoveryLaneIds: [laneId],
@@ -981,7 +981,7 @@ describe("manual editorial run", () => {
   );
 
   it.each(["title", "sourceName"] as const)(
-    "isolates an entity-only stored Item %s from its valid sibling",
+    "isolates an encoded-markup-only stored Item %s from its valid sibling",
     async (invalidField) => {
       const laneId = `official-publication:stored-item-${invalidField}`;
       const diagnosticWrites: DiscoveryLaneDiagnostic[][] = [];
@@ -991,10 +991,10 @@ describe("manual editorial run", () => {
       );
       const invalid = ItemSchema.parse({
         ...invalidFixture,
-        ...(invalidField === "title" ? { title: "&#32;" } : {}),
+        ...(invalidField === "title" ? { title: "&lt;br&gt;" } : {}),
         sourceRefs: invalidFixture.sourceRefs.map((source) => ({
           ...source,
-          ...(invalidField === "sourceName" ? { name: "&#32;" } : {}),
+          ...(invalidField === "sourceName" ? { name: "&lt;br&gt;" } : {}),
         })),
         metadata: {
           ...invalidFixture.metadata,
@@ -1051,6 +1051,275 @@ describe("manual editorial run", () => {
       });
     },
   );
+
+  it("strips encoded wrappers from stored display and evidence without decoding URLs", async () => {
+    const fixture = fixtureItem("stored-useful-markup", "world");
+    const originalUrl =
+      "https://example.com/stored-useful-markup?label=%26lt%3Bbr%26gt%3B";
+    const stored = ItemSchema.parse({
+      ...fixture,
+      canonicalUrl: originalUrl,
+      title: "&lt;script&gt;Useful stored title&lt;/script&gt;",
+      primaryTopic: "&#119;orld",
+      sourceRefs: fixture.sourceRefs.map((source) => ({
+        ...source,
+        name: "&lt;em&gt;Useful stored source&lt;/em&gt;",
+      })),
+      normalizedText: "&lt;p&gt;Useful stored evidence&lt;/p&gt;",
+      metadata: {
+        ...fixture.metadata,
+        authors: ["&lt;strong&gt;Useful stored author&lt;/strong&gt;"],
+        venue: "&lt;em&gt;Useful stored venue&lt;/em&gt;",
+      },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2034-04-02",
+      runId: "run-stored-useful-markup",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    const normalized = (await context.normalize([stored]))[0]!;
+
+    expect(normalized.title).toBe("Useful stored title");
+    expect(normalized.sourceRefs[0]?.name).toBe("Useful stored source");
+    expect(normalized.normalizedText).toBe("Useful stored evidence");
+    expect(normalized.metadata.authors).toEqual(["Useful stored author"]);
+    expect(normalized.metadata.venue).toBe("Useful stored venue");
+    expect(normalized.canonicalUrl).toBe(originalUrl);
+    expect(normalized.primaryTopic).toBe("&#119;orld");
+    expect(JSON.stringify(normalized)).not.toMatch(
+      /<(?:script|em|strong|p)>/i,
+    );
+  });
+
+  it("rebuilds an ordinary stored aggregate after filtering typed-invalid nested display text", async () => {
+    const relatedItem = (id: string): Item => ItemSchema.parse({
+      ...fixtureItem(id, "world"),
+      metadata: {
+        ...fixtureItem(id, "world").metadata,
+        primarySection: "world",
+        sectionEligibility: ["world"],
+        namedEntities: ["Ordinary Development Agency"],
+        normalizedAuthors: [],
+        primaryDocumentUrl:
+          "https://example.com/documents/ordinary-development",
+        primaryDocumentUrls: [
+          "https://example.com/documents/ordinary-development",
+        ],
+      },
+    });
+    const validA = relatedItem("ordinary-development-valid-a");
+    const validB = relatedItem("ordinary-development-valid-b");
+    const invalidTitle = ItemSchema.parse({
+      ...relatedItem("ordinary-development-invalid-title"),
+      title: "&lt;br&gt;",
+    });
+    const invalidSourceFixture = relatedItem(
+      "ordinary-development-invalid-source",
+    );
+    const invalidSource = ItemSchema.parse({
+      ...invalidSourceFixture,
+      sourceRefs: invalidSourceFixture.sourceRefs.map((source) => ({
+        ...source,
+        name: "&lt;br&gt;",
+      })),
+    });
+    const staleDevelopment = clusterNews([
+      invalidTitle,
+      invalidSource,
+      validA,
+      validB,
+    ], {})[0]!;
+    const freshDevelopment = clusterNews([validA, validB], {})[0]!;
+    const scoreInputs = {
+      publicImportance: 0.81,
+      personalRelevance: 0.72,
+      sourceQuality: 0.91,
+      recency: 0.84,
+      geography: 0.25,
+      novelty: 0.63,
+    };
+    const aggregate = ItemSchema.parse({
+      ...staleDevelopment.representativeItem,
+      id: staleDevelopment.id,
+      title: staleDevelopment.title,
+      sourceRefs: staleDevelopment.sourceRefs,
+      normalizedText: staleDevelopment.items
+        .map((item) => item.normalizedText)
+        .join(" "),
+      primaryTopic: staleDevelopment.primarySection,
+      metadata: {
+        ...staleDevelopment.representativeItem.metadata,
+        ordinaryAggregateSentinel: "must-not-survive",
+        workflow: {
+          version: 1,
+          embedding: [0.25],
+          personalRelevance: scoreInputs.personalRelevance,
+          development: staleDevelopment,
+          developmentScore: scoreNewsDevelopment(
+            staleDevelopment,
+            scoreInputs,
+          ),
+          section: "technology",
+          selectionReasons: ["Preserved selection reason."],
+        },
+      },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2034-04-03",
+      runId: "run-ordinary-development-typed-filter",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    const normalized = await context.normalize([aggregate]);
+
+    expect(normalized).toHaveLength(1);
+    const rebuilt = normalized[0]!;
+    const rebuiltWorkflow = rebuilt.metadata.workflow as {
+      development: typeof freshDevelopment;
+      developmentScore: ReturnType<typeof scoreNewsDevelopment>;
+      embedding?: readonly number[];
+      personalRelevance?: number;
+      section?: string;
+      selectionReasons?: readonly string[];
+    };
+    expect(rebuiltWorkflow.development).toEqual(freshDevelopment);
+    expect(rebuiltWorkflow.developmentScore).toEqual(
+      scoreNewsDevelopment(freshDevelopment, scoreInputs),
+    );
+    expect(rebuilt).toMatchObject({
+      id: freshDevelopment.id,
+      title: freshDevelopment.title,
+      sourceRefs: freshDevelopment.sourceRefs,
+      normalizedText: freshDevelopment.items
+        .map((item) => item.normalizedText)
+        .join(" "),
+      primaryTopic: freshDevelopment.primarySection,
+    });
+    expect(rebuiltWorkflow.embedding).toBeUndefined();
+    expect(rebuiltWorkflow.personalRelevance).toBe(
+      scoreInputs.personalRelevance,
+    );
+    expect(rebuiltWorkflow.section).toBe(freshDevelopment.primarySection);
+    expect(rebuiltWorkflow.selectionReasons).toEqual([
+      "Preserved selection reason.",
+    ]);
+    expect(rebuilt.metadata.ordinaryAggregateSentinel).toBeUndefined();
+    expect(JSON.stringify(rebuilt)).not.toContain("<br>");
+  });
+
+  it("drops an ordinary stored aggregate only when every nested Item is typed-invalid", async () => {
+    const relatedItem = (id: string): Item => ItemSchema.parse({
+      ...fixtureItem(id, "world"),
+      metadata: {
+        ...fixtureItem(id, "world").metadata,
+        primarySection: "world",
+        sectionEligibility: ["world"],
+        namedEntities: ["All Bad Development Agency"],
+        normalizedAuthors: [],
+        primaryDocumentUrl:
+          "https://example.com/documents/all-bad-development",
+        primaryDocumentUrls: [
+          "https://example.com/documents/all-bad-development",
+        ],
+      },
+    });
+    const invalidTitle = ItemSchema.parse({
+      ...relatedItem("ordinary-all-bad-title"),
+      title: "&lt;br&gt;",
+    });
+    const invalidSourceFixture = relatedItem("ordinary-all-bad-source");
+    const invalidSource = ItemSchema.parse({
+      ...invalidSourceFixture,
+      sourceRefs: invalidSourceFixture.sourceRefs.map((source) => ({
+        ...source,
+        name: "&lt;br&gt;",
+      })),
+    });
+    const staleDevelopment = clusterNews(
+      [invalidTitle, invalidSource],
+      {},
+    )[0]!;
+    const aggregate = ItemSchema.parse({
+      ...staleDevelopment.representativeItem,
+      id: staleDevelopment.id,
+      metadata: {
+        ...staleDevelopment.representativeItem.metadata,
+        workflow: {
+          version: 1,
+          development: staleDevelopment,
+        },
+      },
+    });
+    const validSibling = fixtureItem("ordinary-all-bad-valid-sibling", "world");
+    const context = createProductionPipelineContext({
+      editionDate: "2034-04-04",
+      runId: "run-ordinary-development-all-bad",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    const normalized = await context.normalize([aggregate, validSibling]);
+
+    expect(normalized.map(({ id }) => id)).toEqual([validSibling.id]);
+  });
+
+  it("propagates a structurally invalid nested Item from an ordinary stored aggregate", async () => {
+    const validNews = fixtureItem("ordinary-structural-news", "world");
+    const validDevelopment = clusterNews([validNews], {})[0]!;
+    const researchItem = fixtureItem("ordinary-structural-paper", "research");
+    const structurallyInvalidDevelopment = {
+      ...validDevelopment,
+      title: researchItem.title,
+      itemIds: [researchItem.id],
+      items: [researchItem],
+      representativeItem: researchItem,
+      sourceRefs: researchItem.sourceRefs,
+    };
+    const aggregate = ItemSchema.parse({
+      ...validNews,
+      id: validDevelopment.id,
+      metadata: {
+        ...validNews.metadata,
+        workflow: {
+          version: 1,
+          development: structurallyInvalidDevelopment,
+        },
+      },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2034-04-05",
+      runId: "run-ordinary-development-structural-bad",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    await expect(context.normalize([aggregate])).rejects.toThrow(
+      "News developments require only news Items.",
+    );
+  });
 
   it("prepares publication text before routing without changing structure", async () => {
     const publication: RawPublicationCandidate = {
@@ -1651,7 +1920,7 @@ describe("manual editorial run", () => {
   });
 
   it.each(["title", "sourceName"] as const)(
-    "drops only an entity-empty Item %s from a legacy normalize checkpoint",
+    "drops only an encoded-markup-empty Item %s from a legacy normalize checkpoint",
     async (invalidField) => {
       const store = new FixtureStore();
       const invalidFixture = fixtureItem(
@@ -1660,10 +1929,10 @@ describe("manual editorial run", () => {
       );
       const invalid = ItemSchema.parse({
         ...invalidFixture,
-        ...(invalidField === "title" ? { title: "&nbsp;" } : {}),
+        ...(invalidField === "title" ? { title: "&lt;br&gt;" } : {}),
         sourceRefs: invalidFixture.sourceRefs.map((source) => ({
           ...source,
-          ...(invalidField === "sourceName" ? { name: "&nbsp;" } : {}),
+          ...(invalidField === "sourceName" ? { name: "&lt;br&gt;" } : {}),
         })),
       });
       const valid = fixtureItem("legacy-normalize-valid-title", "world");
@@ -4014,13 +4283,13 @@ describe("manual editorial run", () => {
           "primary",
         ).sourceRefs.map((source) => ({
           ...source,
-          name: "&#32;",
+          name: "&lt;br&gt;",
         })),
         tags: ["stale&#45;section"],
       });
       const invalidTitleItem = ItemSchema.parse({
         ...freshNewsItem("legacy-development-empty-title", "reporting"),
-        title: "&#32;",
+        title: "&lt;br&gt;",
         tags: ["stale&#45;section"],
       });
       const freshDevelopment = clusterNews(

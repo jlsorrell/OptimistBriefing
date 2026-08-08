@@ -41,6 +41,7 @@ function normalizedWhitespace(value: string): string {
 
 function normalizedProviderDisplayText(value: string): string {
   return normalizeProviderText(value, {
+    stripHtml: true,
     maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
   }) ?? "";
 }
@@ -176,6 +177,7 @@ function requiredPreparedProviderDisplayText(
   field: RequiredProviderDisplayTextField,
 ): string {
   const normalized = normalizeProviderText(value, {
+    stripHtml: true,
     maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
   });
   if (normalized === null) {

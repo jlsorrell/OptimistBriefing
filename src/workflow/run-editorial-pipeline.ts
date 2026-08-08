@@ -1258,6 +1258,7 @@ function normalizedCandidate(candidate: CollectedCandidate): Item | null {
 
 function normalizedStoredDisplay(value: string): string {
   return normalizeProviderText(value, {
+    stripHtml: true,
     maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
   }) ?? "";
 }
@@ -1267,6 +1268,7 @@ function normalizedRequiredStoredDisplayText(
   field: RequiredProviderDisplayTextField,
 ): string {
   const display = normalizeProviderText(value, {
+    stripHtml: true,
     maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
   });
   if (display === null) {
@@ -1308,6 +1310,7 @@ function normalizedStoredItem(item: Item, refreshDerived = false): Item {
   }
   if (typeof metadata.venue === "string") {
     metadata.venue = normalizeProviderText(metadata.venue, {
+      stripHtml: true,
       maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
     });
   }
@@ -1342,6 +1345,7 @@ function normalizedStoredItem(item: Item, refreshDerived = false): Item {
       }
       if (typeof normalized.excerpt === "string") {
         normalized.excerpt = normalizeProviderText(normalized.excerpt, {
+          stripHtml: true,
           maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS,
         }) ?? "";
       }
@@ -1360,7 +1364,9 @@ function normalizedStoredItem(item: Item, refreshDerived = false): Item {
     });
   }
   const title = normalizedRequiredStoredDisplayText(item.title, "title");
-  const normalizedText = normalizeProviderText(item.normalizedText) ?? "";
+  const normalizedText = normalizeProviderText(item.normalizedText, {
+    stripHtml: true,
+  }) ?? "";
   const authors = itemStringArray(metadata.authors);
   if (Array.isArray(metadata.authors)) metadata.authors = authors;
   metadata.normalizedAuthors = [...new Set(
@@ -1378,8 +1384,7 @@ function normalizedStoredItem(item: Item, refreshDerived = false): Item {
       ])
     : [];
   if (research) metadata.configuredTopics = configuredTopics;
-  let primaryTopic = configuredTopics[0] ??
-    normalizedStoredDisplay(item.primaryTopic);
+  let primaryTopic = configuredTopics[0] ?? item.primaryTopic;
   let tags = refreshDerived && research
     ? [...configuredTopics]
     : [...item.tags];
@@ -1555,45 +1560,22 @@ function normalizedStoredWorkflowItem(
   let development: NewsDevelopment | undefined;
   let normalizedDevelopmentRoot: Item | undefined;
   if (originalWorkflow?.development !== undefined) {
-    if (refreshDerived) {
-      const normalizedNested = normalizedStoredWorkflowItemsResult(
-        originalWorkflow.development.items,
-        true,
-      );
-      const survivingItems = normalizedNested.items;
-      if (survivingItems.length === 0) {
-        if (normalizedNested.firstInvalidDisplayTextError !== undefined) {
-          throw normalizedNested.firstInvalidDisplayTextError;
-        }
-        throw new TypeError("News developments require at least one Item.");
+    const normalizedNested = normalizedStoredWorkflowItemsResult(
+      originalWorkflow.development.items,
+      refreshDerived,
+    );
+    const survivingItems = normalizedNested.items;
+    if (survivingItems.length === 0) {
+      if (normalizedNested.firstInvalidDisplayTextError !== undefined) {
+        throw normalizedNested.firstInvalidDisplayTextError;
       }
-      development = developmentFromItems(survivingItems);
-      normalizedDevelopmentRoot = storedItemFromNormalizedDevelopment(
-        development,
-        originalWorkflow,
-      );
-    } else {
-      development = NewsDevelopmentSchema.parse({
-        ...originalWorkflow.development,
-        title: normalizedRequiredStoredDisplayText(
-          originalWorkflow.development.title,
-          "title",
-        ),
-        items: originalWorkflow.development.items.map((nestedItem) =>
-          normalizedStoredWorkflowItem(nestedItem)
-        ),
-        representativeItem: normalizedStoredWorkflowItem(
-          originalWorkflow.development.representativeItem,
-        ),
-        sourceRefs: originalWorkflow.development.sourceRefs.map((source) => ({
-          ...source,
-          name: normalizedRequiredStoredDisplayText(
-            source.name,
-            "sourceName",
-          ),
-        })),
-      });
+      throw new TypeError("News developments require at least one Item.");
     }
+    development = developmentFromItems(survivingItems);
+    normalizedDevelopmentRoot = storedItemFromNormalizedDevelopment(
+      development,
+      originalWorkflow,
+    );
   }
   const normalizedStored = normalizedDevelopmentRoot ??
     normalizedStoredItem(item, refreshDerived);
@@ -1607,8 +1589,7 @@ function normalizedStoredWorkflowItem(
     ? null
     : workflowPayload(normalizedStored);
   const refreshedDevelopmentScore =
-    refreshDerived &&
-      development !== undefined &&
+    development !== undefined &&
       existing?.developmentScore !== undefined
       ? scoreNewsDevelopment(development, {
           publicImportance: existing.developmentScore.publicImportance,
@@ -1634,8 +1615,7 @@ function normalizedStoredWorkflowItem(
       ...(refreshedDevelopmentScore === undefined
         ? {}
         : { developmentScore: refreshedDevelopmentScore }),
-      ...(refreshDerived &&
-          development !== undefined &&
+      ...(development !== undefined &&
           existing?.section !== undefined
         ? { section: development.primarySection }
         : {}),
