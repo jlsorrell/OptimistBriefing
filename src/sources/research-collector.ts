@@ -20,7 +20,7 @@ import {
 } from "./types";
 import type { PaperContentRetriever } from "./paper-content";
 import {
-  InvalidPreparedCandidateTextError,
+  InvalidRequiredProviderDisplayTextError,
   markPreparedRawCandidate,
   prepareRawCandidateForPipeline,
 } from "../editorial/normalize";
@@ -469,7 +469,7 @@ export class ResearchCollector {
           ),
         }))];
       } catch (error) {
-        if (error instanceof InvalidPreparedCandidateTextError) {
+        if (error instanceof InvalidRequiredProviderDisplayTextError) {
           for (const laneId of metadataStringArray(
             rawCandidate.metadata,
             "discoveryLaneIds",

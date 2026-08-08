@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeCandidate } from "../../../src/editorial/normalize";
+import {
+  InvalidRequiredProviderDisplayTextError,
+  normalizeCandidate,
+} from "../../../src/editorial/normalize";
 import type { RawResearchCandidate } from "../../../src/sources/types";
 
 function candidate(
@@ -33,6 +36,25 @@ function candidate(
 }
 
 describe("research normalization", () => {
+  it.each(["title", "sourceName"] as const)(
+    "identifies an empty required provider %s",
+    (field) => {
+      let observed: unknown;
+      try {
+        normalizeCandidate(candidate({ [field]: "&#32;" }));
+      } catch (error) {
+        observed = error;
+      }
+
+      expect(observed).toBeInstanceOf(
+        InvalidRequiredProviderDisplayTextError,
+      );
+      expect(
+        (observed as InvalidRequiredProviderDisplayTextError).field,
+      ).toBe(field);
+    },
+  );
+
   it("decodes provider entities before normalized items are persisted", () => {
     const normalized = normalizeCandidate(candidate({
       title: "Inspector finds &#8216;systemic breakdown&#8217;",

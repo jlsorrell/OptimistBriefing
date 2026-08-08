@@ -912,131 +912,145 @@ async function publishD1FixtureEdition(
 }
 
 describe("manual editorial run", () => {
-  it("isolates an empty prepared title without swallowing structural errors", async () => {
-    const laneId = "official-publication:empty-prepared-title";
-    const diagnosticWrites: DiscoveryLaneDiagnostic[][] = [];
-    const emptyTitle = {
-      ...rawNewsCandidate("empty-prepared-title", "world"),
-      title: "&#32;",
-      metadata: {
-        discoveryFamily: "official-publication",
-        discoveryLaneIds: [laneId],
-      },
-    };
-    const valid = {
-      ...rawNewsCandidate("valid-prepared-title", "world"),
-      metadata: {
-        discoveryFamily: "official-publication",
-        discoveryLaneIds: [laneId],
-      },
-    };
-    const context = createProductionPipelineContext({
-      editionDate: "2033-01-01",
-      runId: "run-isolate-empty-prepared-title",
-      store: new FixtureStore(),
-      now: () => now,
-      providers: {
-        summary: new FakeModelProvider(),
-        assessment: new FakeModelProvider(),
-      },
-      collectCandidates: async () => [emptyTitle, valid],
-      loadDiscoveryDiagnostics: () => [{
-        laneId,
-        sourceId: "custom",
-        discoveryFamily: "official-publication",
-        discovered: 2,
-        deduplicated: 0,
-        triaged: 0,
-        assessed: 0,
-        outcome: "success",
-        rejectionCounts: {},
-      }],
-      researchRepository: {
-        getDiscoveryObservations: async () => [],
-        upsertDiscoveryObservations: async () => undefined,
-        getCachedResearchAssessment: async () => null,
-        putCachedResearchAssessment: async () => undefined,
-        recordDiscoveryDiagnostics: async (_runId, diagnostics) => {
-          diagnosticWrites.push(structuredClone([...diagnostics]));
+  it.each(["title", "sourceName"] as const)(
+    "isolates an empty prepared %s without swallowing structural errors",
+    async (invalidField) => {
+      const laneId = `official-publication:empty-prepared-${invalidField}`;
+      const diagnosticWrites: DiscoveryLaneDiagnostic[][] = [];
+      const invalid = {
+        ...rawNewsCandidate(`empty-prepared-${invalidField}`, "world"),
+        [invalidField]: "&#32;",
+        metadata: {
+          discoveryFamily: "official-publication",
+          discoveryLaneIds: [laneId],
         },
-      },
-    });
-
-    const collected = await context.collect();
-    expect(diagnosticWrites[0]?.[0]?.rejectionCounts).toEqual({
-      quality_rejected: 1,
-    });
-    const normalized = await context.normalize(collected);
-
-    expect(collected).toHaveLength(1);
-    expect(normalized).toHaveLength(1);
-    expect(normalized[0]?.title).toBe(valid.title);
-    await expect(context.normalize([{
-      ...valid,
-      originalUrl: "javascript:alert(1)",
-    }])).rejects.toThrow();
-  });
-
-  it("isolates an entity-only stored Item title from its valid sibling", async () => {
-    const laneId = "official-publication:stored-item-title";
-    const diagnosticWrites: DiscoveryLaneDiagnostic[][] = [];
-    const invalid = ItemSchema.parse({
-      ...fixtureItem("stored-empty-title", "world"),
-      title: "&#32;",
-      metadata: {
-        ...fixtureItem("stored-empty-title", "world").metadata,
-        discoveryFamily: "official-publication",
-        discoveryLaneIds: [laneId],
-      },
-    });
-    const valid = ItemSchema.parse({
-      ...fixtureItem("stored-valid-title", "world"),
-      metadata: {
-        ...fixtureItem("stored-valid-title", "world").metadata,
-        discoveryFamily: "official-publication",
-        discoveryLaneIds: [laneId],
-      },
-    });
-    const context = createProductionPipelineContext({
-      editionDate: "2033-01-01",
-      runId: "run-isolate-stored-empty-title",
-      store: new FixtureStore(),
-      now: () => now,
-      providers: {
-        summary: new FakeModelProvider(),
-        assessment: new FakeModelProvider(),
-      },
-      collectCandidates: async () => [],
-      loadDiscoveryDiagnostics: () => [{
-        laneId,
-        sourceId: "stored-items",
-        discoveryFamily: "official-publication",
-        discovered: 2,
-        deduplicated: 0,
-        triaged: 0,
-        assessed: 0,
-        outcome: "success",
-        rejectionCounts: {},
-      }],
-      researchRepository: {
-        getDiscoveryObservations: async () => [],
-        upsertDiscoveryObservations: async () => undefined,
-        getCachedResearchAssessment: async () => null,
-        putCachedResearchAssessment: async () => undefined,
-        recordDiscoveryDiagnostics: async (_runId, diagnostics) => {
-          diagnosticWrites.push(structuredClone([...diagnostics]));
+      };
+      const valid = {
+        ...rawNewsCandidate("valid-prepared-title", "world"),
+        metadata: {
+          discoveryFamily: "official-publication",
+          discoveryLaneIds: [laneId],
         },
-      },
-    });
+      };
+      const context = createProductionPipelineContext({
+        editionDate: "2033-01-01",
+        runId: "run-isolate-empty-prepared-title",
+        store: new FixtureStore(),
+        now: () => now,
+        providers: {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+        collectCandidates: async () => [invalid, valid],
+        loadDiscoveryDiagnostics: () => [{
+          laneId,
+          sourceId: "custom",
+          discoveryFamily: "official-publication",
+          discovered: 2,
+          deduplicated: 0,
+          triaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: {},
+        }],
+        researchRepository: {
+          getDiscoveryObservations: async () => [],
+          upsertDiscoveryObservations: async () => undefined,
+          getCachedResearchAssessment: async () => null,
+          putCachedResearchAssessment: async () => undefined,
+          recordDiscoveryDiagnostics: async (_runId, diagnostics) => {
+            diagnosticWrites.push(structuredClone([...diagnostics]));
+          },
+        },
+      });
 
-    const normalized = await context.normalize([invalid, valid]);
+      const collected = await context.collect();
+      expect(diagnosticWrites[0]?.[0]?.rejectionCounts).toEqual({
+        quality_rejected: 1,
+      });
+      const normalized = await context.normalize(collected);
 
-    expect(normalized).toHaveLength(1);
-    expect(normalized[0]?.id).toBe(valid.id);
-    expect(diagnosticWrites.at(-1)?.[0]?.rejectionCounts).toEqual({
-      quality_rejected: 1,
-    });
-  });
+      expect(collected).toHaveLength(1);
+      expect(normalized).toHaveLength(1);
+      expect(normalized[0]?.title).toBe(valid.title);
+      await expect(context.normalize([{
+        ...valid,
+        originalUrl: "javascript:alert(1)",
+      }])).rejects.toThrow();
+    },
+  );
+
+  it.each(["title", "sourceName"] as const)(
+    "isolates an entity-only stored Item %s from its valid sibling",
+    async (invalidField) => {
+      const laneId = `official-publication:stored-item-${invalidField}`;
+      const diagnosticWrites: DiscoveryLaneDiagnostic[][] = [];
+      const invalidFixture = fixtureItem(
+        `stored-empty-${invalidField}`,
+        "world",
+      );
+      const invalid = ItemSchema.parse({
+        ...invalidFixture,
+        ...(invalidField === "title" ? { title: "&#32;" } : {}),
+        sourceRefs: invalidFixture.sourceRefs.map((source) => ({
+          ...source,
+          ...(invalidField === "sourceName" ? { name: "&#32;" } : {}),
+        })),
+        metadata: {
+          ...invalidFixture.metadata,
+          discoveryFamily: "official-publication",
+          discoveryLaneIds: [laneId],
+        },
+      });
+      const valid = ItemSchema.parse({
+        ...fixtureItem("stored-valid-title", "world"),
+        metadata: {
+          ...fixtureItem("stored-valid-title", "world").metadata,
+          discoveryFamily: "official-publication",
+          discoveryLaneIds: [laneId],
+        },
+      });
+      const context = createProductionPipelineContext({
+        editionDate: "2033-01-01",
+        runId: "run-isolate-stored-empty-title",
+        store: new FixtureStore(),
+        now: () => now,
+        providers: {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+        collectCandidates: async () => [],
+        loadDiscoveryDiagnostics: () => [{
+          laneId,
+          sourceId: "stored-items",
+          discoveryFamily: "official-publication",
+          discovered: 2,
+          deduplicated: 0,
+          triaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: {},
+        }],
+        researchRepository: {
+          getDiscoveryObservations: async () => [],
+          upsertDiscoveryObservations: async () => undefined,
+          getCachedResearchAssessment: async () => null,
+          putCachedResearchAssessment: async () => undefined,
+          recordDiscoveryDiagnostics: async (_runId, diagnostics) => {
+            diagnosticWrites.push(structuredClone([...diagnostics]));
+          },
+        },
+      });
+
+      const normalized = await context.normalize([invalid, valid]);
+
+      expect(normalized).toHaveLength(1);
+      expect(normalized[0]?.id).toBe(valid.id);
+      expect(diagnosticWrites.at(-1)?.[0]?.rejectionCounts).toEqual({
+        quality_rejected: 1,
+      });
+    },
+  );
 
   it("prepares publication text before routing without changing structure", async () => {
     const publication: RawPublicationCandidate = {
@@ -1636,66 +1650,77 @@ describe("manual editorial run", () => {
     )).toContain("arbitraryRawDisplay");
   });
 
-  it("drops only an entity-empty Item from a legacy normalize checkpoint", async () => {
-    const store = new FixtureStore();
-    const invalid = ItemSchema.parse({
-      ...fixtureItem("legacy-normalize-empty-title", "world"),
-      title: "&nbsp;",
-    });
-    const valid = fixtureItem("legacy-normalize-valid-title", "world");
-    const restoredInputs: Item[][] = [];
-    const context = createProductionPipelineContext({
-      editionDate: "2033-01-16",
-      runId: "run-legacy-normalize-empty-title",
-      store,
-      now: () => now,
-      providers: {
-        summary: new FakeModelProvider(),
-        assessment: new FakeModelProvider(),
-      },
-      collectCandidates: async () => {
-        throw new Error("completed collect must not run");
-      },
-    });
-    context.normalize = async () => {
-      throw new Error("completed normalize must not run");
-    };
-    context.enrich = async (items) => {
-      restoredInputs.push([...items]);
-      throw new Error("STOP_AFTER_LEGACY_NORMALIZE_RESTORE");
-    };
-    await store.createRun({
-      id: context.runId,
-      editionDate: context.editionDate,
-      status: "retryable",
-      currentStep: "normalize",
-      retryable: true,
-      attemptCount: 1,
-      estimatedCostUsd: 0,
-      createdAt: now,
-      updatedAt: now,
-    });
-    await store.saveCheckpoint(context.runId, "collect", {
-      output: [],
-      attempts: 1,
-      durationMs: 0,
-      itemCount: 0,
-      estimatedCostUsd: 0,
-    });
-    await store.saveCheckpoint(context.runId, "normalize", {
-      output: [invalid, valid],
-      attempts: 1,
-      durationMs: 0,
-      itemCount: 2,
-      estimatedCostUsd: 0,
-    });
+  it.each(["title", "sourceName"] as const)(
+    "drops only an entity-empty Item %s from a legacy normalize checkpoint",
+    async (invalidField) => {
+      const store = new FixtureStore();
+      const invalidFixture = fixtureItem(
+        `legacy-normalize-empty-${invalidField}`,
+        "world",
+      );
+      const invalid = ItemSchema.parse({
+        ...invalidFixture,
+        ...(invalidField === "title" ? { title: "&nbsp;" } : {}),
+        sourceRefs: invalidFixture.sourceRefs.map((source) => ({
+          ...source,
+          ...(invalidField === "sourceName" ? { name: "&nbsp;" } : {}),
+        })),
+      });
+      const valid = fixtureItem("legacy-normalize-valid-title", "world");
+      const restoredInputs: Item[][] = [];
+      const context = createProductionPipelineContext({
+        editionDate: "2033-01-16",
+        runId: "run-legacy-normalize-empty-title",
+        store,
+        now: () => now,
+        providers: {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+        collectCandidates: async () => {
+          throw new Error("completed collect must not run");
+        },
+      });
+      context.normalize = async () => {
+        throw new Error("completed normalize must not run");
+      };
+      context.enrich = async (items) => {
+        restoredInputs.push([...items]);
+        throw new Error("STOP_AFTER_LEGACY_NORMALIZE_RESTORE");
+      };
+      await store.createRun({
+        id: context.runId,
+        editionDate: context.editionDate,
+        status: "retryable",
+        currentStep: "normalize",
+        retryable: true,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await store.saveCheckpoint(context.runId, "collect", {
+        output: [],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 0,
+        estimatedCostUsd: 0,
+      });
+      await store.saveCheckpoint(context.runId, "normalize", {
+        output: [invalid, valid],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 2,
+        estimatedCostUsd: 0,
+      });
 
-    await expect(runEditorialPipeline(context)).rejects.toThrow(
-      "STOP_AFTER_LEGACY_NORMALIZE_RESTORE",
-    );
-    expect(restoredInputs).toHaveLength(1);
-    expect(restoredInputs[0]?.map(({ id }) => id)).toEqual([valid.id]);
-  });
+      await expect(runEditorialPipeline(context)).rejects.toThrow(
+        "STOP_AFTER_LEGACY_NORMALIZE_RESTORE",
+      );
+      expect(restoredInputs).toHaveLength(1);
+      expect(restoredInputs[0]?.map(({ id }) => id)).toEqual([valid.id]);
+    },
+  );
 
   it("normalizes a completed collect Item only once before normalization", async () => {
     const store = new FixtureStore();
@@ -3984,6 +4009,17 @@ describe("manual editorial run", () => {
       );
       const invalidRepresentative = ItemSchema.parse({
         ...freshNewsItem("legacy-development-invalid", "primary"),
+        sourceRefs: freshNewsItem(
+          "legacy-development-invalid",
+          "primary",
+        ).sourceRefs.map((source) => ({
+          ...source,
+          name: "&#32;",
+        })),
+        tags: ["stale&#45;section"],
+      });
+      const invalidTitleItem = ItemSchema.parse({
+        ...freshNewsItem("legacy-development-empty-title", "reporting"),
         title: "&#32;",
         tags: ["stale&#45;section"],
       });
@@ -3992,7 +4028,12 @@ describe("manual editorial run", () => {
         {},
       )[0]!;
       const legacyDevelopment = clusterNews(
-        [invalidRepresentative, survivorA, survivorB],
+        [
+          invalidRepresentative,
+          invalidTitleItem,
+          survivorA,
+          survivorB,
+        ],
         {},
       )[0]!;
       const scoreInputs = {

@@ -17,13 +17,14 @@ import {
 } from "../sources/collection-settlement";
 import { durableCollectedCandidate } from "../sources/durable-evidence";
 import {
-  InvalidPreparedCandidateTextError,
+  InvalidRequiredProviderDisplayTextError,
   isPreparedRawCandidate,
   markPreparedRawCandidate,
   normalizePreparedAuthorKey,
   normalizePreparedTitleKey,
   normalizePreparedCandidate,
   prepareRawCandidateForPipeline,
+  type RequiredProviderDisplayTextField,
 } from "../editorial/normalize";
 import { deriveNewsSignals } from "../sources/news-signals";
 import { routePublication } from "../editorial/route-publication";
@@ -1261,14 +1262,17 @@ function normalizedStoredDisplay(value: string): string {
   }) ?? "";
 }
 
-function normalizedRequiredStoredTitle(value: string): string {
-  const title = normalizeProviderText(value, {
+function normalizedRequiredStoredDisplayText(
+  value: string,
+  field: RequiredProviderDisplayTextField,
+): string {
+  const display = normalizeProviderText(value, {
     maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
   });
-  if (title === null) {
-    throw new InvalidPreparedCandidateTextError("title");
+  if (display === null) {
+    throw new InvalidRequiredProviderDisplayTextError(field);
   }
-  return title;
+  return display;
 }
 
 function normalizedStoredArray(value: unknown): string[] {
@@ -1355,7 +1359,7 @@ function normalizedStoredItem(item: Item, refreshDerived = false): Item {
         : signal;
     });
   }
-  const title = normalizedRequiredStoredTitle(item.title);
+  const title = normalizedRequiredStoredDisplayText(item.title, "title");
   const normalizedText = normalizeProviderText(item.normalizedText) ?? "";
   const authors = itemStringArray(metadata.authors);
   if (Array.isArray(metadata.authors)) metadata.authors = authors;
@@ -1439,7 +1443,10 @@ function normalizedStoredItem(item: Item, refreshDerived = false): Item {
     tags,
     sourceRefs: item.sourceRefs.map((source) => ({
       ...source,
-      name: normalizedStoredDisplay(source.name),
+      name: normalizedRequiredStoredDisplayText(
+        source.name,
+        "sourceName",
+      ),
     })),
     normalizedText,
     metadata,
@@ -1549,12 +1556,16 @@ function normalizedStoredWorkflowItem(
   let normalizedDevelopmentRoot: Item | undefined;
   if (originalWorkflow?.development !== undefined) {
     if (refreshDerived) {
-      const survivingItems = normalizedStoredWorkflowItems(
+      const normalizedNested = normalizedStoredWorkflowItemsResult(
         originalWorkflow.development.items,
         true,
       );
+      const survivingItems = normalizedNested.items;
       if (survivingItems.length === 0) {
-        throw new InvalidPreparedCandidateTextError("title");
+        if (normalizedNested.firstInvalidDisplayTextError !== undefined) {
+          throw normalizedNested.firstInvalidDisplayTextError;
+        }
+        throw new TypeError("News developments require at least one Item.");
       }
       development = developmentFromItems(survivingItems);
       normalizedDevelopmentRoot = storedItemFromNormalizedDevelopment(
@@ -1564,8 +1575,9 @@ function normalizedStoredWorkflowItem(
     } else {
       development = NewsDevelopmentSchema.parse({
         ...originalWorkflow.development,
-        title: normalizedRequiredStoredTitle(
+        title: normalizedRequiredStoredDisplayText(
           originalWorkflow.development.title,
+          "title",
         ),
         items: originalWorkflow.development.items.map((nestedItem) =>
           normalizedStoredWorkflowItem(nestedItem)
@@ -1575,7 +1587,10 @@ function normalizedStoredWorkflowItem(
         ),
         sourceRefs: originalWorkflow.development.sourceRefs.map((source) => ({
           ...source,
-          name: normalizedStoredDisplay(source.name),
+          name: normalizedRequiredStoredDisplayText(
+            source.name,
+            "sourceName",
+          ),
         })),
       });
     }
@@ -1628,18 +1643,43 @@ function normalizedStoredWorkflowItem(
   );
 }
 
+function normalizedStoredWorkflowItemsResult(
+  items: readonly Item[],
+  refreshDerived: boolean,
+): {
+  items: Item[];
+  firstInvalidDisplayTextError?: InvalidRequiredProviderDisplayTextError;
+} {
+  const normalized: Item[] = [];
+  let firstInvalidDisplayTextError:
+    | InvalidRequiredProviderDisplayTextError
+    | undefined;
+  for (const item of items) {
+    try {
+      normalized.push(
+        normalizedStoredWorkflowItem(item, false, refreshDerived),
+      );
+    } catch (error) {
+      if (error instanceof InvalidRequiredProviderDisplayTextError) {
+        firstInvalidDisplayTextError ??= error;
+        continue;
+      }
+      throw error;
+    }
+  }
+  return {
+    items: normalized,
+    ...(firstInvalidDisplayTextError === undefined
+      ? {}
+      : { firstInvalidDisplayTextError }),
+  };
+}
+
 function normalizedStoredWorkflowItems(
   items: readonly Item[],
   refreshDerived: boolean,
 ): Item[] {
-  return items.flatMap((item): Item[] => {
-    try {
-      return [normalizedStoredWorkflowItem(item, false, refreshDerived)];
-    } catch (error) {
-      if (error instanceof InvalidPreparedCandidateTextError) return [];
-      throw error;
-    }
-  });
+  return normalizedStoredWorkflowItemsResult(items, refreshDerived).items;
 }
 
 function compactResearchCandidate(
@@ -2250,7 +2290,7 @@ export function createProductionPipelineContext(
             ? markPreparedRawCandidate(durable)
             : prepareRawCandidateForPipeline(durable));
         } catch (error) {
-          if (!(error instanceof InvalidPreparedCandidateTextError)) {
+          if (!(error instanceof InvalidRequiredProviderDisplayTextError)) {
             throw error;
           }
           invalidContent.push(...rawDiagnosticRefs(candidate));
@@ -2278,7 +2318,7 @@ export function createProductionPipelineContext(
         try {
           routed = normalizedCandidate(candidate);
         } catch (error) {
-          if (!(error instanceof InvalidPreparedCandidateTextError)) {
+          if (!(error instanceof InvalidRequiredProviderDisplayTextError)) {
             throw error;
           }
           invalidContent.push(...rawDiagnosticRefs(candidate));
@@ -3251,7 +3291,9 @@ function normalizedRestoredCheckpointOutput(
             item: normalizedStoredWorkflowItem(candidate.item, false, true),
           }];
         } catch (error) {
-          if (error instanceof InvalidPreparedCandidateTextError) return [];
+          if (error instanceof InvalidRequiredProviderDisplayTextError) {
+            return [];
+          }
           throw error;
         }
       });

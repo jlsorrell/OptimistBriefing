@@ -124,10 +124,12 @@ export type PreparedRawCandidate = Record<string, unknown> & {
   readonly [PREPARED_RAW_CANDIDATE]: true;
 };
 
-export class InvalidPreparedCandidateTextError extends Error {
-  constructor(readonly field: "title") {
-    super(`INVALID_PREPARED_CANDIDATE_TEXT:${field}`);
-    this.name = "InvalidPreparedCandidateTextError";
+export type RequiredProviderDisplayTextField = "title" | "sourceName";
+
+export class InvalidRequiredProviderDisplayTextError extends Error {
+  constructor(readonly field: RequiredProviderDisplayTextField) {
+    super(`INVALID_REQUIRED_PROVIDER_DISPLAY_TEXT:${field}`);
+    this.name = "InvalidRequiredProviderDisplayTextError";
   }
 }
 
@@ -167,6 +169,19 @@ function normalizedPreparedKey(value: string): string {
     .replace(/[\p{P}\p{S}]+/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function requiredPreparedProviderDisplayText(
+  value: string,
+  field: RequiredProviderDisplayTextField,
+): string {
+  const normalized = normalizeProviderText(value, {
+    maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+  });
+  if (normalized === null) {
+    throw new InvalidRequiredProviderDisplayTextError(field);
+  }
+  return normalized;
 }
 
 export function normalizePreparedTitleKey(value: string): string {
@@ -211,19 +226,19 @@ export function prepareRawCandidateForPipeline(
       metadata.preferredInstitutionMatches,
     );
   }
-  const title = normalizeProviderText(candidate.title, {
-    maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
-  });
-  if (title === null) {
-    throw new InvalidPreparedCandidateTextError("title");
-  }
+  const title = requiredPreparedProviderDisplayText(
+    candidate.title,
+    "title",
+  );
+  const sourceName = requiredPreparedProviderDisplayText(
+    candidate.sourceName,
+    "sourceName",
+  );
   return markPreparedRawCandidate({
     ...input,
     ...candidate,
     title,
-    sourceName: normalizeProviderText(candidate.sourceName, {
-      maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
-    }) ?? "",
+    sourceName,
     authors: displayArray(candidate.authors),
     institutions: displayArray(candidate.institutions),
     abstract: candidate.abstract === null

@@ -461,6 +461,163 @@ Planned message: `fix: trust provider normalization checkpoint envelope`. The re
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 13
+
+Round 13 generalizes invalid required provider display handling from titles to
+source names. Entity-only required source names are now rejected through the
+same typed, per-candidate isolation boundary as titles across raw preparation,
+ResearchCollector, direct stored Items, missing-envelope checkpoint graphs, and
+nested development rebuilds. No fake source name, deployment, migration,
+history rewrite, or unrelated change was introduced.
+
+### RED evidence
+
+ResearchCollector title/source-name matrix:
+
+```sh
+npx vitest run tests/unit/sources/research-collector.test.ts -t "entity-only research"
+```
+
+Result: exit 1; the title case passed, while the source-name case escaped as a
+generic Zod `too_small` error at `sourceName` and lost its valid sibling.
+
+General raw news, direct stored Item, legacy normalize checkpoint, and nested
+cluster/shortlist development matrix:
+
+```sh
+npm run test:worker -- tests/integration/workflow/manual-run.test.ts -t "empty prepared|stored Item|legacy normalize checkpoint|through exactly one text boundary"
+```
+
+Result: exit 1; five intended source-name failures escaped as generic Zod
+errors: general collect, direct Item normalization, checkpoint restoration, and
+both development stages. The three corresponding title cases passed. The
+general-collect tests also retained their malformed structural URL assertion.
+
+### Implementation
+
+- Replaced the title-only error with
+  `InvalidRequiredProviderDisplayTextError`, whose field discriminator is the
+  audited union `title | sourceName`.
+- Raw preparation now normalizes both title and source name through one
+  required-display helper before returning a prepared candidate. A null/empty
+  normalized value throws the typed error before any later raw-schema parse can
+  emit generic Zod. It never substitutes a fabricated name.
+- Stored Item normalization now applies the same required boundary to every
+  root and nested `sourceRefs[].name`. Copied development source references use
+  it as well; titles continue through the same helper with the `title`
+  discriminator.
+- General production collect, normalize, ResearchCollector, Item-array restore,
+  and synthesize/validate graph catches recognize only the generalized typed
+  error. Existing discovery lineage records `quality_rejected`; unrelated Zod,
+  URL, ID, infrastructure, and schema failures still throw.
+- Nested development normalization records the first typed child rejection
+  while filtering invalid Items. Valid siblings still rebuild the canonical
+  development and reselect the representative; if every child is invalid, the
+  original typed error and field escape to the aggregate-level isolation catch.
+
+### GREEN evidence
+
+Focused research matrix:
+
+```sh
+npx vitest run tests/unit/sources/research-collector.test.ts -t "entity-only research"
+```
+
+Result: exit 0; both title and source-name sibling-isolation cases passed and
+each recorded one `quality_rejected` diagnostic.
+
+Focused Worker matrix:
+
+```sh
+npm run test:worker -- tests/integration/workflow/manual-run.test.ts -t "empty prepared|stored Item|legacy normalize checkpoint|through exactly one text boundary"
+```
+
+Result: exit 0; all 8 selected cases passed. The source-name cases preserve
+valid siblings, legacy development removes both a bad-title Item and the bad-
+source-name representative, and cluster/shortlist roots are rebuilt from the
+new representative.
+
+The field discriminator was also checked directly:
+
+```sh
+npx vitest run tests/unit/editorial/normalize.test.ts -t "empty required provider"
+```
+
+Result: exit 0; both fields produced the generalized error with the exact
+`title` or `sourceName` discriminator.
+
+Affected source/editorial/workflow suites:
+
+```sh
+npx vitest run tests/unit/editorial tests/unit/workflow tests/unit/sources
+```
+
+Result: exit 0; 21 files and 520 tests passed.
+
+Full Worker suite:
+
+```sh
+npm run test:worker
+```
+
+Result: exit 0; 11 files and 223 tests passed. It emitted only the existing
+third-party missing-sourcemap warnings.
+
+Remaining non-Worker suite excluding the unrelated managed-OAuth fixture:
+
+```sh
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+```
+
+Result: exit 0; 39 files and 749 tests passed.
+
+Static, evaluation, build, and diff verification:
+
+```sh
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results: all exited 0. TypeScript passed, every golden relevance/identity/
+routing/grounding check passed, Vite built 53 modules, and the diff contained
+no whitespace errors.
+
+### Files changed
+
+- `src/editorial/normalize.ts`
+- `src/sources/research-collector.ts`
+- `src/workflow/run-editorial-pipeline.ts`
+- `tests/integration/workflow/manual-run.test.ts`
+- `tests/unit/editorial/normalize.test.ts`
+- `tests/unit/sources/research-collector.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+
+### Self-review
+
+- The required-display audit found only raw/Item title and canonical source
+  name. Authors, institutions, topics, and preferred-institution matches are
+  filterable arrays that already omit empty normalized entries. Abstract and
+  content are nullable/evidence fields with deliberate blank-presence behavior;
+  IDs, URLs, dates, roles, and structural metadata are never display-normalized.
+- Every catch site checks only `InvalidRequiredProviderDisplayTextError`.
+  Parameterized malformed-URL assertions prove an unrelated structural failure
+  still propagates for both required-field variants.
+- Raw preparation rejects before raw candidate reparse; stored Items reject
+  before `ItemSchema` can see an empty source reference. No empty string crosses
+  into the generic Zod boundaries that caused the defect.
+- Development filtering handles title and source-name failures uniformly,
+  preserves the exact first discriminator when all nested Items fail, and uses
+  the existing deterministic canonical rebuild for surviving siblings.
+- Existing one-boundary entity preservation, aggregate metadata isolation,
+  score/route replay, and current-envelope byte stability remain asserted by
+  the extended cluster/shortlist regressions.
+
+### Concerns
+
+- None. Worker runs emit existing third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 12
 
 Round 12 closes the aggregate metadata contamination gap left by the Round 11
