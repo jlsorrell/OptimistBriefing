@@ -25,10 +25,14 @@ import {
   type OutboundUrlPolicy,
 } from "./outbound-url";
 import { PolymarketAdapter } from "./polymarket";
-import { boundProviderText, normalizeProviderText } from "./provider-text";
+import {
+  boundProviderText,
+  normalizedProviderSignalText,
+} from "./provider-text";
 import {
   bodyRetrievalPermitted,
   CollectionWindowSchema,
+  MAX_PROVIDER_CONTENT_CHARACTERS,
   MAX_PROVIDER_EVIDENCE_CHARACTERS,
   MAX_PROVIDER_TITLE_CHARACTERS,
   RawNewsCandidateSchema,
@@ -375,14 +379,19 @@ class DirectPageAdapter implements NewsSourceAdapter {
             discoveryMechanism: "page",
             listingUrl: response.finalUrl,
           };
-          const signalTitle = normalizeProviderText(item.title, {
-            maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
-          }) ?? "";
-          const signalAbstract = normalizeProviderText(
-            extraction.excerpt ?? item.summary,
-            { maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS },
+          const signalTitle = normalizedProviderSignalText(
+            item.title,
+            MAX_PROVIDER_TITLE_CHARACTERS,
           );
-          const signalContent = normalizeProviderText(extraction.text);
+          if (signalTitle === null) return null;
+          const signalAbstract = normalizedProviderSignalText(
+            extraction.excerpt ?? item.summary,
+            MAX_PROVIDER_EVIDENCE_CHARACTERS,
+          );
+          const signalContent = normalizedProviderSignalText(
+            extraction.text,
+            MAX_PROVIDER_CONTENT_CHARACTERS,
+          );
           return RawNewsCandidateSchema.parse({
             kind,
             sourceId: this.source.id,
@@ -493,12 +502,15 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
       const abstract = boundProviderText(item.abstract, {
         maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS,
       });
-      const signalTitle = normalizeProviderText(title, {
-        maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
-      }) ?? "";
-      const signalAbstract = normalizeProviderText(abstract, {
-        maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS,
-      });
+      const signalTitle = normalizedProviderSignalText(
+        title,
+        MAX_PROVIDER_TITLE_CHARACTERS,
+      );
+      if (signalTitle === null) return [];
+      const signalAbstract = normalizedProviderSignalText(
+        abstract,
+        MAX_PROVIDER_EVIDENCE_CHARACTERS,
+      );
       const metadata = {
         documentNumber: item.document_number,
         documentType: item.type ?? null,
@@ -644,13 +656,19 @@ export class NewsCollector {
                   paywall,
                   retention: "ephemeral-only",
                 };
-                const signalTitle = normalizeProviderText(item.title, {
-                  maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
-                }) ?? "";
-                const signalAbstract = normalizeProviderText(item.abstract, {
-                  maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS,
-                });
-                const signalContent = normalizeProviderText(extraction.text);
+                const signalTitle = normalizedProviderSignalText(
+                  item.title,
+                  MAX_PROVIDER_TITLE_CHARACTERS,
+                );
+                if (signalTitle === null) return null;
+                const signalAbstract = normalizedProviderSignalText(
+                  item.abstract,
+                  MAX_PROVIDER_EVIDENCE_CHARACTERS,
+                );
+                const signalContent = normalizedProviderSignalText(
+                  extraction.text,
+                  MAX_PROVIDER_CONTENT_CHARACTERS,
+                );
                 return RawNewsCandidateSchema.parse({
                   ...item,
                   kind,

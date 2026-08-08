@@ -3,7 +3,10 @@ import { z } from "zod";
 import { SourceHttpClient } from "./http-client";
 import { deriveNewsSignals } from "./news-signals";
 import { assertSafeOutboundUrl } from "./outbound-url";
-import { boundProviderText, normalizeProviderText } from "./provider-text";
+import {
+  boundProviderText,
+  normalizedProviderSignalText,
+} from "./provider-text";
 import {
   CollectionWindowSchema,
   MAX_PROVIDER_TITLE_CHARACTERS,
@@ -127,9 +130,10 @@ export class GdeltAdapter implements NewsSourceAdapter {
         maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
       });
       if (title === null) return [];
-      const signalTitle = normalizeProviderText(title, {
-        maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
-      });
+      const signalTitle = normalizedProviderSignalText(
+        title,
+        MAX_PROVIDER_TITLE_CHARACTERS,
+      );
       if (signalTitle === null) return [];
       const metadata = {
         discoveryOnly: true,

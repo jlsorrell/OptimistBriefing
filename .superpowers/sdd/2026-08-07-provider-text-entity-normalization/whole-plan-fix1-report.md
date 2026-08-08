@@ -976,6 +976,212 @@ report is written.
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 16
+
+Round 16 closes the transient news-signal gap left by Round 15. Raw provider
+display/evidence remains bounded and undecoded in adapter candidates, but every
+pre-central signal copy now passes through one shared plain-text boundary before
+`deriveNewsSignals`. Compatibility-created tag names therefore cannot select a
+section, create an entity, or act as AI-policy evidence after the visible Item
+has stripped them. Required titles/questions containing only such markup are
+omitted per candidate without losing healthy siblings.
+
+### Design
+
+Three approaches were considered before implementation. The approved approach
+adds `normalizedProviderSignalText(value, maxCharacters)` beside the provider-
+text primitives. It applies the existing compatibility-aware exactly-two-pass
+normalizer with `stripHtml: true` and the field's title/evidence/content schema
+bound. Local `stripHtml` options at every adapter call were rejected because
+they would preserve the lifecycle drift that caused the defect. Deleting all
+adapter-derived signals and recomputing them centrally was rejected as a much
+larger behavioral refactor.
+
+Publication candidates remain intentionally different: RSS publications,
+publication pages, and Papers With Code are prepared by
+`prepareRawCandidateForPipeline` before `routePublication`, so those already-
+prepared strings receive no second decode. A Papers With Code characterization
+proves useful encoded topical content routes after that one preparation while a
+compatibility-created topical tag name cannot route by itself.
+
+Independent review found one additional pass-budget edge: after exactly two
+passes, third-layer encoded angle delimiters intentionally remain inert entity
+syntax, but their tag names were still lexically visible to signal matching.
+The signal-only helper now removes paired residual encoded tag-shaped spans for
+the supported named, decimal, hexadecimal, ASCII-angle, and fullwidth-angle
+forms. This is a delimiter scan, not another entity decode; persisted text and
+the established two-pass display contract remain unchanged.
+
+The approved design and test matrix are recorded in this report rather than a
+separate plan commit because this round requires one implementation commit.
+
+### RED evidence
+
+The primitive helper regression was added before production code and run with:
+
+```sh
+npm test -- --run tests/unit/sources/provider-text.test.ts
+```
+
+Result: exit 1; 1 intended failure and 24 surrounding passes. The shared helper
+did not exist.
+
+The adapter-to-Item matrix was then run with:
+
+```sh
+npm test -- --run tests/unit/sources/news-collector.test.ts
+```
+
+The initial run exited 1 with the GDELT, Polymarket, Federal Register, direct-
+page title/evidence, direct-page content, and RSS/news cases red. One RSS test
+setup reference was corrected before implementation; its clean targeted rerun
+then failed for the intended product behavior because five candidates survived
+instead of four. The other regressions observed tag-only titles reaching
+central typed rejection or a tag name incorrectly selecting `technology`/
+`ai_policy`.
+
+RSS publication sibling isolation was run independently with:
+
+```sh
+npm test -- --run tests/unit/sources/publication-collector.test.ts -t "isolates a .* tag-only RSS title|sourceName markup raw|sourceName raw"
+```
+
+Result: exit 1; both entity-encoded and compatibility-encoded tag-only titles
+survived, producing two candidates instead of the one useful sibling. The two
+source-name boundary characterizations passed.
+
+The Papers With Code central-preparation audit passed immediately as a
+characterization: useful encoded `interpretability` content routed to research,
+while a compatibility-created `<interpretability>` tag name was stripped before
+publication routing and returned `null`.
+
+After independent review, third-layer residual-tag regressions were added and
+run with:
+
+```sh
+npm test -- --run tests/unit/sources/provider-text.test.ts tests/unit/sources/news-collector.test.ts -t "removes compatibility-created tag names|keeps compatibility-created GDELT tag names"
+```
+
+Result: exit 1; the helper returned residual `&#65308;technology&#65310;`
+syntax instead of only `Ordinary update`, and GDELT retained four candidates
+instead of isolating the residual tag-only entry and retaining three.
+
+### Implementation
+
+- Added `normalizedProviderSignalText`, which applies the Round 15 two-pass
+  compatibility-aware normalizer, HTML stripping, whitespace cleanup, and the
+  caller's exact schema bound.
+- Added a deterministic signal-only scan for paired residual encoded angle
+  delimiters. It removes tag-shaped spans without decoding an entity, changing
+  the pass budget, or rewriting persisted provider text.
+- GDELT, Polymarket, Federal Register, direct-page news, RSS-enriched news, and
+  RSS required-title validation use the helper. Title/question fields use 500,
+  evidence uses 4,000, and extracted content uses 100,000 characters.
+- GDELT, Polymarket, Federal Register, direct-page, and RSS adapters omit only a
+  candidate whose required signal title becomes empty. Existing lane settlement
+  and healthy-sibling behavior are unchanged.
+- URL, ID, date, probability, source-role, access, and arbitrary structural
+  metadata handling is unchanged. Raw bounded provider display/evidence remains
+  the candidate payload supplied to central preparation.
+- Publication routing remains on its existing central prepared boundary; no
+  transient helper or second decode was added to RSS publication,
+  `PublicationPageAdapter`, or `PapersWithCodeAdapter`.
+
+### GREEN evidence
+
+Focused provider/news/publication suites:
+
+```sh
+npm test -- --run tests/unit/sources/provider-text.test.ts tests/unit/sources/news-collector.test.ts tests/unit/sources/publication-collector.test.ts
+```
+
+Result: exit 0; 3 files and 99 tests passed.
+
+Affected source/editorial/workflow suites:
+
+```sh
+npx vitest run tests/unit/editorial tests/unit/workflow tests/unit/sources
+```
+
+Result: exit 0; 21 files and 543 tests passed.
+
+Full Worker suite:
+
+```sh
+npm run test:worker
+```
+
+The sandboxed attempt could not bind `127.0.0.1` (`EPERM`). The required
+approved rerun exited 0; 11 files and 233 tests passed, with only existing
+third-party missing-sourcemap warnings.
+
+Remaining non-Worker suite excluding the unrelated managed-OAuth fixture:
+
+```sh
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+```
+
+Result: exit 0; 39 files and 772 tests passed.
+
+Static, evaluation, build, and diff verification:
+
+```sh
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results: all exited 0. TypeScript passed, every golden relevance/identity/
+routing/grounding check passed, Vite built 53 modules, and the diff contained
+no whitespace errors.
+
+### Files changed
+
+- `src/sources/provider-text.ts`
+- `src/sources/gdelt.ts`
+- `src/sources/news-collector.ts`
+- `src/sources/polymarket.ts`
+- `src/sources/rss.ts`
+- `tests/unit/sources/provider-text.test.ts`
+- `tests/unit/sources/news-collector.test.ts`
+- `tests/unit/sources/publication-collector.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+
+### Commit
+
+Planned message: `fix: strip transient provider signal markup`. The resulting
+SHA is recorded in the task handoff because it is created after this report is
+written.
+
+### Self-review
+
+- Repository-wide search leaves no direct raw transient
+  `normalizeProviderText` call in a source adapter. Every pre-central
+  `deriveNewsSignals` input uses the shared helper; central normalization keeps
+  its existing display/evidence boundary.
+- Adapter-to-Item regressions cover title, abstract, and extracted-content tag
+  names; useful wrapper content; primary-section routing; named entities;
+  forecast behavior; exact raw candidate titles; normalized visible Items; and
+  required-title sibling isolation.
+- The residual-delimiter mutation is protected at both primitive and GDELT
+  adapter-to-Item levels. Triple-layer text stays undecoded in the Item title,
+  while its tag name cannot change the adapter's `world` route and a tag-only
+  sibling is omitted.
+- RSS publication tests separate title validation from source-name central
+  validation. Useful source/title wrappers and exact structural URL bytes remain
+  covered by the Round 14/15 regressions.
+- Papers With Code and all other publication routing consume centrally prepared
+  text exactly once. Their URL/identifier/date handling remains raw and
+  unchanged.
+- No third entity decode, generic metadata recursion, trusted-HTML insertion,
+  deployment, canary, migration, history rewrite, or unrelated OAuth change was
+  introduced.
+
+### Concerns
+
+- None. Worker runs emit existing third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 12
 
 Round 12 closes the aggregate metadata contamination gap left by the Round 11

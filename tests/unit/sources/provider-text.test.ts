@@ -5,6 +5,7 @@ import {
   decodeProviderTextEntities,
   normalizeProviderText,
   normalizeProviderTextDetailed,
+  normalizedProviderSignalText,
   truncateProviderTextAtCodePointBoundary,
 } from "../../../src/sources/provider-text";
 
@@ -113,6 +114,33 @@ describe("provider text normalization", () => {
       "&amp;#65308;script&amp;#65310;safe final text&amp;#65308;/script&amp;#65310;",
       { stripHtml: true },
     )).toBe("safe final text");
+  });
+
+  it("removes compatibility-created tag names from bounded provider signals", () => {
+    expect(normalizedProviderSignalText(
+      "&#65308;technology&#65310;Ordinary update&#65308;/technology&#65310;",
+      500,
+    )).toBe("Ordinary update");
+    expect(normalizedProviderSignalText(
+      "&#65308;span&#65310;Acme launches a coding assistant&#65308;/span&#65310;",
+      500,
+    )).toBe("Acme launches a coding assistant");
+    expect(normalizedProviderSignalText(
+      "&#65308;technology&#65310;",
+      500,
+    )).toBeNull();
+    expect(normalizedProviderSignalText(
+      "&amp;amp;#65308;technology&amp;amp;#65310;Ordinary update&amp;amp;#65308;/technology&amp;amp;#65310;",
+      500,
+    )).toBe("Ordinary update");
+    expect(normalizedProviderSignalText(
+      "&amp;amp;#65308;technology&amp;amp;#65310;",
+      500,
+    )).toBeNull();
+    expect(normalizedProviderSignalText(
+      "&amp;amp;lt;span&amp;amp;gt;Useful boundary text&amp;amp;lt;/span&amp;amp;gt;",
+      500,
+    )).toBe("Useful boundary text");
   });
 
   it("returns bounded plain text after decoding and tag removal", () => {

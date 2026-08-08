@@ -288,6 +288,89 @@ describe("NewsCollector", () => {
     expect(candidate.metadata.primarySection).toBe("ai_policy");
   });
 
+  it("keeps compatibility-created GDELT tag names out of item routing and isolates tag-only titles", async () => {
+    const adapter = new GdeltAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({
+          articles: [
+            {
+              url: "https://news.example.com/tag-name",
+              title:
+                "&#65308;technology&#65310;Ordinary update&#65308;/technology&#65310;",
+              seendate: "20260729T081500Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/useful-wrapper",
+              title:
+                "&#65308;span&#65310;Acme launches an AI coding assistant&#65308;/span&#65310;",
+              seendate: "20260729T081600Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/tag-only",
+              title: "&#65308;technology&#65310;",
+              seendate: "20260729T081700Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/beyond-budget-tag-name",
+              title:
+                "&amp;amp;#65308;technology&amp;amp;#65310;Ordinary boundary update&amp;amp;#65308;/technology&amp;amp;#65310;",
+              seendate: "20260729T081800Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+            {
+              url: "https://news.example.com/beyond-budget-tag-only",
+              title:
+                "&amp;amp;#65308;technology&amp;amp;#65310;",
+              seendate: "20260729T081900Z",
+              domain: "news.example.com",
+              language: "English",
+              sourcecountry: "United States",
+            },
+          ],
+        })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      gdeltSource,
+      { query: "technology", maxRecords: 5 },
+    );
+
+    const candidates = await adapter.collect(fixedWindow());
+    const items = candidates.map((candidate) => normalizeCandidate(candidate));
+
+    expect(candidates).toHaveLength(3);
+    expect(candidates.map((candidate) => candidate.title)).toEqual([
+      "&#65308;technology&#65310;Ordinary update&#65308;/technology&#65310;",
+      "&#65308;span&#65310;Acme launches an AI coding assistant&#65308;/span&#65310;",
+      "&amp;amp;#65308;technology&amp;amp;#65310;Ordinary boundary update&amp;amp;#65308;/technology&amp;amp;#65310;",
+    ]);
+    expect(items.map((item) => ({
+      title: item.title,
+      primarySection: item.metadata.primarySection,
+    }))).toEqual([
+      { title: "Ordinary update", primarySection: "world" },
+      {
+        title: "Acme launches an AI coding assistant",
+        primarySection: "technology",
+      },
+      {
+        title:
+          "&#65308;technology&#65310;Ordinary boundary update&#65308;/technology&#65310;",
+        primarySection: "world",
+      },
+    ]);
+  });
+
   it("retains direct local results when a discovery adapter fails", async () => {
     const localNews = await loadFixture("local-news.xml");
     const directSource = source({
@@ -397,6 +480,69 @@ describe("NewsCollector", () => {
     expect(candidate.sectionEligibility).toContain("ai_policy");
     expect(hasExplicitAiPolicyEvidence([normalized.title])).toBe(true);
     expect(candidate.metadata.primarySection).toBe("forecast");
+  });
+
+  it("keeps compatibility-created Polymarket tag names out of item entities and isolates tag-only questions", async () => {
+    const market = {
+      outcomes: "[\"Yes\",\"No\"]",
+      outcomePrices: "[\"0.64\",\"0.36\"]",
+      oneDayPriceChange: 0.16,
+      liquidity: "250000",
+      active: true,
+      closed: false,
+      archived: false,
+      acceptingOrders: true,
+      updatedAt: "2026-07-29T08:20:00.000Z",
+      endDate: "2026-12-31T23:59:59.000Z",
+      resolutionSource: "https://www.congress.gov/",
+    };
+    const adapter = new PolymarketAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json([
+          {
+            ...market,
+            id: "tag-name",
+            question:
+              "&#65308;Baltimore&#65310;Will ordinary odds move?&#65308;/Baltimore&#65310;",
+            slug: "tag-name",
+          },
+          {
+            ...market,
+            id: "useful-wrapper",
+            question:
+              "&#65308;span&#65310;Will Baltimore transit odds move?&#65308;/span&#65310;",
+            slug: "useful-wrapper",
+          },
+          {
+            ...market,
+            id: "tag-only",
+            question: "&#65308;Baltimore&#65310;",
+            slug: "tag-only",
+          },
+        ])),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      polymarketSource,
+      {
+        minimumLiquidity: 100_000,
+        minimumAbsoluteChange: 0.1,
+      },
+    );
+
+    const candidates = await adapter.collect(fixedWindow());
+    const items = candidates.map((candidate) => normalizeCandidate(candidate));
+
+    expect(candidates).toHaveLength(2);
+    expect(items.map((item) => ({
+      title: item.title,
+      namedEntities: item.metadata.namedEntities,
+    }))).toEqual([
+      { title: "Will ordinary odds move?", namedEntities: [] },
+      {
+        title: "Will Baltimore transit odds move?",
+        namedEntities: ["Baltimore", "Will Baltimore"],
+      },
+    ]);
   });
 
   it("bounds Polymarket questions after NFKC expansion", async () => {
@@ -623,6 +769,139 @@ describe("NewsCollector", () => {
       }),
     ]);
     expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps compatibility-created RSS/news tag names out of item signals and isolates tag-only titles", async () => {
+    const host = "rss-signal-boundary.example.com";
+    const feedUrl = `https://${host}/feed.xml`;
+    const feed = `<?xml version="1.0"?><rss><channel>
+      <item>
+        <title><![CDATA[&#65308;technology&#65310;Ordinary update&#65308;/technology&#65310;]]></title>
+        <link>https://${host}/title-tag</link>
+        <pubDate>Wed, 29 Jul 2026 08:00:00 GMT</pubDate>
+        <description>Routine details.</description>
+      </item>
+      <item>
+        <title>Ordinary content update</title>
+        <link>https://${host}/content-tag</link>
+        <pubDate>Wed, 29 Jul 2026 08:01:00 GMT</pubDate>
+        <description>Routine details.</description>
+      </item>
+      <item>
+        <title>Useful content update</title>
+        <link>https://${host}/content-wrapper</link>
+        <pubDate>Wed, 29 Jul 2026 08:02:00 GMT</pubDate>
+        <description>Routine details.</description>
+      </item>
+      <item>
+        <title><![CDATA[&#65308;span&#65310;Acme launches an AI coding assistant&#65308;/span&#65310;]]></title>
+        <link>https://${host}/title-wrapper</link>
+        <pubDate>Wed, 29 Jul 2026 08:03:00 GMT</pubDate>
+        <description>Routine details.</description>
+      </item>
+      <item>
+        <title><![CDATA[&#65308;technology&#65310;]]></title>
+        <link>https://${host}/tag-only</link>
+        <pubDate>Wed, 29 Jul 2026 08:04:00 GMT</pubDate>
+        <description>Routine details.</description>
+      </item>
+    </channel></rss>`;
+    const fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url === feedUrl) {
+        return new Response(feed, {
+          headers: { "content-type": "application/rss+xml" },
+        });
+      }
+      if (url === `https://${host}/content-tag`) {
+        return new Response(
+          `<article><p>&#65308;artificial intelligence regulation&#65310;Routine details.</p></article>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      }
+      if (url === `https://${host}/content-wrapper`) {
+        return new Response(
+          `<article><p>&#65308;span&#65310;Artificial intelligence regulation advances.&#65308;/span&#65310;</p></article>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      }
+      if (
+        url === `https://${host}/title-tag` ||
+        url === `https://${host}/title-wrapper` ||
+        url === `https://${host}/tag-only`
+      ) {
+        return new Response(
+          "<article><p>Routine details.</p></article>",
+          { headers: { "content-type": "text/html" } },
+        );
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const rssSource = source({
+      id: "rss-signal-boundary",
+      canonicalName: "RSS Signal Boundary",
+      canonicalUrl: `https://${host}/`,
+      role: "reporting",
+      sectionEligibility: ["world", "technology", "ai_policy"],
+      restrictions: {
+        bodyRetrieval: "permitted",
+        paywall: "none",
+        contentUse: "ephemeral-summarization",
+      },
+    });
+    const collector = new NewsCollector({
+      http: new SourceHttpClient({
+        fetch,
+        now: () => new Date("2026-07-29T10:00:00.000Z"),
+      }),
+      directFeeds: [{
+        source: rssSource,
+        feedUrl,
+        feedUrlPolicy: {
+          allowedHosts: [host],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/"],
+        },
+        articleUrlPolicy: {
+          allowedHosts: [host],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/"],
+        },
+      }],
+      discoveryAdapters: [],
+      forecastAdapters: [],
+    });
+
+    const candidates = (await collector.collect(fixedWindow())).candidates;
+
+    expect(candidates).toHaveLength(4);
+    const items = candidates.map((candidate) => normalizeCandidate(candidate));
+    expect(items.map((item) => ({
+      title: item.title,
+      normalizedText: item.normalizedText,
+      primarySection: item.metadata.primarySection,
+    }))).toEqual([
+      {
+        title: "Ordinary update",
+        normalizedText: "Routine details.",
+        primarySection: "world",
+      },
+      {
+        title: "Ordinary content update",
+        normalizedText: "Routine details.",
+        primarySection: "world",
+      },
+      {
+        title: "Useful content update",
+        normalizedText: "Artificial intelligence regulation advances.",
+        primarySection: "ai_policy",
+      },
+      {
+        title: "Acme launches an AI coding assistant",
+        normalizedText: "Routine details.",
+        primarySection: "technology",
+      },
+    ]);
   });
 
   it("rejects a feed item outside the configured article allowlist", async () => {
@@ -1120,6 +1399,105 @@ describe("catalog-driven news collection", () => {
     });
   });
 
+  it("keeps compatibility-created Federal Register tag names out of item routing and isolates tag-only titles", async () => {
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({
+          results: [
+            {
+              document_number: "2026-title-tag",
+              title:
+                "&#65308;technology&#65310;Ordinary notice&#65308;/technology&#65310;",
+              html_url:
+                "https://www.federalregister.gov/documents/2026/07/29/2026-title-tag/ordinary-notice",
+              publication_date: "2026-07-29",
+              type: "Notice",
+              abstract: "Routine record.",
+            },
+            {
+              document_number: "2026-abstract-tag",
+              title: "Ordinary abstract notice",
+              html_url:
+                "https://www.federalregister.gov/documents/2026/07/29/2026-abstract-tag/ordinary-abstract",
+              publication_date: "2026-07-29",
+              type: "Notice",
+              abstract:
+                "&#65308;artificial intelligence regulation&#65310;Routine record.",
+            },
+            {
+              document_number: "2026-useful-wrapper",
+              title: "Useful wrapper notice",
+              html_url:
+                "https://www.federalregister.gov/documents/2026/07/29/2026-useful-wrapper/useful-wrapper",
+              publication_date: "2026-07-29",
+              type: "Notice",
+              abstract:
+                "&#65308;span&#65310;Artificial intelligence regulation advances.&#65308;/span&#65310;",
+            },
+            {
+              document_number: "2026-tag-only",
+              title: "&#65308;technology&#65310;",
+              html_url:
+                "https://www.federalregister.gov/documents/2026/07/29/2026-tag-only/tag-only",
+              publication_date: "2026-07-29",
+              type: "Notice",
+              abstract: "Routine record.",
+            },
+          ],
+        })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      sources: [
+        catalogSource({
+          id: "federal-register",
+          canonicalName: "Federal Register",
+          canonicalUrl: "https://www.federalregister.gov/",
+          role: "primary",
+          discoveryMechanism: "api",
+          sectionEligibility: ["world", "technology", "ai_policy"],
+          restrictions: {
+            bodyRetrieval: "permitted",
+            paywall: "none",
+            contentUse: "open-government",
+            apiUrl:
+              "https://www.federalregister.gov/api/v1/documents.json",
+            apiFormat: "federal-register-v1",
+            urlPolicy: policy("www.federalregister.gov", [
+              "/api/v1/documents.json",
+              "/documents/",
+            ]),
+          },
+        }),
+      ],
+    });
+
+    const candidates = (await collector.collect(fixedWindow())).candidates;
+    const items = candidates.map((candidate) => normalizeCandidate(candidate));
+
+    expect(candidates).toHaveLength(3);
+    expect(items.map((item) => ({
+      title: item.title,
+      normalizedText: item.normalizedText,
+      primarySection: item.metadata.primarySection,
+    }))).toEqual([
+      {
+        title: "Ordinary notice",
+        normalizedText: "Routine record.",
+        primarySection: "world",
+      },
+      {
+        title: "Ordinary abstract notice",
+        normalizedText: "Routine record.",
+        primarySection: "world",
+      },
+      {
+        title: "Useful wrapper notice",
+        normalizedText: "Artificial intelligence regulation advances.",
+        primarySection: "ai_policy",
+      },
+    ]);
+  });
+
   it("preserves Federal Register raw abstract presence for access classification", async () => {
     const collector = createNewsCollectorFromCatalog({
       http: new SourceHttpClient({
@@ -1423,6 +1801,164 @@ describe("catalog-driven news collection", () => {
     expect(normalizeCandidate(candidate).title).toBe(
       "WAMU’s entity update",
     );
+  });
+
+  it("keeps compatibility-created direct-page tag names out of item routing and isolates tag-only titles", async () => {
+    const host = "direct-signal-boundary.example.com";
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          `<article>
+            <h2><a href="/title-tag">&#65308;technology&#65310;Ordinary update&#65308;/technology&#65310;</a></h2>
+            <time datetime="2026-07-29T08:00:00.000Z"></time>
+            <p>Routine details.</p>
+          </article>
+          <article>
+            <h2><a href="/summary-tag">Ordinary summary update</a></h2>
+            <time datetime="2026-07-29T08:01:00.000Z"></time>
+            <p>&#65308;artificial intelligence regulation&#65310;Routine details.</p>
+          </article>
+          <article>
+            <h2><a href="/useful-wrapper">Useful wrapper update</a></h2>
+            <time datetime="2026-07-29T08:02:00.000Z"></time>
+            <p>&#65308;span&#65310;Artificial intelligence regulation advances.&#65308;/span&#65310;</p>
+          </article>
+          <article>
+            <h2><a href="/tag-only">&#65308;technology&#65310;</a></h2>
+            <time datetime="2026-07-29T08:03:00.000Z"></time>
+            <p>Routine details.</p>
+          </article>`,
+          { headers: { "content-type": "text/html" } },
+        )),
+        now: () => new Date("2026-07-29T10:00:00.000Z"),
+      }),
+      sources: [
+        catalogSource({
+          id: "direct-signal-boundary",
+          canonicalName: "Direct Signal Boundary",
+          canonicalUrl: `https://${host}/`,
+          role: "reporting",
+          discoveryMechanism: "page",
+          sectionEligibility: ["world", "technology", "ai_policy"],
+          restrictions: {
+            bodyRetrieval: "forbidden",
+            paywall: "none",
+            contentUse: "metadata-only",
+            pageUrl: `https://${host}/news`,
+            urlPolicy: policy(host, ["/"]),
+            listing: {
+              itemSelector: "article",
+              linkSelector: "h2 a",
+              titleSelector: "h2",
+              dateSelector: "time",
+              dateAttribute: "datetime",
+              summarySelector: "p",
+              maxItems: 10,
+              maxBodyFetches: 0,
+            },
+          },
+        }),
+      ],
+    });
+
+    const candidates = (await collector.collect(fixedWindow())).candidates;
+    const items = candidates.map((candidate) => normalizeCandidate(candidate));
+
+    expect(candidates).toHaveLength(3);
+    expect(items.map((item) => ({
+      title: item.title,
+      normalizedText: item.normalizedText,
+      primarySection: item.metadata.primarySection,
+    }))).toEqual([
+      {
+        title: "Ordinary update",
+        normalizedText: "Routine details.",
+        primarySection: "world",
+      },
+      {
+        title: "Ordinary summary update",
+        normalizedText: "Routine details.",
+        primarySection: "world",
+      },
+      {
+        title: "Useful wrapper update",
+        normalizedText: "Artificial intelligence regulation advances.",
+        primarySection: "ai_policy",
+      },
+    ]);
+  });
+
+  it("keeps compatibility-created direct-page content tag names out of item routing while retaining wrapper content", async () => {
+    const host = "direct-content-boundary.example.com";
+    const fetch = vi.fn(async (input) => {
+      const url = String(input);
+      if (url === `https://${host}/news`) {
+        return new Response(
+          `<article><h2><a href="/tag-name">Ordinary content update</a></h2><time datetime="2026-07-29T08:00:00.000Z"></time></article>
+          <article><h2><a href="/useful-wrapper">Useful content update</a></h2><time datetime="2026-07-29T08:01:00.000Z"></time></article>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      }
+      if (url === `https://${host}/tag-name`) {
+        return new Response(
+          `<article><p>&#65308;artificial intelligence regulation&#65310;Routine details.</p></article>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      }
+      if (url === `https://${host}/useful-wrapper`) {
+        return new Response(
+          `<article><p>&#65308;span&#65310;Artificial intelligence regulation advances.&#65308;/span&#65310;</p></article>`,
+          { headers: { "content-type": "text/html" } },
+        );
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const collector = createNewsCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        now: () => new Date("2026-07-29T10:00:00.000Z"),
+      }),
+      sources: [
+        catalogSource({
+          id: "direct-content-boundary",
+          canonicalName: "Direct Content Boundary",
+          canonicalUrl: `https://${host}/`,
+          role: "reporting",
+          discoveryMechanism: "page",
+          sectionEligibility: ["world", "ai_policy"],
+          restrictions: {
+            bodyRetrieval: "permitted",
+            paywall: "none",
+            contentUse: "ephemeral-summarization",
+            pageUrl: `https://${host}/news`,
+            urlPolicy: policy(host, ["/"]),
+            listing: {
+              itemSelector: "article",
+              linkSelector: "h2 a",
+              titleSelector: "h2",
+              dateSelector: "time",
+              dateAttribute: "datetime",
+              maxItems: 10,
+              maxBodyFetches: 2,
+            },
+          },
+        }),
+      ],
+    });
+
+    const candidates = (await collector.collect(fixedWindow())).candidates;
+    const items = candidates.map((candidate) => normalizeCandidate(candidate));
+
+    expect(items.map((item) => ({
+      normalizedText: item.normalizedText,
+      primarySection: item.metadata.primarySection,
+    }))).toEqual([
+      { normalizedText: "Routine details.", primarySection: "world" },
+      {
+        normalizedText: "Artificial intelligence regulation advances.",
+        primarySection: "ai_policy",
+      },
+    ]);
   });
 
   it.each([

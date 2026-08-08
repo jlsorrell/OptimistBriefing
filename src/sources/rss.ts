@@ -3,7 +3,10 @@ import { z } from "zod";
 
 import { SourceHttpClient } from "./http-client";
 import { normalizeArxivIdentifier } from "./identifiers";
-import { boundProviderText, normalizeProviderText } from "./provider-text";
+import {
+  boundProviderText,
+  normalizedProviderSignalText,
+} from "./provider-text";
 import {
   assertSafeOutboundUrl,
   type OutboundUrlPolicy,
@@ -248,9 +251,10 @@ export class RssAdapter {
                   stripHtml: true,
                   maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
                 }) ?? "";
-                const signalTitle = normalizeProviderText(title, {
-                  maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
-                });
+                const signalTitle = normalizedProviderSignalText(
+                  title,
+                  MAX_PROVIDER_TITLE_CHARACTERS,
+                );
                 if (signalTitle === null) return [];
                 const identifier = entry.identifier ?? originalUrl;
                 const candidate = RawItemSchema.parse({

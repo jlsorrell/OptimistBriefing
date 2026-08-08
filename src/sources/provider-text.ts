@@ -1,6 +1,10 @@
 export const MAX_PROVIDER_TEXT_INPUT_CHARACTERS = 100_000;
 const MAX_ENTITY_DECODE_PASSES = 2;
 const ENTITY = /&(?:#([0-9]{1,7})|#x([0-9a-f]{1,6})|([a-z]{2,8}));/gi;
+const RESIDUAL_ENCODED_ANGLE =
+  /&(?:lt|gt|#0{0,5}(?:60|62)|#0{0,2}(?:65308|65310)|#x0{0,4}(?:3c|3e)|#x0{0,2}(?:ff1c|ff1e));/gi;
+const RESIDUAL_ENCODED_OPEN_ANGLE =
+  /^&(?:lt|#0{0,5}60|#0{0,2}65308|#x0{0,4}3c|#x0{0,2}ff1c);$/i;
 const NAMED = new Map<string, string>([
   ["amp", "&"], ["quot", "\""], ["apos", "'"],
   ["lt", "<"], ["gt", ">"], ["nbsp", " "],
@@ -51,6 +55,31 @@ function normalizeAndDecodeProviderText(value: string): string {
     decoded = next;
   }
   return decoded.normalize("NFKC");
+}
+
+function stripResidualEncodedTags(value: string): string {
+  let plain = "";
+  let cursor = 0;
+  let openStart: number | null = null;
+  let openEnd = 0;
+  for (const match of value.matchAll(RESIDUAL_ENCODED_ANGLE)) {
+    const index = match.index;
+    const token = match[0];
+    if (RESIDUAL_ENCODED_OPEN_ANGLE.test(token)) {
+      if (openStart === null) {
+        openStart = index;
+        openEnd = index + token.length;
+      }
+      continue;
+    }
+    if (openStart === null) continue;
+    if (index > openEnd) {
+      plain += `${value.slice(cursor, openStart)} `;
+      cursor = index + token.length;
+    }
+    openStart = null;
+  }
+  return plain + value.slice(cursor);
 }
 
 export type ProviderTextOptions = {
@@ -159,4 +188,19 @@ export function normalizeProviderText(
   options: ProviderTextOptions = {},
 ): string | null {
   return normalizeProviderTextDetailed(value, options).value;
+}
+
+export function normalizedProviderSignalText(
+  value: string | null | undefined,
+  maxCharacters = MAX_PROVIDER_TEXT_INPUT_CHARACTERS,
+): string | null {
+  const normalized = normalizeProviderText(value, {
+    stripHtml: true,
+    maxCharacters,
+  });
+  if (normalized === null) return null;
+  const plain = stripResidualEncodedTags(normalized)
+    .replace(/\s+/g, " ")
+    .trim();
+  return plain.length === 0 ? null : plain;
 }
