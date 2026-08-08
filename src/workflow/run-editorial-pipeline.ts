@@ -1456,14 +1456,52 @@ function normalizedStoredItem(item: Item, refreshDerived = false): Item {
 }
 
 /**
+ * Retains only workflow state owned by a news-development aggregate.
+ */
+function developmentAggregateWorkflow(
+  workflow: WorkflowItemPayload | undefined,
+): WorkflowItemPayload | undefined {
+  if (workflow === undefined) return undefined;
+  return WorkflowItemPayloadSchema.parse({
+    version: 1,
+    ...(workflow.personalRelevance === undefined
+      ? {}
+      : { personalRelevance: workflow.personalRelevance }),
+    ...(workflow.development === undefined
+      ? {}
+      : { development: workflow.development }),
+    ...(workflow.developmentScore === undefined
+      ? {}
+      : { developmentScore: workflow.developmentScore }),
+    ...(workflow.section === undefined
+      ? {}
+      : { section: workflow.section }),
+    ...(workflow.selectionReasons === undefined
+      ? {}
+      : { selectionReasons: workflow.selectionReasons }),
+  });
+}
+
+/**
  * Maps an already-normalized development back to its aggregate Item without
  * crossing another provider-text normalization boundary.
  */
 function storedItemFromNormalizedDevelopment(
   development: NewsDevelopment,
-  storedAggregate?: Item,
+  aggregateWorkflow?: WorkflowItemPayload,
 ): Item {
   const representative = development.representativeItem;
+  const representativeWorkflow = representative.metadata.workflow === undefined
+    ? undefined
+    : workflowPayload(representative);
+  const workflow = developmentAggregateWorkflow(
+    aggregateWorkflow ?? representativeWorkflow,
+  );
+  const {
+    workflow: _representativeWorkflow,
+    section: _representativeSection,
+    ...representativeMetadata
+  } = representative.metadata;
   return ItemSchema.parse({
     ...representative,
     id: development.id,
@@ -1477,13 +1515,24 @@ function storedItemFromNormalizedDevelopment(
     primaryTopic: development.primarySection,
     tags: representative.tags,
     metadata: {
-      ...(storedAggregate?.metadata ?? {}),
-      ...representative.metadata,
+      ...representativeMetadata,
       primarySection: development.primarySection,
       sectionEligibility: development.sectionEligibility,
-      ...(storedAggregate?.metadata.workflow === undefined
+      primaryDocumentUrl: development.canonicalPrimaryDocument,
+      primaryDocumentUrls: development.primaryDocumentUrls,
+      namedEntities: development.namedEntities,
+      eventFamilies: development.eventFamilies,
+      eventInstances: development.eventInstance === null
+        ? []
+        : [development.eventInstance],
+      materialFacts: development.materialFacts,
+      editorialSignals: development.editorialSignals,
+      ...(workflow?.section === undefined
         ? {}
-        : { workflow: storedAggregate.metadata.workflow }),
+        : { section: development.primarySection }),
+      ...(workflow === undefined
+        ? {}
+        : { workflow }),
     },
   });
 }
@@ -1510,7 +1559,7 @@ function normalizedStoredWorkflowItem(
       development = developmentFromItems(survivingItems);
       normalizedDevelopmentRoot = storedItemFromNormalizedDevelopment(
         development,
-        item,
+        originalWorkflow,
       );
     } else {
       development = NewsDevelopmentSchema.parse({

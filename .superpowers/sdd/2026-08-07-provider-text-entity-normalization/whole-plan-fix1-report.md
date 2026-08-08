@@ -461,6 +461,144 @@ Planned message: `fix: trust provider normalization checkpoint envelope`. The re
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 12
+
+Round 12 closes the aggregate metadata contamination gap left by the Round 11
+schema-only mapper. Rebuilt development roots now use canonical representative
+metadata as their only open-ended base, overlay only canonical development
+fields, and retain only a strict allowlist of news-development workflow state.
+No deployment, migration, history rewrite, or unrelated change was made.
+
+### RED evidence
+
+The cluster and shortlist legacy fixtures were extended with aggregate-only
+metadata tags, content/evidence fingerprints, encoded attached commentary, an
+encoded arbitrary metadata sentinel, and a structural sentinel. The surviving
+representative has a distinct structural sentinel that must remain. The focused
+command was:
+
+```sh
+npm run test:worker -- tests/integration/workflow/manual-run.test.ts -t "through exactly one text boundary"
+```
+
+Result: exit 1; both cases retained `metadata.tags` with
+`stale&#45;aggregate-tag`, proving aggregate-only metadata crossed into the
+rebuilt root.
+
+The downstream-consumer audit then identified `metadata.section` as the one
+aggregate routing field consumed by synthesis and composition. A second RED
+characterization added stale `metadata.section: technology` and a schema-valid
+but item-only workflow embedding. Result: exit 1; the cluster root retained the
+embedding and the shortlist root omitted its canonical `world` metadata route.
+
+### Implementation
+
+- `storedItemFromNormalizedDevelopment` now starts exclusively from the
+  normalized representative's metadata. It never spreads stored aggregate
+  metadata and still performs no provider-text normalization, NFKC, or entity
+  decoding.
+- Canonical development section eligibility, primary document URL(s), named
+  entities, event families/instance, material facts, and editorial signals are
+  explicitly overlaid on that representative base.
+- The representative's workflow and selected-section metadata are removed
+  before aggregate assembly. A strict news-development workflow allowlist
+  retains only personal relevance, development, development score, section,
+  and selection reasons. Item-only embedding/news-score and research-only state
+  cannot leak into the aggregate root.
+- When approved selection state exists, root `metadata.section` is rebuilt from
+  the refreshed development's primary section. Cluster roots without selection
+  state omit it. Existing score components are still replayed against the
+  refreshed development, and shortlist section routing remains canonical.
+- Top-level aggregate ID, canonical URL, title, source references, evidence,
+  topic, and tags continue to come from the development/representative
+  contract; publication time, access level, and other Item structure continue
+  to come from the representative.
+
+### GREEN evidence
+
+Focused cluster/shortlist command:
+
+```sh
+npm run test:worker -- tests/integration/workflow/manual-run.test.ts -t "through exactly one text boundary"
+```
+
+Result: exit 0; both cases passed. They prove aggregate-only tags,
+fingerprints, commentary, display metadata, and structural sentinels disappear;
+the representative structural sentinel survives; approved personal relevance,
+score, section, and selection reasons survive; item embedding is removed; and
+the subsequent current-envelope restore remains byte-stable.
+
+Affected source/editorial/workflow suites:
+
+```sh
+npx vitest run tests/unit/editorial tests/unit/workflow tests/unit/sources
+```
+
+Result: exit 0; 21 files and 517 tests passed.
+
+Full Worker suite:
+
+```sh
+npm run test:worker
+```
+
+Result: exit 0; 11 files and 220 tests passed. It emitted only the existing
+third-party missing-sourcemap warnings.
+
+Remaining non-Worker suite excluding the unrelated managed-OAuth fixture:
+
+```sh
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+```
+
+Result: exit 0; 39 files and 746 tests passed.
+
+Static, evaluation, build, and diff verification:
+
+```sh
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+The first typecheck found only two missing optional fields on the test's local
+workflow annotation. After adding those concrete annotations, typecheck exited
+0. Evaluation passed every relevance/identity/routing/grounding check, Vite
+built 53 modules, and diff validation found no whitespace errors.
+
+### Files changed
+
+- `src/workflow/run-editorial-pipeline.ts`
+- `tests/integration/workflow/manual-run.test.ts`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+
+### Self-review
+
+- The only open-ended metadata retained is metadata already present on the
+  surviving, once-normalized representative. Aggregate-only `tags`,
+  `contentFingerprint`, `evidenceFingerprint`, `attachedCommentary`, arbitrary
+  display values, and structural sentinels have no copy path.
+- Development-derived document, signal, entity/event, fact, and section values
+  explicitly override representative values where aggregate semantics apply.
+- The workflow allowlist was checked against all production workflow payload
+  consumers. News development roots need personal relevance for artifact
+  validity, development/score for ranking, and optional section/selection
+  reasons for synthesis/composition. Embedding/news score are item-stage state;
+  raw research, assessment, research score/tier, and topical fit are
+  research-only and are intentionally omitted.
+- `metadata.section` is not trusted from either the stale aggregate or
+  representative; it is emitted only when validated aggregate selection state
+  exists and always takes the refreshed development route.
+- Current-envelope restoration is still an exact graph return, and the
+  regression compares the complete second restoration to the first. Structural
+  URLs, IDs, source roles/dates, access levels, and canonical document values
+  are never decoded.
+
+### Concerns
+
+- None. Worker runs emit existing third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 11
 
 Round 11 removes a second provider-text boundary from legacy clustered and

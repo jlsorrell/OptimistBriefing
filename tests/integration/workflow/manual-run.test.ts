@@ -3924,7 +3924,13 @@ describe("manual editorial run", () => {
         primaryDocumentUrl: sharedDocument,
         primaryDocumentUrls: [sharedDocument],
         sectionEligibility: ["world", "technology"],
-        metadata: { primarySection: "world" },
+        metadata: {
+          primarySection: "world",
+          representativeStructuralSentinel: {
+            owner: id,
+            sourceDocument: sharedDocument,
+          },
+        },
       });
       const legacyNewsItem = (
         id: string,
@@ -4039,8 +4045,27 @@ describe("manual editorial run", () => {
           ...invalidRepresentative.metadata,
           primarySection: "technology",
           sectionEligibility: ["technology"],
+          section: "technology",
+          tags: ["stale&#45;aggregate-tag"],
+          contentFingerprint: "content:stale-aggregate-only",
+          evidenceFingerprint: "evidence:stale-aggregate-only",
+          attachedCommentary: [{
+            sourceId: "stale-commentary",
+            sourceName: "Stale &amp;amp;#83;ource",
+            displaySourceName: "Stale &amp;amp;#68;isplay",
+            url: "https://example.com/stale-commentary",
+            title: "Stale &amp;amp;#84;itle",
+            excerpt: "Stale &amp;amp;#69;vidence",
+            retrievedAt: now,
+          }],
+          aggregateOnlyDisplaySentinel:
+            "Stale &amp;amp;#68;isplay metadata",
+          aggregateOnlyStructuralSentinel: {
+            legacyRootId: legacyDevelopment.id,
+          },
           workflow: {
             version: 1,
+            embedding: [0.25],
             personalRelevance: 0.8,
             development: staleDevelopment,
             developmentScore: scoreNewsDevelopment(
@@ -4114,7 +4139,10 @@ describe("manual editorial run", () => {
       const refreshedWorkflow = refreshedAggregate!.metadata.workflow as {
         development: typeof freshDevelopment;
         developmentScore: ReturnType<typeof scoreNewsDevelopment>;
+        embedding?: readonly number[];
+        personalRelevance?: number;
         section?: string;
+        selectionReasons?: readonly string[];
       };
       const refreshedDevelopment = refreshedWorkflow.development;
       expect(refreshedDevelopment).toEqual(freshDevelopment);
@@ -4148,12 +4176,44 @@ describe("manual editorial run", () => {
       expect(refreshedAggregate!.metadata).toMatchObject({
         primarySection: "world",
         sectionEligibility: ["technology", "world"],
+        representativeStructuralSentinel:
+          freshDevelopment.representativeItem.metadata
+            .representativeStructuralSentinel,
       });
+      expect(refreshedAggregate!.metadata.tags).toBeUndefined();
+      expect(
+        refreshedAggregate!.metadata.contentFingerprint,
+      ).toBeUndefined();
+      expect(
+        refreshedAggregate!.metadata.evidenceFingerprint,
+      ).toBeUndefined();
+      expect(
+        refreshedAggregate!.metadata.attachedCommentary,
+      ).toBeUndefined();
+      expect(
+        refreshedAggregate!.metadata.aggregateOnlyDisplaySentinel,
+      ).toBeUndefined();
+      expect(
+        refreshedAggregate!.metadata.aggregateOnlyStructuralSentinel,
+      ).toBeUndefined();
       expect(refreshedWorkflow.section).toBe(
         checkpointStep === "shortlist" ? "world" : undefined,
       );
+      expect(refreshedAggregate!.metadata.section).toBe(
+        checkpointStep === "shortlist" ? "world" : undefined,
+      );
+      expect(refreshedWorkflow.embedding).toBeUndefined();
+      expect(refreshedWorkflow.personalRelevance).toBe(0.8);
+      expect(refreshedWorkflow.selectionReasons).toEqual(
+        checkpointStep === "shortlist"
+          ? ["Fixture selection."]
+          : undefined,
+      );
       expect(JSON.stringify(refreshedAggregate)).toContain("&#");
       expect(JSON.stringify(refreshedAggregate)).not.toContain("software");
+      expect(JSON.stringify(refreshedAggregate)).not.toContain(
+        "stale-aggregate-only",
+      );
 
       const onceRestored = structuredClone(refreshedAggregate!);
       await store.saveCheckpoint(context.runId, checkpointStep, {
