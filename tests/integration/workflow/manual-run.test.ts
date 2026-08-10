@@ -2914,7 +2914,7 @@ describe("manual editorial run", () => {
     );
   });
 
-  it("promotes legacy synthesize presentation before failed validation and restores it byte-stably", async () => {
+  it("migrates genuine legacy synthesize selection reasons once before promotion and retry", async () => {
     const runId = "run-legacy-synthesize-presentation";
     const editionDate = "2034-06-02";
     const store = createD1PipelineStore(env.DB);
@@ -2931,17 +2931,20 @@ describe("manual editorial run", () => {
       failureCode: null,
     });
     await seedD1CheckpointsBefore(store, runId, "synthesize");
-    const item = presentationResearchItem("Prepared system reason.");
+    const item = presentationResearchItem();
     await insertLegacyD1Checkpoint(runId, "synthesize", [{
       item,
       summary: legacyPresentationSummary(),
     }]);
-    const observed: StructuredSummary[][] = [];
+    const observed: Array<Array<{
+      item: Item;
+      summary: StructuredSummary;
+    }>> = [];
     const context: PipelineContext = {
       ...fixturePipelineContext({ editionDate, runId }),
       store,
       validate: async (entries) => {
-        observed.push(entries.map(({ summary }) => structuredClone(summary)));
+        observed.push(structuredClone([...entries]));
         throw new Error("STOP_AFTER_SYNTHESIZE_PRESENTATION");
       },
     };
@@ -2955,6 +2958,19 @@ describe("manual editorial run", () => {
         providerTextPresentationVersion?: number;
       };
     expect(promoted.providerTextPresentationVersion).toBe(1);
+    expect(promoted.providerTextNormalizationVersion).toBe(1);
+    expect((promoted.output[0]?.item.metadata.workflow as {
+      selectionReasons?: string[];
+    }).selectionReasons).toEqual(["Reason &#8217; display"]);
+    expect(promoted.output[0]?.item.sourceRefs).toEqual(item.sourceRefs);
+    expect(promoted.output[0]?.item).toMatchObject({
+      id: item.id,
+      canonicalUrl: item.canonicalUrl,
+      publishedAt: item.publishedAt,
+      accessLevel: item.accessLevel,
+      createdAt: item.createdAt,
+      expiresAt: item.expiresAt,
+    });
     expect(promoted.output[0]?.summary).toMatchObject({
       title: "Presentation &#8217; title",
       oneSentence:
@@ -2968,22 +2984,37 @@ describe("manual editorial run", () => {
       accessLevel: "abstract",
     });
     const stablePromotion = structuredClone(promoted);
+    const firstRowCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') = 'synthesize'`,
+    ).bind(runId).first<{ count: number }>();
+    expect(firstRowCount).toEqual({ count: 2 });
 
     await expect(runEditorialPipeline(context)).rejects.toThrow(
       "STOP_AFTER_SYNTHESIZE_PRESENTATION",
     );
     expect(observed).toHaveLength(2);
     expect(observed[1]).toEqual(observed[0]);
+    expect((observed[1]?.[0]?.item.metadata.workflow as {
+      selectionReasons?: string[];
+    }).selectionReasons).toEqual(["Reason &#8217; display"]);
     await expect(store.readArtifact(runId, "synthesize")).resolves.toEqual(
       stablePromotion,
     );
+    const retryRowCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') = 'synthesize'`,
+    ).bind(runId).first<{ count: number }>();
+    expect(retryRowCount).toEqual({ count: 2 });
   });
 
-  it("revalidates and promotes transformed legacy validate presentation before compose", async () => {
+  it("migrates genuine legacy invalid validate selection reasons without changing validation semantics", async () => {
     const runId = "run-legacy-validate-presentation";
     const editionDate = "2034-06-03";
     const store = createD1PipelineStore(env.DB);
-    const item = presentationResearchItem("Prepared system reason.");
+    const item = presentationResearchItem();
     await seedD1Items([item]);
     await store.createRun({
       id: runId,
@@ -3025,7 +3056,20 @@ describe("manual editorial run", () => {
         validationErrors?: string[];
       }>> & { providerTextPresentationVersion?: number };
     expect(promoted.providerTextPresentationVersion).toBe(1);
+    expect(promoted.providerTextNormalizationVersion).toBe(1);
     expect(promoted.output[0]).toMatchObject({
+      item: {
+        id: item.id,
+        canonicalUrl: item.canonicalUrl,
+        publishedAt: item.publishedAt,
+        accessLevel: item.accessLevel,
+        sourceRefs: item.sourceRefs,
+        metadata: {
+          workflow: {
+            selectionReasons: ["Reason &#8217; display"],
+          },
+        },
+      },
       summary: {
         title: "Presentation &#8217; title",
         claims: [{
@@ -3042,6 +3086,12 @@ describe("manual editorial run", () => {
       ]),
     });
     const stablePromotion = structuredClone(promoted);
+    const firstRowCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') = 'validate'`,
+    ).bind(runId).first<{ count: number }>();
+    expect(firstRowCount).toEqual({ count: 2 });
 
     await expect(runEditorialPipeline(context)).rejects.toThrow(
       "STOP_AFTER_VALIDATE_PRESENTATION",
@@ -3049,6 +3099,170 @@ describe("manual editorial run", () => {
     await expect(store.readArtifact(runId, "validate")).resolves.toEqual(
       stablePromotion,
     );
+    const retryRowCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') = 'validate'`,
+    ).bind(runId).first<{ count: number }>();
+    expect(retryRowCount).toEqual({ count: 2 });
+  });
+
+  it("publishes genuine legacy validate selection reasons once across compose and retry", async () => {
+    const runId = "run-legacy-validate-selection-reason-publish";
+    const editionDate = "2034-06-04";
+    const store = createD1PipelineStore(env.DB);
+    const target = presentationResearchItem();
+    const companions = standardFixtureItems().filter(({ id }) =>
+      id !== "research"
+    );
+    const items = [target, ...companions];
+    const summaryFor = (item: Item): StructuredSummary =>
+      item.id === target.id
+        ? legacyPresentationSummary()
+        : {
+            title: item.title,
+            oneSentence: item.normalizedText,
+            whyItMatters: "This fixture matters for complete coverage.",
+            uncertainty: "The fixture retains bounded uncertainty.",
+            claims: [{
+              text: item.normalizedText,
+              sourceIds: [item.sourceRefs[0]!.id],
+              evidenceExcerpt: item.normalizedText,
+            }],
+            accessLevel: item.accessLevel,
+          };
+    await seedD1Items(items);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "running",
+      currentStep: "validate",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    await seedD1CheckpointsBefore(store, runId, "validate", {
+      normalize: items,
+    });
+    await insertLegacyD1Checkpoint(runId, "validate", items.map((item) => ({
+      item,
+      summary: summaryFor(item),
+      valid: true,
+    })));
+    const persistEdition = store.persistEdition.bind(store);
+    const observedEntries: EditionEntry[][] = [];
+    let persistAttempts = 0;
+    store.persistEdition = async (edition, entries, status) => {
+      observedEntries.push(structuredClone([...entries]));
+      persistAttempts += 1;
+      if (persistAttempts === 1) {
+        throw new Error("TRANSIENT_PUBLISH_AFTER_VALIDATE_PRESENTATION");
+      }
+      return persistEdition(edition, entries, status);
+    };
+    const context: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store,
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "TRANSIENT_PUBLISH_AFTER_VALIDATE_PRESENTATION",
+    );
+
+    const promotedValidate = await store.readArtifact(runId, "validate") as
+      CheckpointArtifact<Array<{
+        item: Item;
+        summary: StructuredSummary;
+        valid: boolean;
+        validationErrors?: string[];
+      }>>;
+    const composed = await store.readArtifact(runId, "compose") as
+      CheckpointArtifact<CompositionResult>;
+    const promotedTarget = promotedValidate.output.find(({ item }) =>
+      item.id === target.id
+    );
+    const composedTarget = composed.output.entries.find(({ itemId }) =>
+      itemId === target.id
+    );
+    expect(promotedValidate).toMatchObject({
+      providerTextNormalizationVersion: 1,
+      providerTextPresentationVersion: 1,
+    });
+    expect(promotedTarget).toMatchObject({
+      valid: true,
+      item: {
+        id: target.id,
+        canonicalUrl: target.canonicalUrl,
+        publishedAt: target.publishedAt,
+        accessLevel: target.accessLevel,
+        sourceRefs: target.sourceRefs,
+        metadata: {
+          workflow: {
+            selectionReasons: ["Reason &#8217; display"],
+          },
+        },
+      },
+    });
+    expect(composed.providerTextCompositionVersion).toBe(
+      PROVIDER_TEXT_COMPOSITION_VERSION,
+    );
+    expect(composedTarget).toMatchObject({
+      itemId: target.id,
+      selectionReasons: ["Reason &#8217; display"],
+      sourceRefs: target.sourceRefs,
+    });
+    expect(observedEntries[0]?.find(({ itemId }) => itemId === target.id))
+      .toEqual(composedTarget);
+    const stableValidate = structuredClone(promotedValidate);
+    const stableCompose = structuredClone(composed);
+    const firstRows = await env.DB.prepare(
+      `SELECT json_extract(event_json, '$.step') AS step, COUNT(*) AS count
+       FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') IN ('validate', 'compose', 'publish')
+       GROUP BY json_extract(event_json, '$.step')`,
+    ).bind(runId).all<{ step: string; count: number }>();
+    expect(Object.fromEntries(firstRows.results.map(({ step, count }) =>
+      [step, count]
+    ))).toEqual({ validate: 2, compose: 1 });
+
+    await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+      runId,
+      status: "published",
+      missingSections: [],
+    });
+
+    expect(observedEntries).toHaveLength(2);
+    expect(observedEntries[1]).toEqual(observedEntries[0]);
+    await expect(store.readArtifact(runId, "validate")).resolves.toEqual(
+      stableValidate,
+    );
+    await expect(store.readArtifact(runId, "compose")).resolves.toEqual(
+      stableCompose,
+    );
+    const published = await store.getLatestEdition();
+    expect(published?.entries.find(({ itemId }) => itemId === target.id))
+      .toMatchObject({
+        itemId: target.id,
+        section: composedTarget?.section,
+        position: composedTarget?.position,
+        summary: composedTarget?.summary,
+        selectionReasons: ["Reason &#8217; display"],
+        sourceRefs: target.sourceRefs,
+      });
+    const retryRows = await env.DB.prepare(
+      `SELECT json_extract(event_json, '$.step') AS step, COUNT(*) AS count
+       FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') IN ('validate', 'compose', 'publish')
+       GROUP BY json_extract(event_json, '$.step')`,
+    ).bind(runId).all<{ step: string; count: number }>();
+    expect(Object.fromEntries(retryRows.results.map(({ step, count }) =>
+      [step, count]
+    ))).toEqual({ validate: 2, compose: 1, publish: 1 });
   });
 
   it("promotes a legacy D1 compose before a failed publish and restores it byte-stably", async () => {

@@ -1,5 +1,56 @@
 # Task 3 — Entity-normalization regression gate
 
+## Final Round 22 pre-commit verification status
+
+**PASS, including independent review.** Round 22 closes the nested shortlist-
+reason seam in legacy synthesize and validate artifacts. The shared summary-
+candidate presentation mapper now prepares the workflow `selectionReasons`
+with the same legacy/current contract already used by the shortlist boundary
+before append-only promotion marks the artifact current.
+
+### Fresh Round 22 evidence
+
+1. Strict D1 RED/GREEN matrix:
+
+   ```sh
+   npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "genuine legacy .* selection reasons"
+   ```
+
+   RED: all 3 selected cases failed at the intended value, retaining
+   `Reason &amp;amp;#8217; display` instead of the single-lifecycle result
+   `Reason &#8217; display`. GREEN: all 3 passed; 116 skipped.
+2. Affected unit suites: PASS (22 files; 574 tests).
+3. Remaining non-Worker suite excluding the managed-OAuth fixture: PASS (40
+   files; 803 tests).
+4. Full `npm run test:worker`: PASS (11 files; 256 tests), with only existing
+   third-party missing-sourcemap warnings.
+5. Fresh unsandboxed `npm test`, including managed OAuth: PASS (41 files; 841
+   tests).
+6. `npm run check`: PASS. `npm run evaluate`: PASS (precision@5 `1.00`, minimum
+   `0.80`, every assertion passed). `npm run build`: PASS (Vite 7.3.6; 53
+   modules). `git diff --check`: PASS.
+7. Trusted-HTML and targeted structural provider-normalizer misuse scans: no
+   matches.
+
+### Round 22 audit
+
+The only production edit is the existing summary-candidate presentation mapper
+in `src/workflow/run-editorial-pipeline.ts`; the whole-plan source audit remains
+23 production paths. Summary schema parsing still precedes Item presentation,
+so invalid-summary isolation and error ordering are unchanged. Legacy validate
+still recomputes validation after presentation mapping. Current artifacts still
+return through the existing marker short-circuit without mapping or decoding.
+
+The D1 regressions prove one append-only synthesize/validate promotion, no
+additional promotion on retry, byte-stable current restore, unchanged invalid-
+validate errors, exact Item/source structural preservation, stable compose
+output across a failed publish retry, and a final published edition containing
+the once-prepared selection reason. No deployment, migration, amend, history
+rewrite, historical-row mutation, or unrelated change has been performed.
+
+The fresh independent review found no Critical, Important, or Minor issues and
+returned `Ready to commit`.
+
 ## Final Round 21 pre-commit verification status
 
 **PASS, including independent review.** Round 21 adds one central checkpoint

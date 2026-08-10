@@ -3400,7 +3400,10 @@ function mappedSummaryCandidates(
       if (!summary.success) return [];
       const prepared = {
         ...candidate,
-        item: preparedOperationalSourceNames(candidate.item),
+        item: mappedSelectionReasons(
+          preparedOperationalSourceNames(candidate.item),
+          legacy,
+        ),
         summary: summary.data,
       };
       return revalidate ? [validatedSummaryCandidate(prepared)] : [prepared];

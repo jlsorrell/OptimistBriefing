@@ -1980,6 +1980,152 @@ None. The fresh independent pre-commit review found no Critical, Important, or
 Minor issues and returned `Ready to commit`. Worker runs emit only the existing
 third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 22
+
+Round 22 closes the remaining presentation-field seam in genuine legacy
+synthesize and validate checkpoints. Their structured summaries were migrated,
+but nested `candidate.item.metadata.workflow.selectionReasons` were not. The
+artifact was then promoted with both current provider-text markers, and
+composition copied the still-encoded reasons verbatim. This round extends the
+existing presentation mapper without changing checkpoint schemas, structural
+fields, validation rules, or deployment state.
+
+### Approved implementation plan
+
+The approved smallest fix reuses `mappedSelectionReasons` inside
+`mappedSummaryCandidates`. The call wraps the existing
+`preparedOperationalSourceNames(candidate.item)` result and receives the same
+`legacy` flag as the summary mapper. Summary `safeParse` remains before Item
+mapping, preserving invalid-summary error ordering. Legacy artifacts decode and
+bound reasons at their missing presentation boundary; fresh/current execution
+uses the no-decode bounding contract; artifacts already carrying both current
+markers continue to return through the restore short-circuit untouched.
+
+The strict D1 plan covers:
+
+1. A genuine legacy synthesize artifact with a triple-layer selection reason,
+   append-only promotion, downstream validation observation, retry byte
+   stability, exact row stability, and structural Item/source invariance.
+2. A genuine legacy validate artifact whose summary remains invalid for an
+   unknown source, proving reason preparation does not change recomputed
+   validation semantics, promotion, retry bytes, or row counts.
+3. A valid six-candidate legacy validate artifact that promotes and composes,
+   fails once during publish, then retries from current validate/compose state
+   and publishes. The selected reason, structural source fields, checkpoint
+   bytes, and append-only row counts must remain stable throughout.
+
+### RED evidence
+
+Before the production mapper change:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "genuine legacy .* selection reasons"
+```
+
+Result: exit 1; all 3 selected tests failed and 116 were skipped. Each failure
+was the intended missing behavior: the promoted or publish-bound candidate
+retained `Reason &amp;amp;#8217; display` instead of the single-lifecycle result
+`Reason &#8217; display`. The initial sandboxed attempt was blocked by Miniflare
+socket binding (`listen EPERM`); the immediate unsandboxed run supplied the
+authoritative RED evidence.
+
+### Implementation
+
+- `mappedSummaryCandidates` now prepares each schema-valid candidate Item with
+  `mappedSelectionReasons(preparedOperationalSourceNames(candidate.item),
+  legacy)` before it constructs the transformed candidate.
+- The change reuses the shortlist selection-reason contract: legacy mapping
+  strips markup, performs the bounded entity decode, limits each reason to 300
+  characters, and drops invalid entries; current mapping applies the same
+  presentation bounds without entity decoding.
+- Summary schema parsing remains first. Legacy validate still calls
+  `validatedSummaryCandidate` only after both summary and Item presentation
+  mapping. Source-name candidate isolation and all structural Item/source fields
+  retain their prior paths.
+- No new marker, schema, helper, database column, migration, public API, or
+  fallback was added.
+
+### GREEN evidence
+
+Focused D1 matrix:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "genuine legacy .* selection reasons"
+```
+
+Result: PASS (3 selected tests; 116 skipped). The synthesize case observes and
+promotes `Reason &#8217; display`, then restores the current artifact byte-for-
+byte with exactly two synthesize rows. The invalid validate case retains its
+unknown-source and evidence validation failures while promoting the prepared
+reason exactly once with two stable validate rows. The valid validate case
+promotes once, creates one stable current compose artifact, fails its first
+publish attempt, then restores both artifacts unchanged and publishes the same
+reason. Final row counts are validate 2, compose 1, and publish 1.
+
+Broader verification:
+
+```sh
+npx vitest run tests/unit/editorial tests/unit/workflow tests/unit/sources
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+npm run test:worker
+npm test
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results:
+
+- Affected unit suites: PASS (22 files; 574 tests).
+- Non-Worker suite excluding managed OAuth: PASS (40 files; 803 tests).
+- Full Worker/D1 suite: PASS (11 files; 256 tests), with only existing third-
+  party missing-sourcemap warnings.
+- Fresh unsandboxed full suite including managed OAuth: PASS (41 files; 841
+  tests).
+- TypeScript check: PASS.
+- Evaluation: PASS, precision@5 `1.00` against minimum `0.80`, every assertion
+  passed.
+- Vite 7.3.6 build: PASS, 53 modules transformed.
+- Diff check: PASS.
+- Trusted-HTML scan and targeted structural provider-normalizer misuse scan:
+  no matches.
+
+### Files changed
+
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/task-3-report.md`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+- `src/workflow/run-editorial-pipeline.ts`
+- `tests/integration/workflow/manual-run.test.ts`
+
+### Self-review
+
+- The presentation artifact remains the lifecycle owner. Normalization-current,
+  presentation-legacy synthesize/validate artifacts receive one legacy reason
+  mapping immediately before append-only promotion; both-current artifacts
+  still bypass all presentation mapping.
+- Reusing the shortlist helper avoids a second policy or decoder. Fresh
+  synthesize and validate paths only reapply the no-decode bound to reasons that
+  already passed shortlist presentation.
+- Summary `safeParse` remains before Item preparation, preserving malformed-
+  summary isolation. Validate recomputation remains after all presentation
+  transformations, preserving source/grounding semantics.
+- The six-candidate D1 retry proves the result is not limited to an invalid or
+  filtered candidate: the once-prepared reason crosses current validate,
+  current compose, a failed publish, retry, and final published storage.
+- Exact sourceRefs, Item identity, canonical URL, publication/retrieval dates,
+  roles, access level, summary, checkpoint bytes, and append-only row counts are
+  asserted stable. No structural field is sent to a provider-text normalizer.
+- No deployment, migration, amend, history rewrite, OAuth change, historical-
+  row update/delete, trusted-HTML insertion, or unrelated cleanup was made.
+
+### Concerns
+
+None. The fresh independent review found no Critical, Important, or Minor
+issues and returned `Ready to commit`. It confirmed the shared mapper placement,
+summary error ordering, current short-circuit, validate semantics, append-only
+row/byte stability, structural invariance, four-file scope, and report accuracy.
+
 ## Whole-plan Fix Round 21
 
 Round 21 closes the final cross-marker coherence seam: a checkpoint cannot be
