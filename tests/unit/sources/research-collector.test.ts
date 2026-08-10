@@ -208,6 +208,12 @@ describe("ResearchCollector", () => {
   it("serializes and paces Semantic Scholar lanes", async () => {
     const clock = logicalSchedulerRuntime();
     const starts: number[] = [];
+    let active = 0;
+    let maximumActive = 0;
+    let releaseAll: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseAll = resolve;
+    });
     const collector = new ResearchCollector({
       discoveryAdapters: Array.from({ length: 3 }, (_, index) => ({
         sourceId: "semantic-scholar",
@@ -215,6 +221,10 @@ describe("ResearchCollector", () => {
         discoveryFamily: "bibliographic" as const,
         collect: async () => {
           starts.push(clock.now());
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          await gate;
+          active -= 1;
           return [];
         },
       })),
@@ -223,9 +233,17 @@ describe("ResearchCollector", () => {
       schedulerRuntime: clock,
     });
 
-    await collector.collect(fixedWindow());
+    const pending = collector.collect(fixedWindow());
+    await vi.waitFor(() => expect(active).toBeGreaterThan(0));
+    const startsWhileFirstLaneIsHeld = [...starts];
+    const maximumActiveWhileFirstLaneIsHeld = maximumActive;
+    releaseAll?.();
+    await pending;
 
+    expect(startsWhileFirstLaneIsHeld).toEqual([0]);
+    expect(maximumActiveWhileFirstLaneIsHeld).toBe(1);
     expect(starts).toEqual([0, 1_000, 2_000]);
+    expect(maximumActive).toBe(1);
   });
 
   it("runs each provider group concurrently", async () => {
@@ -238,7 +256,7 @@ describe("ResearchCollector", () => {
     const adapters = [
       {
         sourceId: "semantic-scholar",
-        laneId: "semantic-scholar:blocked",
+        laneId: "a-semantic-scholar:blocked",
         discoveryFamily: "bibliographic",
         collect: async () => {
           await semanticScholarGate;
@@ -248,7 +266,7 @@ describe("ResearchCollector", () => {
       },
       {
         sourceId: "arxiv",
-        laneId: "arxiv:healthy",
+        laneId: "z-arxiv:healthy",
         discoveryFamily: "arxiv",
         collect: async () => {
           arxivStartedBeforeSemanticScholarSettled = !semanticScholarSettled;
@@ -263,11 +281,14 @@ describe("ResearchCollector", () => {
     });
 
     const pending = collector.collect(fixedWindow());
-    await vi.waitFor(() => {
-      expect(arxivStartedBeforeSemanticScholarSettled).toBe(true);
-    });
-    releaseSemanticScholar?.();
-    await pending;
+    try {
+      await vi.waitFor(() => {
+        expect(arxivStartedBeforeSemanticScholarSettled).toBe(true);
+      });
+    } finally {
+      releaseSemanticScholar?.();
+      await pending;
+    }
   });
 
   it("limits OpenAlex discovery concurrency to two lanes", async () => {
@@ -370,6 +391,61 @@ describe("ResearchCollector", () => {
     expect(JSON.stringify(result)).not.toContain("secret.example");
     expect(clock.now()).toBe(1_000);
   });
+
+  it.each(["constructor", "__proto__"])(
+    "uses the default policy and preserves fail-open settlement for unknown provider %s",
+    async (sourceId) => {
+      const settled: string[] = [];
+      const adapters = [
+        {
+          sourceId,
+          laneId: `${sourceId}:01-failed`,
+          discoveryFamily: "bibliographic",
+          collect: async () => {
+            throw new Error("private inherited-policy failure detail");
+          },
+        },
+        {
+          sourceId,
+          laneId: `${sourceId}:02-healthy`,
+          discoveryFamily: "bibliographic",
+          collect: async () => {
+            settled.push(`${sourceId}:02-healthy`);
+            return [];
+          },
+        },
+      ] satisfies readonly DiscoverySourceAdapter[];
+      const collector = new ResearchCollector({
+        discoveryAdapters: adapters,
+        enrichers: [],
+        preferredInstitutions: [],
+      });
+
+      const result = await collector.collect(fixedWindow());
+
+      expect(settled).toEqual([`${sourceId}:02-healthy`]);
+      expect(result.succeededSourceIds).toEqual([sourceId]);
+      expect(result.failures).toEqual([
+        {
+          sourceId: sourceId === "__proto__" ? "unknown-source" : sourceId,
+          kind: "unknown",
+        },
+      ]);
+      expect(result.discoveryDiagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          laneId: `${sourceId}:01-failed`,
+          outcome: "unknown",
+        }),
+        expect.objectContaining({
+          laneId: `${sourceId}:02-healthy`,
+          outcome: "success",
+        }),
+      ]));
+      expect(JSON.stringify(result)).not.toContain(
+        "private inherited-policy failure detail",
+      );
+    },
+  );
 
   it.each(["title", "sourceName"] as const)(
     "drops an entity-only research %s without losing its valid sibling",

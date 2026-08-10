@@ -420,8 +420,9 @@ export class ResearchCollector {
           providerAdapters.map((adapter) =>
             () => collectDiscoveryLane(adapter, validWindow)
           ),
-          RESEARCH_PROVIDER_SCHEDULE_POLICIES[sourceId]
-            ?? DEFAULT_PROVIDER_POLICY,
+          Object.hasOwn(RESEARCH_PROVIDER_SCHEDULE_POLICIES, sourceId)
+            ? RESEARCH_PROVIDER_SCHEDULE_POLICIES[sourceId]!
+            : DEFAULT_PROVIDER_POLICY,
           this.options.schedulerRuntime,
         )
       ),
