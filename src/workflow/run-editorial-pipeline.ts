@@ -52,6 +52,10 @@ import {
   mapResearchTopicIds,
 } from "../editorial/research-topics";
 import {
+  normalizeLegacyStructuredSummaryProviderText,
+  prepareCurrentStructuredSummaryProviderText,
+} from "../editorial/summary-provider-text";
+import {
   summarizeItem,
   SummaryRejectedError,
 } from "../editorial/summarize";
@@ -85,7 +89,10 @@ import { SemanticScholarAdapter } from "../sources/semantic-scholar";
 import { OpenAlexAdapter } from "../sources/openalex";
 import { ResearchCollector } from "../sources/research-collector";
 import {
+  boundProviderSourceName,
+  boundProviderText,
   normalizeProviderText,
+  normalizeProviderSourceName,
   truncateProviderTextAtCodePointBoundary,
 } from "../sources/provider-text";
 import {
@@ -132,6 +139,7 @@ import {
   PROVIDER_TEXT_COMPOSITION_VERSION,
   PROVIDER_TEXT_NORMALIZATION_VERSION,
   PROVIDER_TEXT_PREPARATION_VERSION,
+  PROVIDER_TEXT_PRESENTATION_VERSION,
   CollectedCandidateSchema,
   SummaryRejectionEventSchema,
   WorkflowItemPayloadSchema,
@@ -424,6 +432,7 @@ const ARTIFACT_KEYS = new Set([
   "providerTextNormalizationVersion",
   "providerTextPreparationVersion",
   "providerTextCompositionVersion",
+  "providerTextPresentationVersion",
 ]);
 const REQUIRED_ARTIFACT_KEYS = [
   "output",
@@ -466,9 +475,23 @@ function parseCheckpointArtifact(
       : z.literal(PROVIDER_TEXT_COMPOSITION_VERSION).parse(
           record.providerTextCompositionVersion,
         );
+  const providerTextPresentationVersion =
+    record.providerTextPresentationVersion === undefined
+      ? undefined
+      : z.literal(PROVIDER_TEXT_PRESENTATION_VERSION).parse(
+          record.providerTextPresentationVersion,
+        );
   if (step === "collect" && providerTextNormalizationVersion !== undefined) {
     throw new TypeError(
       "Collect checkpoint artifacts cannot be marked provider-text normalized.",
+    );
+  }
+  if (
+    (step === "compose" || step === "publish") &&
+    providerTextNormalizationVersion !== undefined
+  ) {
+    throw new TypeError(
+      "Compose and publish checkpoint artifacts cannot be marked provider-text normalized.",
     );
   }
   if (step !== "collect" && providerTextPreparationVersion !== undefined) {
@@ -482,6 +505,14 @@ function parseCheckpointArtifact(
   ) {
     throw new TypeError(
       "Only compose and publish checkpoint artifacts can be marked provider-text composed.",
+    );
+  }
+  if (
+    step !== "shortlist" && step !== "synthesize" && step !== "validate" &&
+    providerTextPresentationVersion !== undefined
+  ) {
+    throw new TypeError(
+      "Only shortlist, synthesize, and validate checkpoint artifacts can be marked provider-text presented.",
     );
   }
   return {
@@ -499,6 +530,9 @@ function parseCheckpointArtifact(
     ...(providerTextCompositionVersion === undefined
       ? {}
       : { providerTextCompositionVersion }),
+    ...(providerTextPresentationVersion === undefined
+      ? {}
+      : { providerTextPresentationVersion }),
   };
 }
 
@@ -941,7 +975,9 @@ export class D1PipelineStore implements PipelineStore {
             artifact.providerTextPreparationVersion !==
               first.providerTextPreparationVersion ||
             artifact.providerTextCompositionVersion !==
-              first.providerTextCompositionVersion,
+              first.providerTextCompositionVersion ||
+            artifact.providerTextPresentationVersion !==
+              first.providerTextPresentationVersion,
         )
       ) {
         throw new Error(`INVALID_CHECKPOINT_CHUNKS:${step}`);
@@ -1303,10 +1339,12 @@ function normalizedRequiredStoredDisplayText(
   value: string,
   field: RequiredProviderDisplayTextField,
 ): string {
-  const display = normalizeProviderText(value, {
-    stripHtml: true,
-    maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
-  });
+  const display = field === "sourceName"
+    ? normalizeProviderSourceName(value)
+    : normalizeProviderText(value, {
+        stripHtml: true,
+        maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+      });
   if (display === null) {
     throw new InvalidRequiredProviderDisplayTextError(field);
   }
@@ -1882,6 +1920,54 @@ function selectionReasons(item: Item): readonly string[] {
     payload.developmentScore?.selectionReasons ??
     ["Selected by the editorial shortlist."]
   );
+}
+
+function validatedSummaryCandidate(entry: {
+  item: Item;
+  summary: StructuredSummary;
+  [key: string]: unknown;
+}): {
+  item: Item;
+  summary: StructuredSummary;
+  valid: boolean;
+  validationErrors?: string[];
+  [key: string]: unknown;
+} {
+  const parsedSummary = StructuredSummarySchema.strict().safeParse(
+    entry.summary,
+  );
+  const sourceIds = new Set(entry.item.sourceRefs.map(({ id }) => id));
+  const packet = sourcePacketForItem(entry.item);
+  const validationErrors = parsedSummary.success
+    ? [
+        ...new Set(
+          parsedSummary.data.claims.flatMap((claim) => [
+            ...claim.sourceIds
+              .filter((sourceId) => !sourceIds.has(sourceId))
+              .map((sourceId) =>
+                `UNKNOWN_ITEM_SOURCE:${
+                  encodeURIComponent(sourceId).slice(0, 160)
+                }`
+              ),
+            ...(!claimEvidenceMatchesAllSources(
+              claim.evidenceExcerpt,
+              claim.sourceIds,
+              packet,
+            ) ? ["CLAIM_EVIDENCE_NOT_EXACT"] : []),
+          ]),
+        ),
+      ]
+    : ["SCHEMA_INVALID"];
+  const {
+    valid: _legacyValid,
+    validationErrors: _legacyValidationErrors,
+    ...candidate
+  } = entry;
+  return {
+    ...candidate,
+    valid: validationErrors.length === 0,
+    ...(validationErrors.length === 0 ? {} : { validationErrors }),
+  };
 }
 
 function clamped(value: number): number {
@@ -2949,6 +3035,9 @@ export function createProductionPipelineContext(
             ),
           });
         } catch (error) {
+          if (error instanceof InvalidRequiredProviderDisplayTextError) {
+            continue;
+          }
           if (error instanceof SummaryRejectedError) {
             if (options.store.recordSummaryRejection === undefined) {
               throw new Error("DIAGNOSTIC_STORE_UNAVAILABLE");
@@ -2965,38 +3054,7 @@ export function createProductionPipelineContext(
       }
       return summaries;
     },
-    validate: async (entries) => entries.map((entry) => {
-      const parsedSummary = StructuredSummarySchema.strict().safeParse(
-        entry.summary,
-      );
-      const sourceIds = new Set(entry.item.sourceRefs.map(({ id }) => id));
-      const packet = sourcePacketForItem(entry.item);
-      const validationErrors = parsedSummary.success
-        ? [
-            ...new Set(
-              parsedSummary.data.claims.flatMap((claim) => [
-                ...claim.sourceIds
-                  .filter((sourceId) => !sourceIds.has(sourceId))
-                  .map((sourceId) =>
-                    `UNKNOWN_ITEM_SOURCE:${
-                      encodeURIComponent(sourceId).slice(0, 160)
-                    }`,
-                  ),
-                ...(!claimEvidenceMatchesAllSources(
-                  claim.evidenceExcerpt,
-                  claim.sourceIds,
-                  packet,
-                ) ? ["CLAIM_EVIDENCE_NOT_EXACT"] : []),
-              ]),
-            ),
-          ]
-        : ["SCHEMA_INVALID"];
-      return {
-        ...entry,
-        valid: validationErrors.length === 0,
-        ...(validationErrors.length === 0 ? {} : { validationErrors }),
-      };
-    }),
+    validate: async (entries) => entries.map(validatedSummaryCandidate),
     ...(options.sourceFailures === undefined
       ? {}
       : { sourceFailures: options.sourceFailures }),
@@ -3277,6 +3335,117 @@ function result(
   return { runId, status, missingSections };
 }
 
+function mappedSelectionReasons(
+  item: Item,
+  legacy: boolean,
+): Item {
+  const workflow = WorkflowItemPayloadSchema.safeParse(
+    item.metadata.workflow,
+  );
+  if (!workflow.success || workflow.data.selectionReasons === undefined) {
+    return item;
+  }
+  const normalize = legacy ? normalizeProviderText : boundProviderText;
+  const selectionReasons = workflow.data.selectionReasons.flatMap((reason) => {
+    const prepared = normalize(reason, {
+      stripHtml: true,
+      maxCharacters: 300,
+    });
+    return prepared === null ? [] : [prepared];
+  });
+  return withWorkflowPayload(item, { selectionReasons });
+}
+
+function preparedOperationalSourceNames(item: Item): Item {
+  return ItemSchema.parse({
+    ...item,
+    sourceRefs: item.sourceRefs.map((source) => {
+      const name = boundProviderSourceName(source.name);
+      if (name === null) {
+        throw new InvalidRequiredProviderDisplayTextError("sourceName");
+      }
+      return { ...source, name };
+    }),
+  });
+}
+
+function mappedSummaryCandidates(
+  output: readonly {
+    item: Item;
+    summary: StructuredSummary;
+    [key: string]: unknown;
+  }[],
+  legacy: boolean,
+  revalidate: boolean,
+): Array<{
+  item: Item;
+  summary: StructuredSummary;
+  [key: string]: unknown;
+}> {
+  return output.flatMap((candidate) => {
+    try {
+      const summary = StructuredSummarySchema.safeParse(
+        legacy
+          ? normalizeLegacyStructuredSummaryProviderText(candidate.summary)
+          : prepareCurrentStructuredSummaryProviderText(candidate.summary),
+      );
+      if (!summary.success) return [];
+      const prepared = {
+        ...candidate,
+        item: preparedOperationalSourceNames(candidate.item),
+        summary: summary.data,
+      };
+      return revalidate ? [validatedSummaryCandidate(prepared)] : [prepared];
+    } catch (error) {
+      if (error instanceof InvalidRequiredProviderDisplayTextError) return [];
+      throw error;
+    }
+  });
+}
+
+function presentedCheckpointOutput(
+  step: "shortlist" | "synthesize" | "validate",
+  output: unknown,
+  legacy: boolean,
+): unknown {
+  switch (step) {
+    case "shortlist":
+      return (output as readonly Item[]).flatMap((item) => {
+        try {
+          return [mappedSelectionReasons(
+            preparedOperationalSourceNames(item),
+            legacy,
+          )];
+        } catch (error) {
+          if (error instanceof InvalidRequiredProviderDisplayTextError) {
+            return [];
+          }
+          throw error;
+        }
+      });
+    case "synthesize":
+      return mappedSummaryCandidates(
+        output as readonly {
+          item: Item;
+          summary: StructuredSummary;
+          [key: string]: unknown;
+        }[],
+        legacy,
+        false,
+      );
+    case "validate":
+      return mappedSummaryCandidates(
+        output as readonly {
+          item: Item;
+          summary: StructuredSummary;
+          [key: string]: unknown;
+        }[],
+        legacy,
+        legacy,
+      );
+  }
+}
+
 function normalizedRestoredCheckpointOutput(
   step: PipelineStep,
   output: unknown,
@@ -3351,11 +3520,26 @@ function restoredCheckpointOutput<T>(
   if (
     step !== "compose" && step !== "publish" &&
     artifact.providerTextNormalizationVersion ===
-    PROVIDER_TEXT_NORMALIZATION_VERSION
+    PROVIDER_TEXT_NORMALIZATION_VERSION &&
+    (
+      (step !== "shortlist" && step !== "synthesize" && step !== "validate") ||
+      artifact.providerTextPresentationVersion ===
+        PROVIDER_TEXT_PRESENTATION_VERSION
+    )
   ) {
     return parsed;
   }
-  return schema.parse(normalizedRestoredCheckpointOutput(step, parsed));
+  const normalized = artifact.providerTextNormalizationVersion ===
+      PROVIDER_TEXT_NORMALIZATION_VERSION
+    ? parsed
+    : normalizedRestoredCheckpointOutput(step, parsed);
+  const presented =
+    (step === "shortlist" || step === "synthesize" || step === "validate") &&
+      artifact.providerTextPresentationVersion !==
+        PROVIDER_TEXT_PRESENTATION_VERSION
+      ? presentedCheckpointOutput(step, normalized, true)
+      : normalized;
+  return schema.parse(presented);
 }
 
 function checkpointHasPreparedProviderText(
@@ -3392,6 +3576,10 @@ function checkpointHasNormalizedProviderText(step: PipelineStep): boolean {
 
 function checkpointHasComposedProviderText(step: PipelineStep): boolean {
   return step === "compose" || step === "publish";
+}
+
+function checkpointHasPresentedProviderText(step: PipelineStep): boolean {
+  return step === "shortlist" || step === "synthesize" || step === "validate";
 }
 
 async function currentRun(context: PipelineContext): Promise<PipelineRun> {
@@ -3441,6 +3629,24 @@ async function checkpoint<T>(
           output: restored,
           providerTextCompositionVersion:
             PROVIDER_TEXT_COMPOSITION_VERSION,
+        });
+      }
+      if (
+        checkpointHasPresentedProviderText(step) &&
+        (
+          artifact.providerTextNormalizationVersion !==
+            PROVIDER_TEXT_NORMALIZATION_VERSION ||
+          artifact.providerTextPresentationVersion !==
+            PROVIDER_TEXT_PRESENTATION_VERSION
+        )
+      ) {
+        await context.store.saveCheckpoint(context.runId, step, {
+          ...artifact,
+          output: restored,
+          providerTextNormalizationVersion:
+            PROVIDER_TEXT_NORMALIZATION_VERSION,
+          providerTextPresentationVersion:
+            PROVIDER_TEXT_PRESENTATION_VERSION,
         });
       }
       const storedStepIndex = storedBefore.currentStep === null
@@ -3502,6 +3708,12 @@ async function checkpoint<T>(
         ? {
             providerTextCompositionVersion:
               PROVIDER_TEXT_COMPOSITION_VERSION,
+          }
+        : {}),
+      ...(checkpointHasPresentedProviderText(step)
+        ? {
+            providerTextPresentationVersion:
+              PROVIDER_TEXT_PRESENTATION_VERSION,
           }
         : {}),
     };
@@ -3587,7 +3799,11 @@ async function advanceSelectionStages(
   input = items;
   return checkpoint(
     context, run, "shortlist", ShortlistedItemsSchema,
-    () => context.shortlist(input),
+    async () => presentedCheckpointOutput(
+      "shortlist",
+      await context.shortlist(input),
+      false,
+    ),
   );
 }
 
@@ -3618,11 +3834,19 @@ export async function runEditorialPipeline(
     const shortlisted = await advanceSelectionStages(context, run);
     const synthesized = await checkpoint(
       context, run, "synthesize", SummaryCandidatesSchema,
-      () => context.synthesize(shortlisted),
+      async () => presentedCheckpointOutput(
+        "synthesize",
+        await context.synthesize(shortlisted),
+        false,
+      ),
     );
     const validated = await checkpoint(
       context, run, "validate", ValidatedSummaryCandidatesSchema,
-      () => context.validate(synthesized),
+      async () => presentedCheckpointOutput(
+        "validate",
+        await context.validate(synthesized),
+        false,
+      ),
     );
     const normalizedForComposition = await readCheckpointOutput(
       context,

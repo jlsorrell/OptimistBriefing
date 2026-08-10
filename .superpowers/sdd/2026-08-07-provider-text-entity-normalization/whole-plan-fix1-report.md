@@ -1763,6 +1763,223 @@ and the delayed earlier review's checkpoint-selection defect was reproduced
 RED, repaired, and covered by the 142-test affected Worker run. Worker runs emit
 existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 20
+
+Round 20 owns provider-generated structured-summary prose and durable shortlist
+selection reasons through a dedicated presentation-text artifact lifecycle. It
+also aligns normalized source display names with the stricter source-packet
+contract and closes normalization-marker stage legality. Structural URLs, IDs,
+dates, roles, access levels, citation counts, and claim source IDs remain raw.
+
+### Approved implementation plan
+
+1. Strict RED/GREEN presentation primitive: add a focused structured-summary
+   provider-text test proving generated and repaired model output is normalized
+   once before grounding validation, current prepared output is no-decode and
+   byte-stable, and structural fields are unchanged. Implement the smallest
+   shared summary display mapper and reuse it from composition.
+2. Strict RED/GREEN durable lifecycle: add genuine D1 legacy shortlist,
+   synthesize, and validate artifacts with triple-layer presentation fields.
+   Require an orchestrator-owned `providerTextPresentationVersion: 1` only on
+   those three stages, exact D1 chunk agreement, schema/grounding revalidation,
+   and append-only promotion before the next stage. A failed next stage and
+   fresh retry must select the promotion and must not decode again.
+3. Strict RED/GREEN source-name contract: add raw, stored, and production
+   candidate tests for the control-free 200-character operational limit. Bound
+   long human display names, reject unsafe required names with the existing
+   typed error, isolate only the bad candidate, and prove source packets remain
+   valid while structural fields are unchanged.
+4. Strict RED/GREEN envelope legality: reject item-normalization markers on
+   collect, compose, and publish; reject presentation markers outside shortlist,
+   synthesize, and validate; preserve current artifact round trips and mixed-
+   chunk rejection.
+5. Run focused, affected unit, affected Worker/D1, non-OAuth, typecheck,
+   evaluation, build, diff, trusted-HTML, and structural-normalizer scans.
+   Complete the Round 20 and Task 3 evidence reports, request independent
+   review, address verified findings with RED/GREEN coverage, and stop before
+   the requested single commit.
+
+### RED evidence
+
+The generated-summary boundary was exercised before implementation:
+
+```sh
+npx vitest run tests/unit/editorial/summarize.test.ts -t "normalizes generated summary presentation|normalizes repaired summary presentation"
+```
+
+Result: exit 1; both selected tests failed. The initial generated summary did
+not ground after its encoded presentation fields bypassed preparation, and the
+repair branch ended in `SummaryRejectedError` for the same reason.
+
+The genuine D1 legacy-presentation graph was then exercised before adding its
+artifact lifecycle:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "promotes legacy shortlist presentation|promotes legacy synthesize presentation|revalidates and promotes transformed legacy validate presentation"
+```
+
+Result: exit 1; all three selected tests failed. Shortlist and synthesize
+promotions lacked `providerTextPresentationVersion`; legacy validate reached
+composition with stale validation state instead of being transformed and
+revalidated before advancement.
+
+The source-name contract was exercised at raw normalization and packet
+construction boundaries. Four normalize selections retained a 500-character
+name or accepted unsafe controls; four packet selections either failed their
+authoritative schema or raised an untyped Zod error. The production Worker
+regression initially aborted on the first unsafe candidate rather than
+continuing to its valid sibling. Extending the genuine shortlist-promotion
+fixture to a 500-character current name also failed with the durable value
+unchanged.
+
+Composition source-name reuse was covered before its refactor:
+
+```sh
+npx vitest run tests/unit/workflow/composition-provider-text.test.ts -t "200-character packet contract|unsafe"
+```
+
+Result: exit 1; all four selected cases failed because composition still used
+the prior 500-character generic display bound and accepted NUL, C1, and Unicode
+line-separator controls.
+
+Finally, compose and publish normalization-marker legality was added before the
+parser guard:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "rejects a normalized envelope on a D1 (compose|publish) checkpoint"
+```
+
+Result: exit 1; both public D1 writes resolved instead of rejecting. The
+presentation wrong-stage, mixed-chunk, and current multi-chunk round-trip tests
+were immediate-green characterization of the lifecycle code already driven by
+the three legacy-promotion RED tests.
+
+### Implementation
+
+- Added a shared structured-summary presentation mapper. Generated and repair
+  model objects receive the bounded two-pass provider-text preparation before
+  grounding validation. Legacy checkpoint summaries use that same decode-once
+  mapper; current summaries and composition use its no-extra-decode form.
+- Added the orchestrator-owned `providerTextPresentationVersion: 1` envelope
+  for shortlist, synthesize, and validate only. D1 chunks must agree on the
+  marker. Fresh artifacts are marked after current preparation; unmarked legacy
+  artifacts normalize known presentation fields, schema-reparse, and append a
+  current promotion before the next stage. Current restores return byte-stably.
+- Legacy shortlist selection reasons and synthesize/validate summary title,
+  prose, claims, evidence, and provenance are decoded once and bounded.
+  Transformed validate artifacts recompute validation state, replacing stale
+  `valid` and `validationErrors` values before promotion.
+- Centralized source-name operational safety in `normalizeProviderSourceName`
+  and `boundProviderSourceName`: names are markup-stripped, control-free, and
+  limited to 200 characters. Raw/legacy normalization decodes once; current
+  packet, presentation, and composition boundaries only bind. Invalid names
+  raise `InvalidRequiredProviderDisplayTextError("sourceName")`, allowing
+  production synthesis and durable presentation mapping to isolate one bad
+  candidate without changing URLs, IDs, dates, roles, or access state.
+- Restricted the existing item-normalization envelope to normalize through
+  validate. Collect retains its earlier dedicated rejection; compose and
+  publish now reject the marker at both D1 write and read boundaries.
+
+### GREEN evidence
+
+Focused final-worktree unit command:
+
+```sh
+npx vitest run tests/unit/editorial/summarize.test.ts tests/unit/editorial/normalize.test.ts tests/unit/workflow/source-packet.test.ts tests/unit/workflow/composition-provider-text.test.ts
+```
+
+Result: exit 0; 4 files and all 85 tests passed.
+
+Focused Worker/D1 command:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "isolates a packet-unsafe current source name|promotes legacy shortlist presentation|promotes legacy synthesize presentation|revalidates and promotes transformed legacy validate presentation|rejects a normalized envelope on a D1 (compose|publish) checkpoint|presentation envelope outside|inconsistent presentation envelopes|current presentation envelope through"
+```
+
+Result: exit 0; 1 Worker file and all 9 selected tests passed, with only the
+existing third-party missing-sourcemap warnings.
+
+Final affected suites:
+
+```sh
+npx vitest run tests/unit/editorial tests/unit/workflow tests/unit/sources
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts tests/integration/workflow/resume.test.ts
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+```
+
+Results: exit 0; respectively 22 files/574 tests, 2 Worker files/151 tests,
+and 40 files/803 tests passed. The first full Worker pass found one obsolete
+test assertion still expecting the superseded 500-character source-name bound;
+after changing that expectation to the approved 200-character contract, its
+focused test and the fresh full 151-test rerun passed.
+
+```sh
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results: all exited 0. TypeScript passed; evaluation reported precision@5
+`1.00` against minimum `0.80` with every assertion passing; Vite 7.3.6 built
+53 modules; and the diff contained no whitespace errors. Trusted-HTML and
+targeted structural provider-normalizer misuse scans returned no matches.
+
+### Files changed
+
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/task-3-report.md`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+- `src/editorial/normalize.ts`
+- `src/editorial/summarize.ts`
+- `src/editorial/summary-provider-text.ts`
+- `src/sources/provider-text.ts`
+- `src/workflow/composition-provider-text.ts`
+- `src/workflow/run-editorial-pipeline.ts`
+- `src/workflow/source-packet.ts`
+- `src/workflow/types.ts`
+- `tests/integration/workflow/manual-run.test.ts`
+- `tests/unit/editorial/normalize.test.ts`
+- `tests/unit/editorial/summarize.test.ts`
+- `tests/unit/workflow/composition-provider-text.test.ts`
+- `tests/unit/workflow/source-packet.test.ts`
+
+### Commit
+
+One new commit is authorized after independent review. Stop before commit and
+report review status first.
+
+### Self-review
+
+- Provider data cannot self-assert the presentation lifecycle: its marker is
+  artifact-envelope state, accepted only at three legal stages and required to
+  agree across every chunk. Normalization, preparation, and composition marker
+  semantics remain distinct.
+- Generated prose is prepared before the first and repair grounding checks.
+  Legacy presentation is decoded only when its marker is missing; current
+  preparation uses no entity decode. Append-only promotion precedes advancement
+  so a failed next stage cannot decode the same artifact again.
+- Legacy validate transformation is not allowed to retain stale success. It
+  reparses the summary and recomputes claim/source validation against the
+  prepared item before writing the current artifact.
+- The shared 200-character source-name contract now covers raw Item mapping,
+  nested restored research, source packets, shortlist/synthesis persistence,
+  and composition. Typed isolation is exercised through the real production
+  synthesis loop; composition fails closed because it cannot safely drop an
+  edition source reference.
+- Triple-layer presentation fixtures preserve one inert residual entity after
+  the authorized decode, while current artifacts containing that literal text
+  remain byte-stable. Structural URLs, IDs, dates, roles, access levels, claim
+  source IDs, and arbitrary structural metadata are asserted unchanged.
+- No deployment, migration, historical-row update/delete, OAuth change,
+  recursive metadata sanitizer, trusted-HTML insertion, or history rewrite was
+  performed.
+
+### Concerns
+
+None. The fresh independent pre-commit review found no Critical, Important, or
+Minor issues and returned `Ready to commit`. Worker runs emit only the existing
+third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 12
 
 Round 12 closes the aggregate metadata contamination gap left by the Round 11

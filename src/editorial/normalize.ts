@@ -21,6 +21,7 @@ import {
 } from "../sources/types";
 import {
   normalizeProviderText,
+  normalizeProviderSourceName,
   preparedProviderSignalText,
 } from "../sources/provider-text";
 import {
@@ -187,10 +188,12 @@ function requiredPreparedProviderDisplayText(
   value: string,
   field: RequiredProviderDisplayTextField,
 ): string {
-  const normalized = normalizeProviderText(value, {
-    stripHtml: true,
-    maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
-  });
+  const normalized = field === "sourceName"
+    ? normalizeProviderSourceName(value)
+    : normalizeProviderText(value, {
+        stripHtml: true,
+        maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+      });
   if (normalized === null) {
     throw new InvalidRequiredProviderDisplayTextError(field);
   }

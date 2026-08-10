@@ -99,4 +99,28 @@ describe("composition provider-text lifecycle", () => {
       composition("&lt;br&gt;"),
     )).toThrow("INVALID_REQUIRED_PROVIDER_DISPLAY_TEXT:sourceName");
   });
+
+  it("bounds composition source names to the shared 200-character packet contract", () => {
+    const legacy = composition("S".repeat(500));
+
+    const prepared = normalizeLegacyCompositionProviderText(legacy);
+
+    expect(prepared.entries[0]?.sourceRefs[0]?.name).toBe("S".repeat(200));
+    expect(prepared.entries[0]?.sourceRefs[0]).toMatchObject({
+      id: "source-structural-id",
+      url: "https://example.com/report?cursor=a%26amp%3Bb",
+      role: "reporting",
+      retrievedAt: now,
+    });
+    expect(prepareCurrentCompositionProviderText(prepared)).toEqual(prepared);
+  });
+
+  it.each(["\u0000", "\u0085", "\u2029"])(
+    "rejects a composition source name containing unsafe %s",
+    (control) => {
+      expect(() => normalizeLegacyCompositionProviderText(
+        composition(`Unsafe${control}Source`),
+      )).toThrow("INVALID_REQUIRED_PROVIDER_DISPLAY_TEXT:sourceName");
+    },
+  );
 });

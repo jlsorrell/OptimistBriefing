@@ -1,8 +1,13 @@
 import type { Item } from "../contracts/editorial";
 import type { NewsDevelopment } from "../editorial/cluster";
 import type { SourcePacket } from "../editorial/validate-summary";
+import { InvalidRequiredProviderDisplayTextError } from
+  "../editorial/normalize";
 import { WorkflowItemPayloadSchema } from "./types";
-import { truncateProviderTextAtCodePointBoundary } from "../sources/provider-text";
+import {
+  boundProviderSourceName,
+  truncateProviderTextAtCodePointBoundary,
+} from "../sources/provider-text";
 
 type SourceDocument = SourcePacket["sources"][number];
 
@@ -27,6 +32,14 @@ function sanitizedPacketText(value: string | undefined, maximum: number): string
 
 function firstPacketText(...values: readonly string[]): string {
   return values.find((value) => value.length > 0) ?? "";
+}
+
+function packetSourceName(value: string): string {
+  const prepared = boundProviderSourceName(value);
+  if (prepared === null) {
+    throw new InvalidRequiredProviderDisplayTextError("sourceName");
+  }
+  return prepared;
 }
 
 function stringSet(value: unknown): ReadonlySet<string> {
@@ -86,7 +99,7 @@ function sourceDocumentForItem(item: Item): SourcePacket {
     const itemTitle = sanitizedPacketText(item.title, 500);
     sources.set(source.id, {
       sourceId: source.id,
-      sourceName: source.name,
+      sourceName: packetSourceName(source.name),
       evidenceKind: researchItem
         ? primaryResearchSourceIds.has(source.id)
           ? "primary-research"
@@ -136,7 +149,7 @@ function sourceDocumentsForDevelopment(
       };
       grouped.set(source.id, {
         sourceId: source.id,
-        sourceName: source.name,
+        sourceName: packetSourceName(source.name),
         evidenceKind: "news-evidence",
         role: source.role,
         title: sanitizedPacketText(developmentItem.title, 500),

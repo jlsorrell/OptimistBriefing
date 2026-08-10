@@ -107,6 +107,47 @@ describe("research normalization", () => {
     expect(normalized.normalizedText).toBe("Compatibility ’ evidence");
   });
 
+  it("bounds normalized source display names to the packet-safe 200-character contract", () => {
+    // Removing the operational source-name bound must make a normalized Item
+    // incompatible with SourcePacketSchema later in the production pipeline.
+    const originalUrl =
+      "https://example.com/source-name-bound?cursor=a%26amp%3Bb";
+
+    const normalized = normalizeCandidate(candidate({
+      sourceName: "N".repeat(500),
+      originalUrl,
+    }));
+
+    expect(normalized.sourceRefs[0]?.name).toBe("N".repeat(200));
+    expect(normalized.sourceRefs[0]).toMatchObject({
+      id: "arxiv",
+      url: originalUrl,
+      role: "primary",
+      retrievedAt: "2026-08-02T09:00:00.000Z",
+    });
+  });
+
+  it.each(["\u0000", "\u0085", "\u2028"])(
+    "rejects a source display name containing packet-unsafe %s data with the typed candidate error",
+    (unsafe) => {
+      let observed: unknown;
+      try {
+        normalizeCandidate(candidate({
+          sourceName: `Unsafe${unsafe}Source`,
+        }));
+      } catch (error) {
+        observed = error;
+      }
+
+      expect(observed).toBeInstanceOf(
+        InvalidRequiredProviderDisplayTextError,
+      );
+      expect(
+        (observed as InvalidRequiredProviderDisplayTextError).field,
+      ).toBe("sourceName");
+    },
+  );
+
   it("decodes and strips encoded wrappers from provider display and evidence", () => {
     const originalUrl =
       "https://custom.example/research?label=%26lt%3Bbr%26gt%3B";

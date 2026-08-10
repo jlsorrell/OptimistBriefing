@@ -24,6 +24,7 @@ import {
   PROVIDER_TEXT_COMPOSITION_VERSION,
   PROVIDER_TEXT_NORMALIZATION_VERSION,
   PROVIDER_TEXT_PREPARATION_VERSION,
+  PROVIDER_TEXT_PRESENTATION_VERSION,
   type CheckpointArtifact,
   type CompositionResult,
 } from "../../../src/workflow/types";
@@ -145,6 +146,135 @@ function fixtureSummary(item: Item): StructuredSummary {
     }],
     accessLevel: "abstract",
   };
+}
+
+function presentationResearchItem(
+  selectionReason = "Reason &amp;amp;#8217; display",
+): Item {
+  const rawResearch = rawResearchCandidate(
+    "2608.presentation",
+    "Presentation &#8217; title",
+  );
+  const item = fixtureItem("presentation-research", "research");
+  return ItemSchema.parse({
+    ...item,
+    title: "Presentation &#8217; title",
+    normalizedText: [
+      "Presentation &#8217; claim evidence supports the result.",
+      "Presentation &#8217; importance is documented.",
+      "Presentation &#8217; uncertainty remains.",
+    ].join(" "),
+    sourceRefs: [{
+      id: "presentation-source",
+      name: "Presentation Source",
+      url: "https://example.com/presentation?cursor=a%26amp%3Bb",
+      role: "primary",
+      retrievedAt: now,
+    }],
+    metadata: {
+      section: "research",
+      primaryResearchSourceIds: ["presentation-source"],
+      workflow: {
+        version: 1,
+        rawResearch,
+        topicalFit: 0.9,
+        assessment: {
+          technicalQuality: 0.9,
+          novelty: 0.8,
+          strengths: ["Concrete method."],
+          limitations: ["Limited sample."],
+          rationale: "The evidence supports assessment.",
+          accessLevel: "abstract",
+        },
+        researchScore: {
+          itemId: item.id,
+          topicalFit: 0.9,
+          technicalQuality: 0.9,
+          researchSignal: 0.8,
+          novelty: 0.8,
+          seriousAttention: 0.7,
+          total: 0.84,
+          selectionReasons: ["System score reason."],
+        },
+        section: "research",
+        selectionReasons: [selectionReason],
+      },
+    },
+  });
+}
+
+function legacyPresentationSummary(
+  sourceId = "presentation-source",
+): StructuredSummary {
+  return {
+    title: "Presentation &amp;amp;#8217; title",
+    oneSentence:
+      "Presentation &amp;amp;#8217; claim evidence supports the result.",
+    whyItMatters:
+      "Presentation &amp;amp;#8217; importance is documented.",
+    uncertainty:
+      "Presentation &amp;amp;#8217; uncertainty remains.",
+    claims: [{
+      text:
+        "Presentation &amp;amp;#8217; claim evidence supports the result.",
+      sourceIds: [sourceId],
+      evidenceExcerpt:
+        "Presentation &amp;amp;#8217; claim evidence supports the result.",
+    }],
+    accessLevel: "abstract",
+  };
+}
+
+async function seedD1CheckpointsBefore(
+  store: PipelineStore,
+  runId: string,
+  target: (typeof PIPELINE_STEPS)[number],
+  outputs: Readonly<Partial<Record<(typeof PIPELINE_STEPS)[number], unknown>>> = {},
+): Promise<void> {
+  for (const step of PIPELINE_STEPS.slice(0, PIPELINE_STEPS.indexOf(target))) {
+    const output = outputs[step] ?? [];
+    await store.saveCheckpoint(runId, step, {
+      output,
+      attempts: 1,
+      durationMs: 0,
+      itemCount: Array.isArray(output) ? output.length : 1,
+      estimatedCostUsd: 0,
+      ...(step === "collect"
+        ? {}
+        : {
+            providerTextNormalizationVersion:
+              PROVIDER_TEXT_NORMALIZATION_VERSION,
+          }),
+    });
+  }
+}
+
+async function insertLegacyD1Checkpoint(
+  runId: string,
+  step: (typeof PIPELINE_STEPS)[number],
+  output: unknown,
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO audit_events (
+      id, run_id, event_type, event_json, created_at
+    ) VALUES (?, ?, 'workflow_checkpoint', ?, ?)`,
+  ).bind(
+    `legacy-presentation:${runId}:${step}`,
+    runId,
+    JSON.stringify({
+      step,
+      artifact: {
+        output,
+        attempts: 1,
+        durationMs: 0,
+        itemCount: Array.isArray(output) ? output.length : 1,
+        estimatedCostUsd: 0,
+        providerTextNormalizationVersion:
+          PROVIDER_TEXT_NORMALIZATION_VERSION,
+      },
+    }),
+    now,
+  ).run();
 }
 
 function compositionCheckpointFixture(
@@ -1113,6 +1243,62 @@ describe("manual editorial run", () => {
       });
     },
   );
+
+  it("isolates a packet-unsafe current source name during synthesis and continues with its valid sibling", async () => {
+    // Removing the typed synthesize catch must turn the first candidate's
+    // packet boundary into a whole-stage failure before the valid candidate.
+    const encoded = presentationResearchItem("Prepared system reason.");
+    const valid = ItemSchema.parse({
+      ...encoded,
+      title: "Presentation ’ title",
+      normalizedText: [
+        "Presentation ’ claim evidence supports the result.",
+        "Presentation ’ importance is documented.",
+        "Presentation ’ uncertainty remains.",
+      ].join(" "),
+    });
+    const unsafe = ItemSchema.parse({
+      ...valid,
+      id: "presentation-unsafe-source",
+      sourceRefs: valid.sourceRefs.map((source) => ({
+        ...source,
+        name: "Unsafe\u0000Source",
+      })),
+    });
+    const summaryProvider = new GroundedProductionProvider();
+    summaryProvider.failNextSummary = false;
+    const rejectionErrors: string[][] = [];
+    const store = new FixtureStore() as FixtureStore & {
+      recordSummaryRejection: NonNullable<PipelineStore["recordSummaryRejection"]>;
+    };
+    store.recordSummaryRejection = async (_runId, _itemId, event) => {
+      rejectionErrors.push([...event.errors]);
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2034-06-04",
+      runId: "run-isolate-unsafe-packet-source-name",
+      store,
+      now: () => now,
+      providers: {
+        summary: summaryProvider,
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    const summaries = await context.synthesize([unsafe, valid]);
+
+    expect(rejectionErrors).toEqual([]);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.item.id).toBe(valid.id);
+    expect(summaries[0]?.item.sourceRefs[0]).toMatchObject({
+      id: "presentation-source",
+      url: "https://example.com/presentation?cursor=a%26amp%3Bb",
+      retrievedAt: now,
+      role: "primary",
+    });
+    expect(summaryProvider.generateRequests).toHaveLength(1);
+  });
 
   it("strips encoded wrappers from stored display and evidence without decoding URLs", async () => {
     const fixture = fixtureItem("stored-useful-markup", "world");
@@ -2600,6 +2786,218 @@ describe("manual editorial run", () => {
     );
   });
 
+  it("promotes legacy shortlist presentation before a failed synthesize and restores it byte-stably", async () => {
+    const runId = "run-legacy-shortlist-presentation";
+    const editionDate = "2034-06-01";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "running",
+      currentStep: "shortlist",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    await seedD1CheckpointsBefore(store, runId, "shortlist");
+    const legacyShortlist = presentationResearchItem();
+    await insertLegacyD1Checkpoint(runId, "shortlist", [ItemSchema.parse({
+      ...legacyShortlist,
+      sourceRefs: legacyShortlist.sourceRefs.map((source) => ({
+        ...source,
+        name: "S".repeat(500),
+      })),
+    })]);
+    const observed: Item[][] = [];
+    const context: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store,
+      synthesize: async (items) => {
+        observed.push(structuredClone([...items]));
+        throw new Error("STOP_AFTER_SHORTLIST_PRESENTATION");
+      },
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_SHORTLIST_PRESENTATION",
+    );
+
+    const promoted = await store.readArtifact(runId, "shortlist") as
+      CheckpointArtifact<Item[]> & {
+        providerTextPresentationVersion?: number;
+      };
+    const promotedWorkflow = promoted.output[0]?.metadata.workflow as {
+      selectionReasons?: string[];
+    };
+    expect(promoted.providerTextPresentationVersion).toBe(1);
+    expect(promotedWorkflow.selectionReasons).toEqual([
+      "Reason &#8217; display",
+    ]);
+    expect(promoted.output[0]?.sourceRefs[0]?.name).toBe("S".repeat(200));
+    expect(promoted.output[0]?.sourceRefs[0]).toMatchObject({
+      id: "presentation-source",
+      url: "https://example.com/presentation?cursor=a%26amp%3Bb",
+      retrievedAt: now,
+      role: "primary",
+    });
+    const stablePromotion = structuredClone(promoted);
+    const rowCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') = 'shortlist'`,
+    ).bind(runId).first<{ count: number }>();
+    expect(rowCount).toEqual({ count: 2 });
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_SHORTLIST_PRESENTATION",
+    );
+    expect(observed).toHaveLength(2);
+    expect(observed[1]).toEqual(observed[0]);
+    await expect(store.readArtifact(runId, "shortlist")).resolves.toEqual(
+      stablePromotion,
+    );
+  });
+
+  it("promotes legacy synthesize presentation before failed validation and restores it byte-stably", async () => {
+    const runId = "run-legacy-synthesize-presentation";
+    const editionDate = "2034-06-02";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    await seedD1CheckpointsBefore(store, runId, "synthesize");
+    const item = presentationResearchItem("Prepared system reason.");
+    await insertLegacyD1Checkpoint(runId, "synthesize", [{
+      item,
+      summary: legacyPresentationSummary(),
+    }]);
+    const observed: StructuredSummary[][] = [];
+    const context: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store,
+      validate: async (entries) => {
+        observed.push(entries.map(({ summary }) => structuredClone(summary)));
+        throw new Error("STOP_AFTER_SYNTHESIZE_PRESENTATION");
+      },
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_SYNTHESIZE_PRESENTATION",
+    );
+
+    const promoted = await store.readArtifact(runId, "synthesize") as
+      CheckpointArtifact<Array<{ item: Item; summary: StructuredSummary }>> & {
+        providerTextPresentationVersion?: number;
+      };
+    expect(promoted.providerTextPresentationVersion).toBe(1);
+    expect(promoted.output[0]?.summary).toMatchObject({
+      title: "Presentation &#8217; title",
+      oneSentence:
+        "Presentation &#8217; claim evidence supports the result.",
+      claims: [{
+        text: "Presentation &#8217; claim evidence supports the result.",
+        sourceIds: ["presentation-source"],
+        evidenceExcerpt:
+          "Presentation &#8217; claim evidence supports the result.",
+      }],
+      accessLevel: "abstract",
+    });
+    const stablePromotion = structuredClone(promoted);
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_SYNTHESIZE_PRESENTATION",
+    );
+    expect(observed).toHaveLength(2);
+    expect(observed[1]).toEqual(observed[0]);
+    await expect(store.readArtifact(runId, "synthesize")).resolves.toEqual(
+      stablePromotion,
+    );
+  });
+
+  it("revalidates and promotes transformed legacy validate presentation before compose", async () => {
+    const runId = "run-legacy-validate-presentation";
+    const editionDate = "2034-06-03";
+    const store = createD1PipelineStore(env.DB);
+    const item = presentationResearchItem("Prepared system reason.");
+    await seedD1Items([item]);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "running",
+      currentStep: "validate",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    await seedD1CheckpointsBefore(store, runId, "validate", {
+      normalize: [item],
+    });
+    await insertLegacyD1Checkpoint(runId, "validate", [{
+      item,
+      summary: legacyPresentationSummary("unknown-source"),
+      valid: true,
+    }]);
+    store.persistEdition = async () => {
+      throw new Error("STOP_AFTER_VALIDATE_PRESENTATION");
+    };
+    const context: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store,
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_VALIDATE_PRESENTATION",
+    );
+
+    const promoted = await store.readArtifact(runId, "validate") as
+      CheckpointArtifact<Array<{
+        item: Item;
+        summary: StructuredSummary;
+        valid: boolean;
+        validationErrors?: string[];
+      }>> & { providerTextPresentationVersion?: number };
+    expect(promoted.providerTextPresentationVersion).toBe(1);
+    expect(promoted.output[0]).toMatchObject({
+      summary: {
+        title: "Presentation &#8217; title",
+        claims: [{
+          sourceIds: ["unknown-source"],
+          evidenceExcerpt:
+            "Presentation &#8217; claim evidence supports the result.",
+        }],
+        accessLevel: "abstract",
+      },
+      valid: false,
+      validationErrors: expect.arrayContaining([
+        "UNKNOWN_ITEM_SOURCE:unknown-source",
+        "CLAIM_EVIDENCE_NOT_EXACT",
+      ]),
+    });
+    const stablePromotion = structuredClone(promoted);
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_VALIDATE_PRESENTATION",
+    );
+    await expect(store.readArtifact(runId, "validate")).resolves.toEqual(
+      stablePromotion,
+    );
+  });
+
   it("promotes a legacy D1 compose before a failed publish and restores it byte-stably", async () => {
     const runId = "run-legacy-compose-promotion";
     const editionDate = "2034-05-02";
@@ -3329,11 +3727,11 @@ describe("manual editorial run", () => {
     }).rawResearch;
 
     expect(item!.title).toHaveLength(500);
-    expect(item!.sourceRefs[0]!.name).toHaveLength(500);
+    expect(item!.sourceRefs[0]!.name).toHaveLength(200);
     expect(item!.metadata.authors).toEqual(["ffi".repeat(166) + "ff"]);
     expect(item!.metadata.institutions).toEqual(["ffi".repeat(166) + "ff"]);
     expect(rawResearch.title).toHaveLength(500);
-    expect(rawResearch.sourceName).toHaveLength(500);
+    expect(rawResearch.sourceName).toHaveLength(200);
     expect(rawResearch.authors[0]).toHaveLength(500);
     expect(rawResearch.institutions[0]).toHaveLength(500);
     expect(rawResearch.preferredInstitutionMatches[0]).toHaveLength(500);
@@ -4880,6 +5278,53 @@ describe("manual editorial run", () => {
     expect(await store.readArtifact(runId, "collect")).toBeNull();
   });
 
+  it.each(["compose", "publish"] as const)(
+    "rejects a normalized envelope on a D1 %s checkpoint at write and read boundaries",
+    async (step) => {
+      const runId = `run-d1-reject-normalized-${step}`;
+      const editionDate = step === "compose" ? "2034-03-04" : "2034-03-05";
+      const store = createD1PipelineStore(env.DB);
+      await store.createRun({
+        id: runId,
+        editionDate,
+        status: "running",
+        currentStep: step,
+        retryable: false,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+        failureCode: null,
+      });
+      const artifact: CheckpointArtifact<CompositionResult> = {
+        output: compositionCheckpointFixture(runId, editionDate),
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 1,
+        estimatedCostUsd: 0,
+        providerTextNormalizationVersion:
+          PROVIDER_TEXT_NORMALIZATION_VERSION,
+      };
+
+      await expect(store.saveCheckpoint(runId, step, artifact)).rejects.toThrow(
+        "Compose and publish checkpoint artifacts cannot be marked provider-text normalized.",
+      );
+      await env.DB.prepare(
+        `INSERT INTO audit_events (
+          id, run_id, event_type, event_json, created_at
+        ) VALUES (?, ?, 'workflow_checkpoint', ?, ?)`,
+      ).bind(
+        `invalid-normalized-${step}`,
+        runId,
+        JSON.stringify({ step, artifact }),
+        now,
+      ).run();
+      await expect(store.readArtifact(runId, step)).rejects.toThrow(
+        `INVALID_CHECKPOINT_ARTIFACT:${step}`,
+      );
+    },
+  );
+
   it("rejects D1 checkpoint chunks with inconsistent normalization envelopes", async () => {
     const runId = "run-d1-mixed-normalization-chunks";
     const store = createD1PipelineStore(env.DB);
@@ -4936,6 +5381,156 @@ describe("manual editorial run", () => {
       "INVALID_CHECKPOINT_CHUNKS:normalize",
     );
   });
+
+  it("rejects a presentation envelope outside shortlist through validate", async () => {
+    const runId = "run-d1-reject-presentation-normalize";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-03-06",
+      status: "running",
+      currentStep: "normalize",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+
+    await expect(store.saveCheckpoint(runId, "normalize", {
+      output: [fixtureItem("invalid-presentation-stage", "world")],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 1,
+      estimatedCostUsd: 0,
+      providerTextNormalizationVersion:
+        PROVIDER_TEXT_NORMALIZATION_VERSION,
+      providerTextPresentationVersion:
+        PROVIDER_TEXT_PRESENTATION_VERSION,
+    })).rejects.toThrow(
+      "Only shortlist, synthesize, and validate checkpoint artifacts can be marked provider-text presented.",
+    );
+  });
+
+  it("rejects D1 checkpoint chunks with inconsistent presentation envelopes", async () => {
+    const runId = "run-d1-mixed-presentation-chunks";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-03-07",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const checkpointId = "mixed-presentation-envelope";
+    const events = ["a", "b"].map((suffix, chunkIndex) => JSON.stringify({
+      step: "synthesize",
+      checkpointId,
+      chunkIndex,
+      chunkCount: 2,
+      artifact: {
+        output: [{
+          item: {
+            ...presentationResearchItem("Prepared system reason."),
+            id: `mixed-presentation-${suffix}`,
+          },
+          summary: legacyPresentationSummary(),
+        }],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 2,
+        estimatedCostUsd: 0,
+        providerTextNormalizationVersion:
+          PROVIDER_TEXT_NORMALIZATION_VERSION,
+        ...(chunkIndex === 0
+          ? {}
+          : {
+              providerTextPresentationVersion:
+                PROVIDER_TEXT_PRESENTATION_VERSION,
+            }),
+      },
+    }));
+    await env.DB.batch(events.map((eventJson, chunkIndex) =>
+      env.DB.prepare(
+        `INSERT INTO audit_events (
+          id, run_id, event_type, event_json, created_at
+        ) VALUES (?, ?, 'workflow_checkpoint', ?, ?)`,
+      ).bind(`${checkpointId}:${chunkIndex}`, runId, eventJson, now)
+    ));
+
+    await expect(store.readArtifact(runId, "synthesize")).rejects.toThrow(
+      "INVALID_CHECKPOINT_CHUNKS:synthesize",
+    );
+  });
+
+  it("round trips a current presentation envelope through D1 checkpoint chunks", async () => {
+    const runId = "run-d1-current-presentation-chunks";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-03-08",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const output = Array.from({ length: 2 }, (_, index) => ({
+      item: ItemSchema.parse({
+        ...presentationResearchItem("Current &#8217; reason."),
+        id: `current-presentation-${index}`,
+        metadata: {
+          ...presentationResearchItem().metadata,
+          chunkPadding: "é".repeat(600_000),
+        },
+      }),
+      summary: legacyPresentationSummary(),
+    }));
+    const artifact: CheckpointArtifact<typeof output> = {
+      output,
+      attempts: 1,
+      durationMs: 25,
+      itemCount: output.length,
+      estimatedCostUsd: 0.25,
+      providerTextNormalizationVersion:
+        PROVIDER_TEXT_NORMALIZATION_VERSION,
+      providerTextPresentationVersion:
+        PROVIDER_TEXT_PRESENTATION_VERSION,
+    };
+
+    await store.saveCheckpoint(runId, "synthesize", artifact);
+
+    const rows = await env.DB.prepare(
+      `SELECT event_json
+       FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'`,
+    ).bind(runId).all<{ event_json: string }>();
+    expect(rows.results.length).toBeGreaterThan(1);
+    expect(rows.results.every(({ event_json: eventJson }) => {
+      const stored = (JSON.parse(eventJson) as {
+        artifact?: {
+          providerTextNormalizationVersion?: unknown;
+          providerTextPresentationVersion?: unknown;
+        };
+      }).artifact;
+      return stored?.providerTextNormalizationVersion ===
+          PROVIDER_TEXT_NORMALIZATION_VERSION &&
+        stored.providerTextPresentationVersion ===
+          PROVIDER_TEXT_PRESENTATION_VERSION;
+    })).toBe(true);
+    await expect(store.readArtifact(runId, "synthesize")).resolves.toEqual(
+      artifact,
+    );
+  }, 30_000);
 
   it("round trips a current normalization envelope through D1 checkpoint chunks", async () => {
     const runId = "run-d1-current-normalization-chunks";

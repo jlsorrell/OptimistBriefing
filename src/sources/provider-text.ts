@@ -1,4 +1,5 @@
 export const MAX_PROVIDER_TEXT_INPUT_CHARACTERS = 100_000;
+export const MAX_PROVIDER_SOURCE_NAME_CHARACTERS = 200;
 const MAX_ENTITY_DECODE_PASSES = 2;
 const ENTITY = /&(?:#([0-9]{1,7})|#x([0-9a-f]{1,6})|([a-z]{2,8}));/gi;
 const RESIDUAL_ENCODED_ANGLE =
@@ -6,6 +7,8 @@ const RESIDUAL_ENCODED_ANGLE =
 const RESIDUAL_ENCODED_OPEN_ANGLE =
   /^&(?:lt|#0{0,5}60|#0{0,2}65308|#x0{0,4}3c|#x0{0,2}ff1c);$/i;
 const PROVIDER_SIGNAL_WHITESPACE = /\s/u;
+const UNSAFE_SINGLE_LINE_TEXT =
+  /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
 const NAMED = new Map<string, string>([
   ["amp", "&"], ["quot", "\""], ["apos", "'"],
   ["lt", "<"], ["gt", ">"], ["nbsp", " "],
@@ -212,6 +215,32 @@ export function normalizeProviderText(
   options: ProviderTextOptions = {},
 ): string | null {
   return normalizeProviderTextDetailed(value, options).value;
+}
+
+function packetSafeSourceName(
+  value: string | null | undefined,
+  normalize: (value: string, options: ProviderTextOptions) => string | null,
+): string | null {
+  if (value == null || UNSAFE_SINGLE_LINE_TEXT.test(value)) return null;
+  const prepared = normalize(value, {
+    stripHtml: true,
+    maxCharacters: MAX_PROVIDER_SOURCE_NAME_CHARACTERS,
+  });
+  return prepared === null || UNSAFE_SINGLE_LINE_TEXT.test(prepared)
+    ? null
+    : prepared;
+}
+
+export function normalizeProviderSourceName(
+  value: string | null | undefined,
+): string | null {
+  return packetSafeSourceName(value, normalizeProviderText);
+}
+
+export function boundProviderSourceName(
+  value: string | null | undefined,
+): string | null {
+  return packetSafeSourceName(value, boundProviderText);
 }
 
 export function normalizedProviderSignalText(

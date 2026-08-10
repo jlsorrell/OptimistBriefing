@@ -44,6 +44,72 @@ const packet: SourcePacket = {
   ],
 };
 
+const entityPacket: SourcePacket = {
+  itemKind: "article",
+  sources: [{
+    sourceId: "source-entity",
+    sourceName: "Example &#83;ource",
+    evidenceKind: "news-evidence",
+    role: "reporting",
+    title: "A measured &#8217; outcome improved",
+    url: "https://example.com/entity-report?cursor=a%26amp%3Bb",
+    retrievedAt: "2026-07-29T09:00:00.000Z",
+    accessLevel: "full_text",
+    excerpts: [{
+      number: 1,
+      text: [
+        "The measured &#8217; outcome improved during the trial.",
+        "The result may improve an &#8217; important outcome.",
+        "The durability of the &#8217; result remains uncertain.",
+      ].join(" "),
+    }],
+  }],
+};
+
+function encodedGeneratedSummary(
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> {
+  return {
+    title: "A measured &amp;amp;#8217; outcome improved",
+    oneSentence:
+      "The measured &amp;amp;#8217; outcome improved during the trial.",
+    whyItMatters:
+      "The result may improve an &amp;amp;#8217; important outcome.",
+    uncertainty:
+      "The durability of the &amp;amp;#8217; result remains uncertain.",
+    claims: [{
+      text:
+        "The measured &amp;amp;#8217; outcome improved during the trial.",
+      sourceIds: ["source-entity"],
+      evidenceExcerpt:
+        "measured &amp;amp;#8217; outcome improved during the trial",
+    }],
+    accessLevel: "full_text",
+    provenance: {
+      title: {
+        sourceIds: ["source-entity"],
+        evidenceExcerpt: "A measured &amp;amp;#8217; outcome improved",
+      },
+      oneSentence: {
+        sourceIds: ["source-entity"],
+        evidenceExcerpt:
+          "The measured &amp;amp;#8217; outcome improved during the trial.",
+      },
+      whyItMatters: {
+        sourceIds: ["source-entity"],
+        evidenceExcerpt:
+          "The result may improve an &amp;amp;#8217; important outcome.",
+      },
+      uncertainty: {
+        sourceIds: ["source-entity"],
+        evidenceExcerpt:
+          "The durability of the &amp;amp;#8217; result remains uncertain.",
+      },
+    },
+    ...overrides,
+  };
+}
+
 function validSummary(
   overrides: Partial<StructuredSummary> = {},
 ): StructuredSummary {
@@ -267,6 +333,65 @@ describe("summary rejection repair diagnostics", () => {
 });
 
 describe("summarizeItem", () => {
+  it("normalizes generated summary presentation once before grounding validation", async () => {
+    // Removing the generated-summary provider boundary must leave the encoded
+    // prose ungrounded and fail this real validation path.
+    const provider = new FakeModelProvider({
+      generatedObjects: [encodedGeneratedSummary()],
+    });
+
+    await expect(summarizeItem(entityPacket, provider)).resolves.toEqual({
+      title: "A measured &#8217; outcome improved",
+      oneSentence:
+        "The measured &#8217; outcome improved during the trial.",
+      whyItMatters:
+        "The result may improve an &#8217; important outcome.",
+      uncertainty:
+        "The durability of the &#8217; result remains uncertain.",
+      claims: [{
+        text: "The measured &#8217; outcome improved during the trial.",
+        sourceIds: ["source-entity"],
+        evidenceExcerpt:
+          "measured &#8217; outcome improved during the trial",
+      }],
+      accessLevel: "full_text",
+    });
+    expect(entityPacket.sources[0]).toMatchObject({
+      sourceId: "source-entity",
+      sourceName: "Example &#83;ource",
+      url: "https://example.com/entity-report?cursor=a%26amp%3Bb",
+      retrievedAt: "2026-07-29T09:00:00.000Z",
+      accessLevel: "full_text",
+    });
+  });
+
+  it("normalizes repaired summary presentation once before accepting grounding", async () => {
+    // Removing normalization from the repair branch must reject the encoded
+    // repair even though its prepared text exactly matches the source packet.
+    const provider = new FakeModelProvider({
+      generatedObjects: [
+        encodedGeneratedSummary({
+          claims: [{
+            text: "Unsupported claim",
+            sourceIds: ["unknown-source"],
+            evidenceExcerpt: "Unsupported claim",
+          }],
+        }),
+        encodedGeneratedSummary(),
+      ],
+    });
+
+    const repaired = await summarizeItem(entityPacket, provider);
+
+    expect(repaired.title).toBe("A measured &#8217; outcome improved");
+    expect(repaired.claims[0]).toEqual({
+      text: "The measured &#8217; outcome improved during the trial.",
+      sourceIds: ["source-entity"],
+      evidenceExcerpt: "measured &#8217; outcome improved during the trial",
+    });
+    expect(provider.generateRequests).toHaveLength(2);
+  });
+
   it("returns a grounded structured summary without a repair call", async () => {
     const provider = new FakeModelProvider({
       generatedObjects: [generatedSummary()],
