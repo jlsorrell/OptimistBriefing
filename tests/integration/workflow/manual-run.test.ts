@@ -71,6 +71,8 @@ import type {
   RawPublicationCandidate,
   RawResearchCandidate,
 } from "../../../src/sources/types";
+import type { ProviderSchedulerRuntime } from
+  "../../../src/sources/provider-scheduler";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv {
@@ -79,6 +81,16 @@ declare module "cloudflare:test" {
 }
 
 const now = "2026-07-30T09:00:00.000Z";
+
+function logicalProviderSchedulerRuntime(): ProviderSchedulerRuntime {
+  let currentTime = 0;
+  return {
+    now: () => currentTime,
+    sleep: async (milliseconds) => {
+      currentTime += milliseconds;
+    },
+  };
+}
 
 function fixturePreferences(
   overrides: Partial<Pick<
@@ -7718,6 +7730,7 @@ describe("manual editorial run", () => {
       const runId = "run-production-research-prepared-contract";
       const editionDate = "2034-05-01";
       const store = createD1PipelineStore(env.DB);
+      const schedulerRuntime = logicalProviderSchedulerRuntime();
       const firstContext = createD1ProductionPipelineContext(
         store,
         editionDate,
@@ -7726,6 +7739,7 @@ describe("manual editorial run", () => {
           summary: new FakeModelProvider(),
           assessment: new FakeModelProvider(),
         },
+        { schedulerRuntime },
       );
       firstContext.enrich = async () => {
         throw new Error("STOP_AFTER_PRODUCTION_NORMALIZE");
@@ -7734,6 +7748,7 @@ describe("manual editorial run", () => {
       await expect(runEditorialPipeline(firstContext)).rejects.toThrow(
         "STOP_AFTER_PRODUCTION_NORMALIZE",
       );
+      expect(schedulerRuntime.now()).toBe(5_000);
 
       const collectArtifact = await store.readArtifact(runId, "collect") as
         CheckpointArtifact<RawResearchCandidate[]>;
@@ -7963,6 +7978,7 @@ describe("manual editorial run", () => {
     vi.stubGlobal("fetch", sourceFetch);
     try {
       const firstStore = createD1PipelineStore(env.DB);
+      const schedulerRuntime = logicalProviderSchedulerRuntime();
       const firstContext = createD1ProductionPipelineContext(
         firstStore,
         "2033-02-08",
@@ -7981,12 +7997,16 @@ describe("manual editorial run", () => {
             }],
           }),
         },
-        { openAlexApiKey: "fixture-openalex-key" },
+        {
+          openAlexApiKey: "fixture-openalex-key",
+          schedulerRuntime,
+        },
       );
 
       await expect(runEditorialPipeline(firstContext)).rejects.toThrow(
         "TRANSIENT_SUMMARY_FAILURE",
       );
+      expect(schedulerRuntime.now()).toBe(5_000);
       const fetchCallsAfterCollect = sourceFetch.mock.calls.length;
       expect(await firstStore.readCollectionSourceFailures(
         "run-fail-open-production",

@@ -246,6 +246,143 @@ describe("ResearchCollector", () => {
     expect(maximumActive).toBe(1);
   });
 
+  it("keeps a Semantic Scholar Retry-After retry inside its scheduled lane", async () => {
+    const baseTime = Date.parse("2026-07-29T08:30:00.000Z");
+    let currentTime = 0;
+    const schedulerSleep = vi.fn(async (milliseconds: number) => {
+      currentTime += milliseconds;
+    });
+    const httpSleep = vi.fn(async (milliseconds: number) => {
+      currentTime += milliseconds;
+    });
+    let activeLanes = 0;
+    let maximumActiveLanes = 0;
+    const completedLanes: string[] = [];
+    const requestEvents: Array<{
+      laneId: string;
+      activeLanes: number;
+      time: number;
+    }> = [];
+    const privateThrottleBody = "private Semantic Scholar throttle body";
+    const laneUrls = new Map([
+      [
+        "semantic-scholar:01-retry",
+        "https://api.semanticscholar.org/graph/v1/paper/retry-lane?token=private-retry-token",
+      ],
+      [
+        "semantic-scholar:02-healthy",
+        "https://api.semanticscholar.org/graph/v1/paper/healthy-lane?token=private-healthy-token",
+      ],
+    ]);
+    let retryLaneAttempts = 0;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const laneId = url.includes("retry-lane")
+        ? "semantic-scholar:01-retry"
+        : "semantic-scholar:02-healthy";
+      requestEvents.push({ laneId, activeLanes, time: currentTime });
+      if (laneId === "semantic-scholar:01-retry") {
+        retryLaneAttempts += 1;
+        if (retryLaneAttempts === 1) {
+          return new Response(privateThrottleBody, {
+            status: 429,
+            headers: { "retry-after": "2" },
+          });
+        }
+      }
+      return new Response("ok");
+    });
+    const http = new SourceHttpClient({
+      fetch,
+      sleep: httpSleep,
+      now: () => new Date(baseTime + currentTime),
+      maxRetries: 1,
+    });
+    const adapters = [...laneUrls].map(([laneId, url]) => ({
+      sourceId: "semantic-scholar",
+      laneId,
+      discoveryFamily: "bibliographic" as const,
+      collect: async () => {
+        activeLanes += 1;
+        maximumActiveLanes = Math.max(maximumActiveLanes, activeLanes);
+        try {
+          await http.get(semanticScholarSource, url);
+          completedLanes.push(laneId);
+          return [];
+        } finally {
+          activeLanes -= 1;
+        }
+      },
+    }));
+    const collector = new ResearchCollector({
+      discoveryAdapters: adapters,
+      enrichers: [],
+      preferredInstitutions: [],
+      schedulerRuntime: {
+        now: () => currentTime,
+        sleep: schedulerSleep,
+      },
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(requestEvents).toEqual([
+      {
+        laneId: "semantic-scholar:01-retry",
+        activeLanes: 1,
+        time: 0,
+      },
+      {
+        laneId: "semantic-scholar:01-retry",
+        activeLanes: 1,
+        time: 2_000,
+      },
+      {
+        laneId: "semantic-scholar:02-healthy",
+        activeLanes: 1,
+        time: 2_000,
+      },
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(httpSleep).toHaveBeenCalledTimes(1);
+    expect(httpSleep).toHaveBeenCalledWith(2_000);
+    expect(schedulerSleep).not.toHaveBeenCalled();
+    expect(maximumActiveLanes).toBe(1);
+    expect(completedLanes).toEqual([
+      "semantic-scholar:01-retry",
+      "semantic-scholar:02-healthy",
+    ]);
+    expect(result.discoveryDiagnostics).toEqual([
+      {
+        laneId: "semantic-scholar:01-retry",
+        sourceId: "semantic-scholar",
+        discoveryFamily: "bibliographic",
+        discovered: 0,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        rejectionCounts: {},
+        outcome: "success",
+      },
+      {
+        laneId: "semantic-scholar:02-healthy",
+        sourceId: "semantic-scholar",
+        discoveryFamily: "bibliographic",
+        discovered: 0,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        rejectionCounts: {},
+        outcome: "success",
+      },
+    ]);
+    const serializedDiagnostics = JSON.stringify(result.discoveryDiagnostics);
+    expect(serializedDiagnostics).not.toContain(privateThrottleBody);
+    for (const url of laneUrls.values()) {
+      expect(serializedDiagnostics).not.toContain(url);
+    }
+  });
+
   it("runs each provider group concurrently", async () => {
     let releaseSemanticScholar: (() => void) | undefined;
     let semanticScholarSettled = false;

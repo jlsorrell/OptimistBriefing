@@ -88,6 +88,8 @@ import { createPaperDiscoveryAdapters } from "../sources/paper-discovery";
 import { SemanticScholarAdapter } from "../sources/semantic-scholar";
 import { OpenAlexAdapter } from "../sources/openalex";
 import { ResearchCollector } from "../sources/research-collector";
+import type { ProviderSchedulerRuntime } from
+  "../sources/provider-scheduler";
 import {
   boundProviderSourceName,
   boundProviderText,
@@ -1101,6 +1103,7 @@ export type ProductionPipelineContextOptions = {
   checkpointExecutor?: PipelineContext["checkpointExecutor"];
   budgetPolicy?: BudgetPolicy;
   openAlexApiKey?: string;
+  schedulerRuntime?: ProviderSchedulerRuntime;
   cleanupTerminalReservations?: PipelineContext["cleanupTerminalReservations"];
   researchRepository?: Pick<
     BriefingRepository,
@@ -3102,6 +3105,7 @@ export function createD1ProductionPipelineContext(
     | "checkpointExecutor"
     | "budgetPolicy"
     | "openAlexApiKey"
+    | "schedulerRuntime"
     | "preferences"
     | "cleanupTerminalReservations"
   > = {},
@@ -3167,6 +3171,9 @@ export function createD1ProductionPipelineContext(
         ],
         preferredInstitutions: READER_PROFILE.preferredInstitutions,
         preferredLabs: READER_PROFILE.preferredLabs,
+        ...(options.schedulerRuntime === undefined
+          ? {}
+          : { schedulerRuntime: options.schedulerRuntime }),
       });
       const to = now();
       const reconsiderationFrom = new Date(
