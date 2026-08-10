@@ -20,6 +20,7 @@ function item(
   primaryTopic: string,
   kind: Item["kind"] = "paper",
   metadata: Record<string, unknown> = {},
+  normalizedText = `Text ${id}`,
 ): Item {
   const section =
     typeof metadata.section === "string" ? metadata.section : null;
@@ -41,7 +42,7 @@ function item(
     accessLevel: "abstract",
     primaryTopic,
     tags: [primaryTopic],
-    normalizedText: `Text ${id}`,
+    normalizedText,
     metadata:
       kind === "paper" || kind === "blog" || section === null
         ? metadata
@@ -53,6 +54,10 @@ function item(
     createdAt: NOW,
     expiresAt: null,
   };
+}
+
+function itemWithText(id: string, text: string): Item {
+  return item(id, "alignment-interpretability", "paper", {}, text);
 }
 
 function development(itemValue: Item): NewsDevelopment {
@@ -118,6 +123,209 @@ const budgets: SectionBudgets = {
 };
 
 describe("shortlist", () => {
+  it("selects a lower-scoring core paper before a higher-scoring adjacent paper", () => {
+    const core = item(
+      "core",
+      "alignment-interpretability",
+      "paper",
+      {},
+      "Capability elicitation for hidden language-model abilities",
+    );
+    const adjacent = item(
+      "adjacent",
+      "alignment-interpretability",
+      "paper",
+      {},
+      "Expert perspectives on AI safety and ethics",
+    );
+    const result = shortlist(
+      [adjacent, core],
+      [
+        researchScore(adjacent.id, 0.99),
+        researchScore(core.id, 0.75),
+      ],
+      preferences,
+      { ...budgets, featuredResearch: 1 },
+    );
+
+    expect(result.researchFeatured.map(({ id }) => id)).toEqual([
+      core.id,
+    ]);
+  });
+
+  it("fills unused featured capacity with the best adjacent papers", () => {
+    const candidates = [
+      itemWithText(
+        "core",
+        "Capability elicitation for hidden model abilities",
+      ),
+      itemWithText("adjacent-high", "A broad framework for AI safety"),
+      itemWithText("adjacent-low", "Expert perspectives on AI ethics"),
+    ];
+    const result = shortlist(
+      candidates,
+      [
+        researchScore("core", 0.7),
+        researchScore("adjacent-high", 0.95),
+        researchScore("adjacent-low", 0.8),
+      ],
+      preferences,
+      budgets,
+    );
+
+    expect(result.researchFeatured.map(({ id }) => id)).toEqual([
+      "core",
+      "adjacent-high",
+      "adjacent-low",
+    ]);
+  });
+
+  it("excludes a higher-scoring adjacent paper when three core papers fill featured", () => {
+    const candidates = [
+      itemWithText("core-high", "Debate-based oversight for language models"),
+      itemWithText(
+        "core-mid",
+        "Capability elicitation for hidden model abilities",
+      ),
+      itemWithText("core-low", "Mechanistic interpretability for transformers"),
+      itemWithText("adjacent", "A broad framework for AI safety"),
+    ];
+    const result = shortlist(
+      candidates,
+      [
+        researchScore("core-high", 0.9),
+        researchScore("core-mid", 0.8),
+        researchScore("core-low", 0.7),
+        researchScore("adjacent", 0.99),
+      ],
+      preferences,
+      { ...budgets, featuredResearch: 99 },
+    );
+
+    expect(result.researchFeatured.map(({ id }) => id)).toEqual([
+      "core-high",
+      "core-mid",
+      "core-low",
+    ]);
+    expect(result.researchRadar.map(({ id }) => id)).toEqual([
+      "adjacent",
+    ]);
+  });
+
+  it("preserves configured-topic diversity within the core tier", () => {
+    const candidates = [
+      itemWithText(
+        "alignment-high",
+        "Mechanistic interpretability for transformers",
+      ),
+      itemWithText(
+        "alignment-mid",
+        "Capability elicitation for hidden model abilities",
+      ),
+      item(
+        "governance",
+        "oversight-governance",
+        "paper",
+        {},
+        "A secure evaluation framework for frontier models",
+      ),
+    ];
+    const result = shortlist(
+      candidates,
+      [
+        researchScore("alignment-high", 0.99),
+        researchScore("alignment-mid", 0.98),
+        researchScore("governance", 0.7),
+      ],
+      preferences,
+      { ...budgets, featuredResearch: 2 },
+    );
+
+    expect(result.researchFeatured.map(({ id }) => id)).toEqual([
+      "alignment-high",
+      "governance",
+    ]);
+  });
+
+  it("keeps core-first featured ordering deterministic for reversed inputs", () => {
+    const candidates = [
+      itemWithText("core-b", "Mechanistic interpretability for transformers"),
+      itemWithText("adjacent", "A broad framework for AI safety"),
+      itemWithText(
+        "core-a",
+        "Capability elicitation for hidden model abilities",
+      ),
+    ];
+    const scores = [
+      researchScore("core-b", 0.8),
+      researchScore("adjacent", 0.99),
+      researchScore("core-a", 0.8),
+    ];
+
+    const forward = shortlist(candidates, scores, preferences, {
+      ...budgets,
+      featuredResearch: 2,
+    });
+    const reverse = shortlist(
+      [...candidates].reverse(),
+      [...scores].reverse(),
+      preferences,
+      { ...budgets, featuredResearch: 2 },
+    );
+
+    expect(forward.researchFeatured.map(({ id }) => id)).toEqual([
+      "core-a",
+      "core-b",
+    ]);
+    expect(reverse.researchFeatured).toEqual(forward.researchFeatured);
+  });
+
+  it("returns empty featured and radar sections for an empty qualified research pool", () => {
+    const result = shortlist([], [], preferences, budgets);
+
+    expect(result.researchFeatured).toEqual([]);
+    expect(result.researchRadar).toEqual([]);
+  });
+
+  it("keeps topical-fit and technical-quality exclusions ahead of core and adjacent selection", () => {
+    const weakCore = itemWithText(
+      "weak-core",
+      "Capability elicitation for hidden model abilities",
+    );
+    const weakAdjacent = itemWithText(
+      "weak-adjacent",
+      "A broad framework for AI safety",
+    );
+    const result = shortlist(
+      [weakCore, weakAdjacent],
+      [
+        {
+          ...researchScore(weakCore.id, 0.9),
+          topicalFit: 0.49,
+        },
+        {
+          ...researchScore(weakAdjacent.id, 0.9),
+          technicalQuality: 0.49,
+        },
+      ],
+      preferences,
+      budgets,
+    );
+
+    expect(result.researchFeatured).toEqual([]);
+    expect(result.researchRadar).toEqual([]);
+    expect(result.exclusions).toEqual([
+      {
+        itemId: weakAdjacent.id,
+        reason: "below_technical_quality_gate",
+      },
+      {
+        itemId: weakCore.id,
+        reason: "below_topical_fit_gate",
+      },
+    ]);
+  });
+
   it("reserves shortlist space for distinct configured topics", () => {
     const items = [
       item("interpretability-1", "alignment-interpretability"),

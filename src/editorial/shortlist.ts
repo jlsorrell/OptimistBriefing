@@ -11,6 +11,7 @@ import {
   type NewsDevelopment,
 } from "./cluster";
 import { NewsScoreSchema, type NewsScore } from "./news-score";
+import { classifyResearchRelevance } from "./research-relevance";
 
 export type SectionBudgets = {
   morningBrief: number;
@@ -188,6 +189,30 @@ function diverseResearch(
   return [...selected.values()].sort(researchScoreOrder);
 }
 
+function featuredResearch(
+  ranked: readonly RankedResearch[],
+  configuredTopics: readonly string[],
+  maximum: number,
+): RankedResearch[] {
+  const core = ranked.filter(
+    ({ item }) => classifyResearchRelevance(item) === "core",
+  );
+  const adjacent = ranked.filter(
+    ({ item }) => classifyResearchRelevance(item) === "adjacent",
+  );
+  const selectedCore = diverseResearch(core, configuredTopics, maximum);
+  const selectedIds = new Set(
+    selectedCore.map(({ item }) => item.id),
+  );
+  const remaining = Math.max(0, maximum - selectedCore.length);
+  const selectedAdjacent = diverseResearch(
+    adjacent.filter(({ item }) => !selectedIds.has(item.id)),
+    configuredTopics,
+    remaining,
+  );
+  return [...selectedCore, ...selectedAdjacent];
+}
+
 type NewsSection =
   | "world"
   | "technology"
@@ -356,7 +381,7 @@ export function shortlist(
   const featuredCandidates = research.filter(
     ({ item }) => item.kind === "paper",
   );
-  const featured = diverseResearch(
+  const featured = featuredResearch(
     featuredCandidates,
     preferences.researchTopics,
     budgets.featuredResearch,
