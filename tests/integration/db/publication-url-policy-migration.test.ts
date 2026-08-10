@@ -144,6 +144,91 @@ describe("publication URL policy migration", () => {
       });
   });
 
+  it("preserves custom same-host split restrictions", async () => {
+    await applyD1Migrations(env.UPGRADE_DB, PRE_0011);
+    const mit = await source("mit-research", env.UPGRADE_DB);
+    const customFeedUrlPolicy = {
+      allowedHosts: ["news.mit.edu"],
+      allowedPorts: ["8443"],
+      allowedPathPrefixes: ["/operator-feed/"],
+    };
+    const customArticleUrlPolicy = {
+      allowedHosts: ["news.mit.edu"],
+      allowedPorts: ["8444"],
+      allowedPathPrefixes: ["/operator-articles/"],
+    };
+    await env.UPGRADE_DB.prepare(
+      "UPDATE sources SET restrictions_json = ? WHERE id = ?",
+    ).bind(
+      JSON.stringify({
+        ...mit.restrictions,
+        feedUrlPolicy: customFeedUrlPolicy,
+        articleUrlPolicy: customArticleUrlPolicy,
+      }),
+      "mit-research",
+    ).run();
+
+    await applyD1Migrations(env.UPGRADE_DB, [requiredMigration(MIGRATION_NAME)]);
+
+    expect((await source("mit-research", env.UPGRADE_DB)).restrictions)
+      .toMatchObject({
+        urlPolicy: mit.restrictions.urlPolicy,
+        feedUrlPolicy: customFeedUrlPolicy,
+        articleUrlPolicy: customArticleUrlPolicy,
+      });
+  });
+
+  it("fills only missing split policy fields from the legacy policy", async () => {
+    await applyD1Migrations(env.UPGRADE_DB, PRE_0011);
+    const mit = await source("mit-research", env.UPGRADE_DB);
+    const lessWrong = await source("lesswrong-curated", env.UPGRADE_DB);
+    const customFeedUrlPolicy = {
+      allowedHosts: ["news.mit.edu"],
+      allowedPorts: ["8443"],
+      allowedPathPrefixes: ["/operator-feed/"],
+    };
+    const customArticleUrlPolicy = {
+      allowedHosts: ["www.lesswrong.com"],
+      allowedPorts: ["8444"],
+      allowedPathPrefixes: ["/operator-articles/"],
+    };
+    await env.UPGRADE_DB.batch([
+      env.UPGRADE_DB.prepare(
+        "UPDATE sources SET restrictions_json = ? WHERE id = ?",
+      ).bind(
+        JSON.stringify({
+          ...mit.restrictions,
+          feedUrlPolicy: customFeedUrlPolicy,
+        }),
+        "mit-research",
+      ),
+      env.UPGRADE_DB.prepare(
+        "UPDATE sources SET restrictions_json = ? WHERE id = ?",
+      ).bind(
+        JSON.stringify({
+          ...lessWrong.restrictions,
+          articleUrlPolicy: customArticleUrlPolicy,
+        }),
+        "lesswrong-curated",
+      ),
+    ]);
+
+    await applyD1Migrations(env.UPGRADE_DB, [requiredMigration(MIGRATION_NAME)]);
+
+    expect((await source("mit-research", env.UPGRADE_DB)).restrictions)
+      .toMatchObject({
+        urlPolicy: mit.restrictions.urlPolicy,
+        feedUrlPolicy: customFeedUrlPolicy,
+        articleUrlPolicy: mit.restrictions.urlPolicy,
+      });
+    expect((await source("lesswrong-curated", env.UPGRADE_DB)).restrictions)
+      .toMatchObject({
+        urlPolicy: lessWrong.restrictions.urlPolicy,
+        feedUrlPolicy: lessWrong.restrictions.urlPolicy,
+        articleUrlPolicy: customArticleUrlPolicy,
+      });
+  });
+
   it("is idempotent after applying split policies", async () => {
     await applyD1Migrations(env.UPGRADE_DB, PRE_0011);
     const migration = requiredMigration(MIGRATION_NAME);
