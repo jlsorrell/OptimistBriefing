@@ -25,6 +25,10 @@ import {
   SEMANTIC_SCHOLAR_SEED_SET_V1,
 } from "../../../src/sources/paper-discovery";
 import { ResearchCollector } from "../../../src/sources/research-collector";
+import {
+  isPreparedRawCandidate,
+  rebrandPreparedResearchCandidateAfterSchemaClone,
+} from "../../../src/editorial/normalize";
 import { RssAdapter } from "../../../src/sources/rss";
 import { SemanticScholarAdapter } from "../../../src/sources/semantic-scholar";
 import type {
@@ -33,6 +37,7 @@ import type {
   RawItem,
   ResearchSourceRecord,
 } from "../../../src/sources/types";
+import { RawResearchCandidateSchema } from "../../../src/sources/types";
 
 const fixturePath = (name: string) =>
   fileURLToPath(new URL(`../../fixtures/${name}`, import.meta.url));
@@ -244,6 +249,40 @@ describe("ResearchCollector", () => {
     expect(result.candidates[0]?.preferredInstitutionMatches).toEqual([
       "Stanford",
     ]);
+  });
+
+  it("rebrands only a schema-cloned prepared research candidate without decoding it again", async () => {
+    const collector = new ResearchCollector({
+      discoveryAdapters: [{
+        sourceId: "arxiv",
+        collect: async () => [{
+          ...rawPaper(),
+          title: "Research &amp;amp;#8217; identity",
+          institutions: [
+            "&amp;#83;tanford",
+            "Institute &amp;amp;#8217; Lab",
+          ],
+        }],
+      }],
+      enrichers: [],
+      preferredInstitutions: ["Stanford"],
+    });
+    const result = await collector.collect(fixedWindow());
+    const prepared = result.candidates[0]!;
+    const schemaClone = RawResearchCandidateSchema.parse(prepared);
+
+    expect(isPreparedRawCandidate(prepared)).toBe(true);
+    expect(isPreparedRawCandidate(schemaClone)).toBe(false);
+    const rebranded = rebrandPreparedResearchCandidateAfterSchemaClone(
+      schemaClone,
+    );
+    expect(rebranded).toEqual(expect.objectContaining({
+      title: "Research &#8217; identity",
+      institutions: ["Stanford", "Institute &#8217; Lab"],
+      preferredInstitutionMatches: ["Stanford"],
+    }));
+    expect(isPreparedRawCandidate(rebranded)).toBe(true);
+    expect(isPreparedRawCandidate(schemaClone)).toBe(false);
   });
 
   it("runs three targeted arXiv lanes and merges repeated paper identities", async () => {

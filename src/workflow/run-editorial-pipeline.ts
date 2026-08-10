@@ -1,5 +1,9 @@
 import { composeEdition } from "./compose-edition";
 import { publishEdition } from "./publish-edition";
+import {
+  normalizeLegacyCompositionProviderText,
+  prepareCurrentCompositionProviderText,
+} from "./composition-provider-text";
 import { D1BriefingRepository } from "../db/d1-repository";
 import {
   approvedBaselinePreferences,
@@ -24,6 +28,7 @@ import {
   normalizePreparedTitleKey,
   normalizePreparedCandidate,
   prepareRawCandidateForPipeline,
+  rebrandPreparedResearchCandidateAfterSchemaClone,
   type RequiredProviderDisplayTextField,
 } from "../editorial/normalize";
 import { deriveNewsSignals } from "../sources/news-signals";
@@ -124,6 +129,7 @@ import type {
 } from "../contracts/editorial";
 import {
   PIPELINE_STEPS,
+  PROVIDER_TEXT_COMPOSITION_VERSION,
   PROVIDER_TEXT_NORMALIZATION_VERSION,
   PROVIDER_TEXT_PREPARATION_VERSION,
   CollectedCandidateSchema,
@@ -417,6 +423,7 @@ const ARTIFACT_KEYS = new Set([
   "estimatedCostUsd",
   "providerTextNormalizationVersion",
   "providerTextPreparationVersion",
+  "providerTextCompositionVersion",
 ]);
 const REQUIRED_ARTIFACT_KEYS = [
   "output",
@@ -453,6 +460,12 @@ function parseCheckpointArtifact(
       : z.literal(PROVIDER_TEXT_PREPARATION_VERSION).parse(
           record.providerTextPreparationVersion,
         );
+  const providerTextCompositionVersion =
+    record.providerTextCompositionVersion === undefined
+      ? undefined
+      : z.literal(PROVIDER_TEXT_COMPOSITION_VERSION).parse(
+          record.providerTextCompositionVersion,
+        );
   if (step === "collect" && providerTextNormalizationVersion !== undefined) {
     throw new TypeError(
       "Collect checkpoint artifacts cannot be marked provider-text normalized.",
@@ -461,6 +474,14 @@ function parseCheckpointArtifact(
   if (step !== "collect" && providerTextPreparationVersion !== undefined) {
     throw new TypeError(
       "Only collect checkpoint artifacts can be marked provider-text prepared.",
+    );
+  }
+  if (
+    step !== "compose" && step !== "publish" &&
+    providerTextCompositionVersion !== undefined
+  ) {
+    throw new TypeError(
+      "Only compose and publish checkpoint artifacts can be marked provider-text composed.",
     );
   }
   return {
@@ -475,6 +496,9 @@ function parseCheckpointArtifact(
     ...(providerTextPreparationVersion === undefined
       ? {}
       : { providerTextPreparationVersion }),
+    ...(providerTextCompositionVersion === undefined
+      ? {}
+      : { providerTextCompositionVersion }),
   };
 }
 
@@ -831,16 +855,17 @@ export class D1PipelineStore implements PipelineStore {
          AND event_type = ?
          AND json_valid(event_json) = 1
          AND json_extract(event_json, '$.step') = ?
-       ORDER BY created_at DESC, id DESC`,
+       ORDER BY rowid DESC`,
     ).bind(
       runId,
       "workflow_checkpoint",
       step,
     ).all<{ event_json: string }>();
-    const groups = new Map<string, {
+    let selectedCheckpointId: string | null = null;
+    let selectedGroup: {
       chunkCount: number;
       chunks: Map<number, unknown>;
-    }>();
+    } | null = null;
     for (const record of records.results) {
       let parsed: Record<string, unknown>;
       try {
@@ -855,10 +880,18 @@ export class D1PipelineStore implements PipelineStore {
       if (parsed.step !== step) continue;
       const chunk = checkpointChunkRecord(parsed);
       if (chunk !== null) {
-        const group = groups.get(chunk.checkpointId) ?? {
-          chunkCount: chunk.chunkCount,
-          chunks: new Map<number, unknown>(),
-        };
+        if (selectedCheckpointId === null) {
+          selectedCheckpointId = chunk.checkpointId;
+          selectedGroup = {
+            chunkCount: chunk.chunkCount,
+            chunks: new Map<number, unknown>(),
+          };
+        }
+        if (chunk.checkpointId !== selectedCheckpointId) continue;
+        const group = selectedGroup;
+        if (group === null) {
+          throw new Error(`INVALID_CHECKPOINT_CHUNKS:${step}`);
+        }
         if (
           group.chunkCount !== chunk.chunkCount ||
           group.chunks.has(chunk.chunkIndex)
@@ -866,9 +899,9 @@ export class D1PipelineStore implements PipelineStore {
           throw new Error(`INVALID_CHECKPOINT_CHUNKS:${step}`);
         }
         group.chunks.set(chunk.chunkIndex, chunk.artifact);
-        groups.set(chunk.checkpointId, group);
         continue;
       }
+      if (selectedCheckpointId !== null) continue;
       try {
         return parseCheckpointArtifact(step, parsed.artifact);
       } catch (error) {
@@ -877,7 +910,8 @@ export class D1PipelineStore implements PipelineStore {
         });
       }
     }
-    for (const group of groups.values()) {
+    if (selectedGroup !== null) {
+      const group = selectedGroup;
       if (group.chunks.size !== group.chunkCount) {
         throw new Error(`INCOMPLETE_CHECKPOINT_CHUNKS:${step}`);
       }
@@ -905,7 +939,9 @@ export class D1PipelineStore implements PipelineStore {
             artifact.providerTextNormalizationVersion !==
               first.providerTextNormalizationVersion ||
             artifact.providerTextPreparationVersion !==
-              first.providerTextPreparationVersion,
+              first.providerTextPreparationVersion ||
+            artifact.providerTextCompositionVersion !==
+              first.providerTextCompositionVersion,
         )
       ) {
         throw new Error(`INVALID_CHECKPOINT_CHUNKS:${step}`);
@@ -3128,7 +3164,7 @@ export function createD1ProductionPipelineContext(
       await store.saveCollectionSourceFailures(runId, sourceFailures);
       const candidates = [
         ...research.candidates.map((candidate) =>
-          RawResearchCandidateSchema.parse(candidate),
+          rebrandPreparedResearchCandidateAfterSchemaClone(candidate),
         ),
         ...news.candidates.map((candidate) =>
           RawNewsCandidateSchema.parse(candidate),
@@ -3279,7 +3315,11 @@ function normalizedRestoredCheckpointOutput(
       });
     case "compose":
     case "publish":
-      return output;
+      return CompositionSchema.parse(
+        normalizeLegacyCompositionProviderText(
+          output as z.infer<typeof CompositionSchema>,
+        ),
+      );
   }
 }
 
@@ -3289,6 +3329,13 @@ function restoredCheckpointOutput<T>(
   artifact: CheckpointArtifact<unknown>,
 ): T {
   const parsed = schema.parse(artifact.output);
+  if (
+    (step === "compose" || step === "publish") &&
+    artifact.providerTextCompositionVersion ===
+      PROVIDER_TEXT_COMPOSITION_VERSION
+  ) {
+    return parsed;
+  }
   if (
     step === "collect" &&
     artifact.providerTextPreparationVersion ===
@@ -3302,6 +3349,7 @@ function restoredCheckpointOutput<T>(
     ) as T;
   }
   if (
+    step !== "compose" && step !== "publish" &&
     artifact.providerTextNormalizationVersion ===
     PROVIDER_TEXT_NORMALIZATION_VERSION
   ) {
@@ -3342,6 +3390,10 @@ function checkpointHasNormalizedProviderText(step: PipelineStep): boolean {
   }
 }
 
+function checkpointHasComposedProviderText(step: PipelineStep): boolean {
+  return step === "compose" || step === "publish";
+}
+
 async function currentRun(context: PipelineContext): Promise<PipelineRun> {
   const existing = await context.store.getRun(context.runId);
   if (existing !== null) return existing;
@@ -3378,6 +3430,19 @@ async function checkpoint<T>(
     if (completed) {
       const artifact = await context.store.readArtifact(context.runId, step);
       if (artifact === null) throw new Error(`MISSING_CHECKPOINT_ARTIFACT:${step}`);
+      const restored = restoredCheckpointOutput(step, outputSchema, artifact);
+      if (
+        (step === "compose" || step === "publish") &&
+        artifact.providerTextCompositionVersion !==
+          PROVIDER_TEXT_COMPOSITION_VERSION
+      ) {
+        await context.store.saveCheckpoint(context.runId, step, {
+          ...artifact,
+          output: restored,
+          providerTextCompositionVersion:
+            PROVIDER_TEXT_COMPOSITION_VERSION,
+        });
+      }
       const storedStepIndex = storedBefore.currentStep === null
         ? -1
         : PIPELINE_STEPS.indexOf(storedBefore.currentStep);
@@ -3393,7 +3458,7 @@ async function checkpoint<T>(
           failureCode: null,
         });
       }
-      return restoredCheckpointOutput(step, outputSchema, artifact);
+      return restored;
     }
     const attempt = await context.store.beginAttempt(context.runId, step);
     const startedAt = Date.parse(context.now());
@@ -3431,6 +3496,12 @@ async function checkpoint<T>(
         ? {
             providerTextPreparationVersion:
               PROVIDER_TEXT_PREPARATION_VERSION,
+          }
+        : {}),
+      ...(checkpointHasComposedProviderText(step)
+        ? {
+            providerTextCompositionVersion:
+              PROVIDER_TEXT_COMPOSITION_VERSION,
           }
         : {}),
     };
@@ -3563,10 +3634,12 @@ export async function runEditorialPipeline(
       : boundedSourceFailureMetadata(await context.loadSourceFailures());
     const composition = await checkpoint(
       context, run, "compose", CompositionSchema,
-      () => composeEdition(
-        { ...context, sourceFailures: durableSourceFailures },
-        validated,
-        normalizedForComposition,
+      async () => prepareCurrentCompositionProviderText(
+        await composeEdition(
+          { ...context, sourceFailures: durableSourceFailures },
+          validated,
+          normalizedForComposition,
+        ),
       ),
     );
     await checkpoint(

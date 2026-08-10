@@ -15,6 +15,8 @@ import {
   ScopedNewsMaterialFactSchema,
   RawItemSchema,
   RawPublicationCandidateSchema,
+  RawResearchCandidateSchema,
+  type RawResearchCandidate,
   type ScopedNewsMaterialFact,
 } from "../sources/types";
 import {
@@ -152,6 +154,12 @@ export function markPreparedRawCandidate<T extends object>(
     enumerable: false,
   });
   return value as T & PreparedRawCandidate;
+}
+
+export function rebrandPreparedResearchCandidateAfterSchemaClone(
+  value: unknown,
+): RawResearchCandidate & PreparedRawCandidate {
+  return markPreparedRawCandidate(RawResearchCandidateSchema.parse(value));
 }
 
 function preparedDisplay(value: string): string {

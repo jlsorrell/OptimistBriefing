@@ -1547,6 +1547,222 @@ written.
 
 - None. Worker runs emit existing third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 19
+
+Round 19 repairs two lifecycle seams found by the definitive v8 review: the
+trusted D1 production assembly currently erases `ResearchCollector`'s private
+prepared-candidate brand, and compose/publish checkpoints have no durable
+provider-text composition lifecycle marker. The round preserves provider data,
+structural fields, historical audit rows, and all prior envelope semantics.
+
+### Design and implementation plan
+
+Root-cause tracing established that `ResearchCollector.collect()` prepares its
+display fields, computes preferred-institution matches from that prepared copy,
+and returns a privately Symbol-branded candidate. The D1 production assembly
+then clones it through `RawResearchCandidateSchema.parse`, which necessarily
+drops the non-enumerable Symbol. The general production collector sees an
+ordinary unbranded clone and correctly prepares it a second time.
+
+Three designs were considered. The approved, lowest-risk design adds a narrow
+internal `rebrandPreparedResearchCandidateAfterSchemaClone` boundary helper.
+It schema-validates a research clone and reapplies the private brand without
+decoding; only the trusted D1 assembly calls it for `ResearchCollector` output.
+Changing `ResearchCollector` to return raw candidates while using a private
+prepared copy for matching was rejected because it would change the established
+collector contract and require projecting prepared matching results back onto
+raw display fields. An enumerable candidate marker was rejected because
+provider data could self-assert it.
+
+Compose/publish will receive an optional orchestrator-owned
+`providerTextCompositionVersion` on the checkpoint artifact envelope, never in
+provider or composition output. Parsing will permit it only for compose and
+publish and D1 chunk reconstruction will require exact agreement. Fresh compose
+output will pass the current no-extra display preparation/revalidation boundary
+before its envelope is marked. A legacy compose/publish artifact with no marker
+will normalize only known human display fields in memory, preserve structural
+IDs/URLs/dates/access/citations, revalidate the full composition, and append a
+current-version promotion before publication. Existing audit rows are never
+updated or deleted. A failed publication followed by a fresh retry will restore
+the promoted current artifact byte-for-byte instead of decoding again.
+
+The work is split into two independent strict TDD cycles:
+
+1. Add a production-context/D1 ResearchCollector regression that observes the
+   collector result, durable collect checkpoint, normalization, preferred
+   Stanford match, stable identity/title, structural invariants, and a second
+   current collect restore. Observe failure caused by the missing trusted
+   rebrand, implement only the narrow helper/call site, then turn the test green.
+2. Add D1 regressions for a legacy compose followed by a failed publish and
+   fresh retry, current compose/publish version round trips, chunk consistency,
+   and invalid required source-name isolation. Observe RED, implement the
+   envelope/parser/restoration/promotion and display-field lifecycle boundary,
+   then turn the focused tests green.
+3. Run sandbox-safe focused, affected, Worker, non-OAuth, type, evaluation,
+   build, and diff gates; request independent review; append exact evidence,
+   source audit, self-review, and concerns; create one new commit without
+   deployment, migration, or history rewriting.
+
+### RED evidence
+
+The trusted research-clone unit seam was added first and run before its helper
+existed:
+
+```sh
+npx vitest run tests/unit/sources/research-collector.test.ts -t "rebrands only a schema-cloned prepared research candidate"
+```
+
+Result: exit 1 with
+`TypeError: rebrandPreparedResearchCandidateAfterSchemaClone is not a function`.
+The test proves that a schema clone loses the private brand, rebranding does not
+decode a second time, and Stanford matching remains derived from prepared text.
+
+The composition lifecycle unit seam was likewise run before its module existed:
+
+```sh
+npx vitest run tests/unit/workflow/composition-provider-text.test.ts -t "composition provider-text lifecycle"
+```
+
+Result: exit 1 during import because
+`src/workflow/composition-provider-text.ts` did not exist. The tests require
+exactly-once legacy normalization across all known human edition fields,
+structural preservation, current-version idempotence, and invalid required
+source-name isolation.
+
+The first focused Worker/D1 attempt was prevented before process creation by
+the then-exhausted Codex usage window. This was recorded as an external
+execution blocker, not application RED evidence. After the window restored,
+the same production tests executed normally; their final result appears below.
+
+Independent review then identified that `readArtifact()` accumulated a newer
+chunk-envelope promotion but returned an older unchunked legacy row encountered
+later in the scan. The legacy compose fixture was changed to insert a genuine
+historical unchunked audit event directly, then run before the selection fix:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "promotes a legacy D1 compose before a failed publish and restores it byte-stably"
+```
+
+Result: exit 1; the restored artifact's
+`providerTextCompositionVersion` was `undefined` instead of `1`. This directly
+demonstrated the promoted checkpoint was shadowed and could be decoded again.
+
+### Implementation
+
+- Added the narrow
+  `rebrandPreparedResearchCandidateAfterSchemaClone` helper. It parses the
+  trusted `ResearchCollector` result as a bounded research candidate and
+  reapplies the private non-enumerable Symbol without decoding. Only the D1
+  production collector assembly uses this boundary helper; serialized provider
+  data cannot assert the Symbol.
+- Added orchestrator-owned `providerTextCompositionVersion: 1` artifact
+  semantics. The parser permits it only on compose/publish, D1 chunk assembly
+  requires version agreement, and fresh compose output receives a no-extra-
+  decode display preparation before schema parsing and versioning.
+- Added the composition display lifecycle mapper for summary title/body/claims,
+  selection reasons, and source-reference names. Legacy artifacts use the
+  bounded two-pass provider normalizer exactly once; current output uses only
+  NFKC/whitespace/markup/bound preparation. URLs, IDs, dates, roles, access,
+  citations, and other structural fields are copied unchanged.
+- Restore of an unversioned compose/publish artifact normalizes in memory,
+  revalidates the full `CompositionSchema`, and appends a current-version
+  checkpoint before publication. Existing audit rows are never mutated. A
+  failed publish therefore resumes from the promoted byte-stable artifact.
+- D1 checkpoint restore now orders audit events by SQLite `rowid` append order,
+  selects the logical checkpoint represented by the newest matching row, and
+  reconstructs only that checkpoint's chunk group. It no longer falls through
+  from a current chunk promotion to an older unchunked artifact, nor relies on
+  millisecond timestamps plus random UUIDs to infer append order.
+- Added D1 coverage for the real production `ResearchCollector` assembly,
+  append-only legacy compose promotion across a failed publish/fresh retry,
+  current compose/publish storage and stage legality, and corrupt required
+  source-name isolation.
+
+### GREEN evidence
+
+Fresh final-worktree commands:
+
+```sh
+npx vitest run tests/unit/workflow/composition-provider-text.test.ts tests/unit/sources/research-collector.test.ts -t "composition provider-text lifecycle|rebrands only a schema-cloned prepared research candidate"
+```
+
+Result: exit 0; 2 files passed, 3 selected tests passed, 62 skipped.
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "preserves the ResearchCollector prepared contract through D1 production assembly and restore|promotes a legacy D1 compose before a failed publish and restores it byte-stably|round trips current compose and publish provider-text envelopes through D1|does not promote or publish a legacy D1 compose with an invalid required source name"
+```
+
+Result: exit 0; 1 Worker file passed, 4 selected D1 tests passed, 96 skipped.
+The run emitted only existing third-party missing-sourcemap warnings.
+
+The full affected Worker checkpoint suites were then run:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts tests/integration/workflow/resume.test.ts
+```
+
+Result: exit 0; 2 Worker files and all 142 tests passed.
+
+```sh
+npx vitest run tests/unit/editorial tests/unit/workflow tests/unit/sources
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+```
+
+Results: exit 0; respectively 22 files/560 tests and 40 files/789 tests
+passed.
+
+`npm run check` exited 0 (`tsc --noEmit`). `npm run evaluate` exited 0
+(precision@5 `1.00`, minimum `0.80`, all assertions passed). `npm run build`
+exited 0 (Vite 7.3.6, 53 modules). `git diff --check` exited 0. The trusted-
+HTML and targeted structural normalizer-misuse scans returned no matches.
+
+### Files changed
+
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/task-3-report.md`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+- `src/editorial/normalize.ts`
+- `src/workflow/composition-provider-text.ts`
+- `src/workflow/run-editorial-pipeline.ts`
+- `src/workflow/types.ts`
+- `tests/integration/workflow/manual-run.test.ts`
+- `tests/unit/sources/research-collector.test.ts`
+- `tests/unit/workflow/composition-provider-text.test.ts`
+
+### Commit
+
+Planned message: `fix: preserve provider text lifecycle boundaries`. The
+resulting SHA is recorded in the task handoff because it is created after this
+report is written.
+
+### Self-review
+
+- Mutation-removing the D1 rebrand changes the triple-layer production title
+  and institution on the second prepare, so the production test fails. The
+  current collect/normalize restore is byte-stable and performs no refetch.
+- Preferred Stanford matching is computed inside `ResearchCollector` from its
+  prepared institution value and survives schema cloning, D1 persistence, and
+  normalization. Research identity, original/canonical URLs, and structural
+  identifiers remain stable.
+- Current composition preparation does not entity-decode. Only a missing-
+  version legacy artifact receives the bounded legacy decode, and promotion is
+  saved before publish. A genuine unchunked legacy row followed by its current
+  chunk-envelope promotion selects the promotion on retry; compose and publish
+  current artifacts restore byte-for-byte.
+- Self-review tightened legacy restore to reparse the normalized result through
+  `CompositionSchema`, matching the explicit artifact-boundary requirement.
+- The definitive `main...Round 19` source audit contains 21 production source
+  paths; the refreshed Task 3 report lists them exactly and does not describe
+  the formerly blocked Worker gate as current evidence.
+- No deploy, canary, migration, OAuth change, recursive parser, trusted-HTML
+  insertion, historical-row mutation, or unrelated cleanup was performed.
+
+### Concerns
+
+None. Two independent reviews are resolved: the final review found no findings,
+and the delayed earlier review's checkpoint-selection defect was reproduced
+RED, repaired, and covered by the 142-test affected Worker run. Worker runs emit
+existing third-party missing-sourcemap warnings.
+
 ## Whole-plan Fix Round 12
 
 Round 12 closes the aggregate metadata contamination gap left by the Round 11

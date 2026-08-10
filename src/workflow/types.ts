@@ -111,6 +111,7 @@ export type PipelineCheckpointExecutor = <T>(
 
 export const PROVIDER_TEXT_NORMALIZATION_VERSION = 1 as const;
 export const PROVIDER_TEXT_PREPARATION_VERSION = 1 as const;
+export const PROVIDER_TEXT_COMPOSITION_VERSION = 1 as const;
 
 export type CheckpointArtifact<T = unknown> = {
   output: T;
@@ -122,6 +123,8 @@ export type CheckpointArtifact<T = unknown> = {
     typeof PROVIDER_TEXT_NORMALIZATION_VERSION;
   providerTextPreparationVersion?:
     typeof PROVIDER_TEXT_PREPARATION_VERSION;
+  providerTextCompositionVersion?:
+    typeof PROVIDER_TEXT_COMPOSITION_VERSION;
 };
 
 export type PipelineStore = {

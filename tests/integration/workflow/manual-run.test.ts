@@ -21,9 +21,11 @@ import {
   type PipelineStore,
 } from "../../../src/workflow/run-editorial-pipeline";
 import {
+  PROVIDER_TEXT_COMPOSITION_VERSION,
   PROVIDER_TEXT_NORMALIZATION_VERSION,
   PROVIDER_TEXT_PREPARATION_VERSION,
   type CheckpointArtifact,
+  type CompositionResult,
 } from "../../../src/workflow/types";
 import { createApp, type WorkflowLauncher } from "../../../src/api/app";
 import {
@@ -142,6 +144,56 @@ function fixtureSummary(item: Item): StructuredSummary {
       evidenceExcerpt: `${item.title} is supported by the fixture source.`,
     }],
     accessLevel: "abstract",
+  };
+}
+
+function compositionCheckpointFixture(
+  runId: string,
+  editionDate: string,
+  sourceName = "Source &amp;amp;#83;yndicate",
+): CompositionResult {
+  const editionId = `edition:${runId}`;
+  return {
+    edition: {
+      id: editionId,
+      editionDate,
+      runId,
+      status: "draft",
+      readingMinutes: 20,
+      publishedAt: null,
+      createdAt: now,
+      metadata: { missingSections: [], sourceFailures: [] },
+    },
+    entries: [{
+      id: `${editionId}:entry:0`,
+      editionId,
+      itemId: null,
+      section: "world",
+      position: 0,
+      summary: {
+        title: "Title &amp;amp;#8217; display",
+        oneSentence: "Sentence &amp;amp;#8217; display",
+        whyItMatters: "Why &amp;amp;#8217; display",
+        uncertainty: "Uncertainty &amp;amp;#8217; display",
+        claims: [{
+          text: "Claim &amp;amp;#8217; display",
+          sourceIds: ["source-structural-id"],
+          evidenceExcerpt: "Evidence &amp;amp;#8217; display",
+        }],
+        accessLevel: "secondary",
+      },
+      selectionReasons: ["Reason &amp;amp;#8217; display"],
+      sourceRefs: [{
+        id: "source-structural-id",
+        name: sourceName,
+        url: "https://example.com/report?cursor=a%26amp%3Bb",
+        role: "reporting",
+        retrievedAt: now,
+      }],
+    }],
+    status: "partial",
+    missingSections: [],
+    sourceFailures: [],
   };
 }
 
@@ -2546,6 +2598,233 @@ describe("manual editorial run", () => {
     expect((normalizeArtifact.output as Item[])[0]?.title).toBe(
       "Raw interpretability &#8217; research",
     );
+  });
+
+  it("promotes a legacy D1 compose before a failed publish and restores it byte-stably", async () => {
+    const runId = "run-legacy-compose-promotion";
+    const editionDate = "2034-05-02";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "retryable",
+      currentStep: "compose",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: "TRANSIENT_PUBLISH_FAILURE",
+    });
+    for (const step of PIPELINE_STEPS.slice(0, PIPELINE_STEPS.indexOf("compose"))) {
+      await store.saveCheckpoint(runId, step, {
+        output: [],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 0,
+        estimatedCostUsd: 0,
+      });
+    }
+    const legacy = {
+      ...compositionCheckpointFixture(runId, editionDate),
+      status: "published" as const,
+    };
+    await env.DB.prepare(
+      `INSERT INTO audit_events (
+        id, run_id, event_type, event_json, created_at
+      ) VALUES (?, ?, ?, ?, ?)`,
+    ).bind(
+      "genuine-legacy-unchunked-compose",
+      runId,
+      "workflow_checkpoint",
+      JSON.stringify({
+        step: "compose",
+        artifact: {
+          output: legacy,
+          attempts: 1,
+          durationMs: 0,
+          itemCount: 1,
+          estimatedCostUsd: 0,
+        },
+      }),
+      now,
+    ).run();
+    const persistEdition = store.persistEdition.bind(store);
+    store.persistEdition = async () => {
+      throw new Error("TRANSIENT_PUBLISH_FAILURE");
+    };
+    const firstContext: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store,
+    };
+
+    await expect(runEditorialPipeline(firstContext)).rejects.toThrow(
+      "TRANSIENT_PUBLISH_FAILURE",
+    );
+
+    const promoted = await store.readArtifact(runId, "compose") as
+      CheckpointArtifact<CompositionResult>;
+    expect(promoted.providerTextCompositionVersion).toBe(
+      PROVIDER_TEXT_COMPOSITION_VERSION,
+    );
+    expect(promoted.output.entries[0]).toMatchObject({
+      summary: { title: "Title &#8217; display" },
+      sourceRefs: [{
+        name: "Source &#83;yndicate",
+        url: "https://example.com/report?cursor=a%26amp%3Bb",
+      }],
+    });
+    const composeRows = await env.DB.prepare(
+      `SELECT event_json FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') = 'compose'`,
+    ).bind(runId).all<{ event_json: string }>();
+    expect(composeRows.results).toHaveLength(2);
+    expect(composeRows.results.map(({ event_json: eventJson }) =>
+      (JSON.parse(eventJson) as {
+        artifact?: { providerTextCompositionVersion?: unknown };
+      }).artifact?.providerTextCompositionVersion
+    )).toEqual(expect.arrayContaining([
+      undefined,
+      PROVIDER_TEXT_COMPOSITION_VERSION,
+    ]));
+    expect(await new D1BriefingRepository(env.DB).getEditionByDate(
+      editionDate,
+    )).toBeNull();
+
+    store.persistEdition = persistEdition;
+    const restoredContext: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store: createD1PipelineStore(env.DB),
+    };
+    await expect(runEditorialPipeline(restoredContext)).resolves.toEqual({
+      runId,
+      status: "published",
+      missingSections: [],
+    });
+
+    const publishedArtifact = await restoredContext.store.readArtifact(
+      runId,
+      "publish",
+    ) as CheckpointArtifact<CompositionResult>;
+    expect(publishedArtifact.providerTextCompositionVersion).toBe(
+      PROVIDER_TEXT_COMPOSITION_VERSION,
+    );
+    expect(publishedArtifact.output).toEqual(promoted.output);
+    const published = await new D1BriefingRepository(env.DB).getEditionByDate(
+      editionDate,
+    );
+    expect(published?.entries[0]).toMatchObject({
+      summary: { title: "Title &#8217; display" },
+      sourceRefs: [{
+        name: "Source &#83;yndicate",
+        url: "https://example.com/report?cursor=a%26amp%3Bb",
+      }],
+    });
+    const stableCompose = structuredClone(promoted);
+    const stablePublish = structuredClone(publishedArtifact);
+    await expect(runEditorialPipeline(restoredContext)).resolves.toMatchObject({
+      status: "published",
+    });
+    await expect(restoredContext.store.readArtifact(runId, "compose"))
+      .resolves.toEqual(stableCompose);
+    await expect(restoredContext.store.readArtifact(runId, "publish"))
+      .resolves.toEqual(stablePublish);
+  });
+
+  it("round trips current compose and publish provider-text envelopes through D1", async () => {
+    const runId = "run-current-compose-envelope";
+    const editionDate = "2034-05-03";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "running",
+      currentStep: "compose",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const artifact: CheckpointArtifact<CompositionResult> = {
+      output: compositionCheckpointFixture(runId, editionDate),
+      attempts: 1,
+      durationMs: 7,
+      itemCount: 1,
+      estimatedCostUsd: 0.01,
+      providerTextCompositionVersion: PROVIDER_TEXT_COMPOSITION_VERSION,
+    };
+
+    await store.saveCheckpoint(runId, "compose", artifact);
+    await store.saveCheckpoint(runId, "publish", artifact);
+
+    await expect(store.readArtifact(runId, "compose")).resolves.toEqual(
+      artifact,
+    );
+    await expect(store.readArtifact(runId, "publish")).resolves.toEqual(
+      artifact,
+    );
+    await expect(store.saveCheckpoint(runId, "normalize", {
+      output: [],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 0,
+      estimatedCostUsd: 0,
+      providerTextCompositionVersion: PROVIDER_TEXT_COMPOSITION_VERSION,
+    })).rejects.toThrow(
+      "Only compose and publish checkpoint artifacts can be marked provider-text composed.",
+    );
+  });
+
+  it("does not promote or publish a legacy D1 compose with an invalid required source name", async () => {
+    const runId = "run-invalid-legacy-compose-source";
+    const editionDate = "2034-05-04";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "retryable",
+      currentStep: "compose",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    for (const step of PIPELINE_STEPS.slice(0, PIPELINE_STEPS.indexOf("compose"))) {
+      await store.saveCheckpoint(runId, step, {
+        output: [],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 0,
+        estimatedCostUsd: 0,
+      });
+    }
+    await store.saveCheckpoint(runId, "compose", {
+      output: compositionCheckpointFixture(runId, editionDate, "&lt;br&gt;"),
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 1,
+      estimatedCostUsd: 0,
+    });
+    const context: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store,
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "INVALID_REQUIRED_PROVIDER_DISPLAY_TEXT:sourceName",
+    );
+
+    const retainedLegacy = await store.readArtifact(runId, "compose");
+    expect(retainedLegacy?.providerTextCompositionVersion).toBeUndefined();
+    expect(await new D1BriefingRepository(env.DB).getEditionByDate(
+      editionDate,
+    )).toBeNull();
+    expect(await store.readArtifact(runId, "publish")).toBeNull();
   });
 
   it("rejects a corrupt durable composition checkpoint before publication", async () => {
@@ -6345,6 +6624,158 @@ describe("manual editorial run", () => {
         "SELECT COUNT(*) AS count FROM items WHERE id LIKE 'cluster-%'",
       ).first<{ count: number }>(),
     ).toEqual({ count: 0 });
+  });
+
+  it("preserves the ResearchCollector prepared contract through D1 production assembly and restore", async () => {
+    await env.DB.prepare(
+      `UPDATE sources
+       SET enabled = CASE
+         WHEN id IN ('arxiv', 'semantic-scholar') THEN 1
+         ELSE 0
+       END`,
+    ).run();
+    const publishedAt = new Date(Date.now() - 60 * 60 * 1_000)
+      .toISOString();
+    const arxivFeed = `<?xml version="1.0"?>
+      <feed xmlns="http://www.w3.org/2005/Atom">
+        <entry>
+          <id>https://arxiv.org/abs/2608.01919v1</id>
+          <updated>${publishedAt}</updated>
+          <published>${publishedAt}</published>
+          <title>Production &amp;amp;amp;#8217; identity study</title>
+          <summary>A concrete interpretability method reports stable results.</summary>
+          <author><name>Researcher Example</name></author>
+          <link href="https://arxiv.org/abs/2608.01919v1" rel="alternate" type="text/html" />
+          <category term="cs.AI" />
+        </entry>
+      </feed>`;
+    const sourceUrl = "https://arxiv.org/abs/2608.01919v1";
+    const sourceFetch = vi.fn(
+      async (input: string | URL | Request): Promise<Response> => {
+        const url = String(input);
+        if (url.startsWith("https://export.arxiv.org/api/query")) {
+          return new Response(arxivFeed, {
+            headers: { "content-type": "application/atom+xml" },
+          });
+        }
+        if (url.startsWith(
+          "https://api.semanticscholar.org/graph/v1/paper/batch",
+        )) {
+          return Response.json([{
+            paperId: "S2-2608-01919",
+            externalIds: { ArXiv: "2608.01919" },
+            title: "Semantic Scholar display title is not authoritative",
+            citationCount: 3,
+            influentialCitationCount: 1,
+            authors: [{
+              authorId: "researcher-example",
+              name: "Researcher Example",
+              affiliations: [
+                "&amp;#83;tanford",
+                "Institute &amp;amp;#8217; Lab",
+              ],
+            }],
+            fieldsOfStudy: ["Computer Science"],
+          }]);
+        }
+        if (url.startsWith(
+          "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+        )) {
+          return Response.json({ total: 0, data: [] });
+        }
+        if (url.startsWith(
+          "https://api.semanticscholar.org/recommendations/v1/papers",
+        )) {
+          return Response.json({ recommendedPapers: [] });
+        }
+        throw new Error(`Unexpected prepared-contract URL: ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", sourceFetch);
+    try {
+      const runId = "run-production-research-prepared-contract";
+      const editionDate = "2034-05-01";
+      const store = createD1PipelineStore(env.DB);
+      const firstContext = createD1ProductionPipelineContext(
+        store,
+        editionDate,
+        runId,
+        {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+      );
+      firstContext.enrich = async () => {
+        throw new Error("STOP_AFTER_PRODUCTION_NORMALIZE");
+      };
+
+      await expect(runEditorialPipeline(firstContext)).rejects.toThrow(
+        "STOP_AFTER_PRODUCTION_NORMALIZE",
+      );
+
+      const collectArtifact = await store.readArtifact(runId, "collect") as
+        CheckpointArtifact<RawResearchCandidate[]>;
+      const normalizeArtifact = await store.readArtifact(runId, "normalize") as
+        CheckpointArtifact<Item[]>;
+      const collected = collectArtifact.output[0]!;
+      const normalized = normalizeArtifact.output[0]!;
+      expect(collectArtifact.providerTextPreparationVersion).toBe(
+        PROVIDER_TEXT_PREPARATION_VERSION,
+      );
+      expect(collected).toMatchObject({
+        title: "Production &#8217; identity study",
+        originalUrl: sourceUrl,
+        externalId: "arXiv:2608.01919",
+        institutions: ["Stanford", "Institute &#8217; Lab"],
+        preferredInstitutionMatches: ["Stanford"],
+      });
+      expect(normalized).toMatchObject({
+        title: "Production &#8217; identity study",
+        canonicalUrl: "https://arxiv.org/abs/2608.01919",
+        metadata: {
+          institutions: ["Institute &#8217; Lab", "Stanford"],
+          preferredInstitutionMatches: ["Stanford"],
+        },
+      });
+      const rawResearch = (normalized.metadata.workflow as {
+        rawResearch: RawResearchCandidate;
+      }).rawResearch;
+      expect(rawResearch).toMatchObject({
+        title: "Production &#8217; identity study",
+        originalUrl: sourceUrl,
+        externalId: "arXiv:2608.01919",
+        preferredInstitutionMatches: ["Stanford"],
+      });
+      const stableCollect = structuredClone(collectArtifact);
+      const stableNormalize = structuredClone(normalizeArtifact);
+      const fetchCallsAfterFirstRun = sourceFetch.mock.calls.length;
+
+      const restoredContext = createD1ProductionPipelineContext(
+        createD1PipelineStore(env.DB),
+        editionDate,
+        runId,
+        {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+      );
+      restoredContext.enrich = async () => {
+        throw new Error("STOP_AFTER_PRODUCTION_NORMALIZE");
+      };
+      await expect(runEditorialPipeline(restoredContext)).rejects.toThrow(
+        "STOP_AFTER_PRODUCTION_NORMALIZE",
+      );
+
+      expect(sourceFetch).toHaveBeenCalledTimes(fetchCallsAfterFirstRun);
+      await expect(store.readArtifact(runId, "collect")).resolves.toEqual(
+        stableCollect,
+      );
+      await expect(store.readArtifact(runId, "normalize")).resolves.toEqual(
+        stableNormalize,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("restores sanitized source failures when a fresh context resumes past collect", async () => {
