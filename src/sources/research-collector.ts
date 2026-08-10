@@ -28,6 +28,11 @@ import {
   normalizeArxivIdentifier,
   normalizeDoi,
 } from "./identifiers";
+import {
+  runProviderTasks,
+  type ProviderSchedulePolicy,
+  type ProviderSchedulerRuntime,
+} from "./provider-scheduler";
 
 const PAPER_LANE_LIMIT = 100;
 const DISCOVERY_DIAGNOSTIC_LIMIT = 64;
@@ -36,6 +41,24 @@ const RECOGNIZED_PROVIDER_NAMES = new Set([
   "papers-with-code",
   "semanticscholar",
 ]);
+
+export const RESEARCH_PROVIDER_SCHEDULE_POLICIES: Readonly<
+  Record<string, ProviderSchedulePolicy>
+> = Object.freeze({
+  "semantic-scholar": {
+    maxConcurrency: 1,
+    minimumStartIntervalMs: 1_000,
+  },
+  openalex: {
+    maxConcurrency: 2,
+    minimumStartIntervalMs: 0,
+  },
+});
+
+const DEFAULT_PROVIDER_POLICY = Object.freeze({
+  maxConcurrency: 16,
+  minimumStartIntervalMs: 0,
+});
 
 const INSTITUTION_ALIASES = new Map<string, string>([
   ["stanford", "Stanford"],
@@ -305,11 +328,59 @@ function initialResearchCandidate(item: RawItem): RawResearchCandidate {
   });
 }
 
+async function collectDiscoveryLane(
+  adapter: SourceAdapter,
+  window: CollectionWindow,
+): Promise<{
+  batch: CollectionBatch<{ laneId: string; item: RawItem }>;
+  diagnostic: DiscoveryLaneDiagnostic;
+}> {
+  const laneId = adapterLaneId(adapter);
+  const discoveryFamily = adapterDiscoveryFamily(adapter);
+  const batch = await settleCollectionBatch([{
+    sourceId: adapter.sourceId,
+    collect: async () => (await adapter.collect(window))
+      .map((item) => {
+        const parsed = RawItemSchema.parse(item);
+        const itemFamily = DiscoveryFamilySchema.safeParse(
+          parsed.metadata.discoveryFamily,
+        );
+        return {
+          laneId,
+          item: RawItemSchema.parse({
+            ...parsed,
+            metadata: {
+              ...parsed.metadata,
+              discoveryFamily: itemFamily.success
+                ? itemFamily.data
+                : discoveryFamily,
+              discoveryLaneIds: [laneId],
+            },
+          }),
+        };
+      })
+      .sort(compareDiscovered)
+      .slice(0, PAPER_LANE_LIMIT),
+  }]);
+  const diagnostic = DiscoveryLaneDiagnosticSchema.parse({
+    laneId,
+    sourceId: adapter.sourceId,
+    discoveryFamily,
+    discovered: batch.candidates.length,
+    deduplicated: 0,
+    triaged: 0,
+    assessed: 0,
+    outcome: batch.failures[0]?.kind ?? "success",
+  });
+  return { batch, diagnostic };
+}
+
 type ResearchCollectorOptions = {
   discoveryAdapters: readonly SourceAdapter[];
   enrichers: readonly ResearchEnricher[];
   preferredInstitutions: readonly string[];
   preferredLabs?: readonly string[];
+  schedulerRuntime?: ProviderSchedulerRuntime;
   paperContent?: {
     retriever: PaperContentRetriever;
     sources: readonly ResearchSourceInput[];
@@ -334,48 +405,32 @@ export class ResearchCollector {
     const adapters = [...this.options.discoveryAdapters].sort((left, right) =>
       adapterLaneId(left).localeCompare(adapterLaneId(right)),
     );
-    const discoveryOutcomes = await Promise.all(
-      adapters.map(async (adapter) => {
-        const laneId = adapterLaneId(adapter);
-        const discoveryFamily = adapterDiscoveryFamily(adapter);
-        const batch = await settleCollectionBatch([{
-          sourceId: adapter.sourceId,
-          collect: async () => (await adapter.collect(validWindow))
-            .map((item) => {
-              const parsed = RawItemSchema.parse(item);
-              const itemFamily = DiscoveryFamilySchema.safeParse(
-                parsed.metadata.discoveryFamily,
-              );
-              return {
-                laneId,
-                item: RawItemSchema.parse({
-                  ...parsed,
-                  metadata: {
-                    ...parsed.metadata,
-                    discoveryFamily: itemFamily.success
-                      ? itemFamily.data
-                      : discoveryFamily,
-                    discoveryLaneIds: [laneId],
-                  },
-                }),
-              };
-            })
-            .sort(compareDiscovered)
-            .slice(0, PAPER_LANE_LIMIT),
-        }]);
-        const diagnostic = DiscoveryLaneDiagnosticSchema.parse({
-          laneId,
-          sourceId: adapter.sourceId,
-          discoveryFamily,
-          discovered: batch.candidates.length,
-          deduplicated: 0,
-          triaged: 0,
-          assessed: 0,
-          outcome: batch.failures[0]?.kind ?? "success",
-        });
-        return { batch, diagnostic };
-      }),
+    const adaptersByProvider = new Map<string, SourceAdapter[]>();
+    for (const adapter of adapters) {
+      const providerAdapters = adaptersByProvider.get(adapter.sourceId);
+      if (providerAdapters === undefined) {
+        adaptersByProvider.set(adapter.sourceId, [adapter]);
+      } else {
+        providerAdapters.push(adapter);
+      }
+    }
+    const providerOutcomes = await Promise.all(
+      [...adaptersByProvider].map(([sourceId, providerAdapters]) =>
+        runProviderTasks(
+          providerAdapters.map((adapter) =>
+            () => collectDiscoveryLane(adapter, validWindow)
+          ),
+          RESEARCH_PROVIDER_SCHEDULE_POLICIES[sourceId]
+            ?? DEFAULT_PROVIDER_POLICY,
+          this.options.schedulerRuntime,
+        )
+      ),
     );
+    const discoveryOutcomes = providerOutcomes
+      .flat()
+      .sort((left, right) =>
+        left.diagnostic.laneId.localeCompare(right.diagnostic.laneId)
+      );
     const discovery = {
       candidates: discoveryOutcomes.flatMap(({ batch }) => batch.candidates),
       succeededSourceIds: unique(

@@ -49,6 +49,16 @@ const fixedWindow = (): CollectionWindow => ({
   to: "2026-07-29T12:00:00.000Z",
 });
 
+function logicalSchedulerRuntime() {
+  let current = 0;
+  return {
+    now: () => current,
+    sleep: vi.fn(async (milliseconds: number) => {
+      current += milliseconds;
+    }),
+  };
+}
+
 const source = (
   value: Partial<ResearchSourceRecord> &
     Pick<ResearchSourceRecord, "id" | "canonicalName" | "canonicalUrl" | "role">,
@@ -195,6 +205,172 @@ async function collectorWithFixtures() {
 }
 
 describe("ResearchCollector", () => {
+  it("serializes and paces Semantic Scholar lanes", async () => {
+    const clock = logicalSchedulerRuntime();
+    const starts: number[] = [];
+    const collector = new ResearchCollector({
+      discoveryAdapters: Array.from({ length: 3 }, (_, index) => ({
+        sourceId: "semantic-scholar",
+        laneId: `semantic-scholar:test:${index}`,
+        discoveryFamily: "bibliographic" as const,
+        collect: async () => {
+          starts.push(clock.now());
+          return [];
+        },
+      })),
+      enrichers: [],
+      preferredInstitutions: [],
+      schedulerRuntime: clock,
+    });
+
+    await collector.collect(fixedWindow());
+
+    expect(starts).toEqual([0, 1_000, 2_000]);
+  });
+
+  it("runs each provider group concurrently", async () => {
+    let releaseSemanticScholar: (() => void) | undefined;
+    let semanticScholarSettled = false;
+    let arxivStartedBeforeSemanticScholarSettled = false;
+    const semanticScholarGate = new Promise<void>((resolve) => {
+      releaseSemanticScholar = resolve;
+    });
+    const adapters = [
+      {
+        sourceId: "semantic-scholar",
+        laneId: "semantic-scholar:blocked",
+        discoveryFamily: "bibliographic",
+        collect: async () => {
+          await semanticScholarGate;
+          semanticScholarSettled = true;
+          return [];
+        },
+      },
+      {
+        sourceId: "arxiv",
+        laneId: "arxiv:healthy",
+        discoveryFamily: "arxiv",
+        collect: async () => {
+          arxivStartedBeforeSemanticScholarSettled = !semanticScholarSettled;
+          return [];
+        },
+      },
+    ] satisfies readonly DiscoverySourceAdapter[];
+    const collector = new ResearchCollector({
+      discoveryAdapters: adapters,
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const pending = collector.collect(fixedWindow());
+    await vi.waitFor(() => {
+      expect(arxivStartedBeforeSemanticScholarSettled).toBe(true);
+    });
+    releaseSemanticScholar?.();
+    await pending;
+  });
+
+  it("limits OpenAlex discovery concurrency to two lanes", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    let releaseAll: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseAll = resolve;
+    });
+    const collector = new ResearchCollector({
+      discoveryAdapters: Array.from({ length: 4 }, (_, index) => ({
+        sourceId: "openalex",
+        laneId: `openalex:test:${index}`,
+        discoveryFamily: "bibliographic" as const,
+        collect: async () => {
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          await gate;
+          active -= 1;
+          return [];
+        },
+      })),
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const pending = collector.collect(fixedWindow());
+    await vi.waitFor(() => expect(active).toBeGreaterThan(0));
+    releaseAll?.();
+    await pending;
+
+    expect(maximumActive).toBe(2);
+  });
+
+  it("settles later lanes and another provider after a throttled lane fails", async () => {
+    const clock = logicalSchedulerRuntime();
+    const settled: string[] = [];
+    const adapters = [
+      {
+        sourceId: "semantic-scholar",
+        laneId: "semantic-scholar:01-failed",
+        discoveryFamily: "bibliographic",
+        collect: async () => {
+          throw new Error("private provider body and https://secret.example");
+        },
+      },
+      {
+        sourceId: "semantic-scholar",
+        laneId: "semantic-scholar:02-healthy",
+        discoveryFamily: "bibliographic",
+        collect: async () => {
+          settled.push("semantic-scholar:02-healthy");
+          return [];
+        },
+      },
+      {
+        sourceId: "arxiv",
+        laneId: "arxiv:healthy",
+        discoveryFamily: "arxiv",
+        collect: async () => {
+          settled.push("arxiv:healthy");
+          return [];
+        },
+      },
+    ] satisfies readonly DiscoverySourceAdapter[];
+    const collector = new ResearchCollector({
+      discoveryAdapters: adapters,
+      enrichers: [],
+      preferredInstitutions: [],
+      schedulerRuntime: clock,
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(settled.sort()).toEqual([
+      "arxiv:healthy",
+      "semantic-scholar:02-healthy",
+    ]);
+    expect([...result.succeededSourceIds].sort()).toEqual([
+      "arxiv",
+      "semantic-scholar",
+    ]);
+    expect(result.failures).toEqual([
+      { sourceId: "semantic-scholar", kind: "unknown" },
+    ]);
+    expect(result.discoveryDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        laneId: "semantic-scholar:01-failed",
+        outcome: "unknown",
+      }),
+      expect.objectContaining({
+        laneId: "semantic-scholar:02-healthy",
+        outcome: "success",
+      }),
+      expect.objectContaining({
+        laneId: "arxiv:healthy",
+        outcome: "success",
+      }),
+    ]));
+    expect(JSON.stringify(result)).not.toContain("secret.example");
+    expect(clock.now()).toBe(1_000);
+  });
+
   it.each(["title", "sourceName"] as const)(
     "drops an entity-only research %s without losing its valid sibling",
     async (invalidField) => {
@@ -758,6 +934,7 @@ describe("bibliographic discovery", () => {
       ).filter(({ laneId }) => laneId.startsWith("semantic-scholar:search:")),
       enrichers: [],
       preferredInstitutions: [],
+      schedulerRuntime: logicalSchedulerRuntime(),
     });
 
     const result = await collector.collect(fixedWindow());
@@ -800,6 +977,7 @@ describe("bibliographic discovery", () => {
       ),
       enrichers: [],
       preferredInstitutions: [],
+      schedulerRuntime: logicalSchedulerRuntime(),
     });
 
     const result = await collector.collect(fixedWindow());
@@ -1149,6 +1327,7 @@ describe("bibliographic discovery", () => {
       ],
       enrichers: [],
       preferredInstitutions: [],
+      schedulerRuntime: logicalSchedulerRuntime(),
     });
 
     const result = await collector.collect(fixedWindow());
