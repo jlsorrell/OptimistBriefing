@@ -30,6 +30,23 @@ describe("runProviderTasks", () => {
     expect(result).toEqual(["a", "b", "c"]);
   });
 
+  it("paces concurrent workers in deterministic start order", async () => {
+    const clock = runtime();
+    const starts: number[] = [];
+
+    const result = await runProviderTasks(
+      ["a", "b", "c"].map((value) => async () => {
+        starts.push(clock.now());
+        return value;
+      }),
+      { maxConcurrency: 3, minimumStartIntervalMs: 1_000 },
+      clock,
+    );
+
+    expect(starts).toEqual([0, 1_000, 2_000]);
+    expect(result).toEqual(["a", "b", "c"]);
+  });
+
   it("never exceeds configured concurrency", async () => {
     let active = 0;
     let maximum = 0;

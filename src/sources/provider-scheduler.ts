@@ -37,20 +37,36 @@ export async function runProviderTasks<T>(
   const results = new Array<T>(tasks.length);
   let nextIndex = 0;
   let nextStartAt = runtime.now();
+  let previousAdmission = Promise.resolve();
 
-  const reserveStart = async () => {
-    const startAt = Math.max(runtime.now(), nextStartAt);
-    nextStartAt = startAt + policy.minimumStartIntervalMs;
-    const wait = startAt - runtime.now();
-    if (wait > 0) await runtime.sleep(wait);
+  const startTask = async <U>(task: () => Promise<U>): Promise<U> => {
+    let releaseAdmission: () => void;
+    const admission = new Promise<void>((resolve) => {
+      releaseAdmission = resolve;
+    });
+    const earlierAdmission = previousAdmission;
+    previousAdmission = admission;
+
+    await earlierAdmission;
+    let taskPromise: Promise<U>;
+    try {
+      const currentTime = runtime.now();
+      const startAt = Math.max(currentTime, nextStartAt);
+      nextStartAt = startAt + policy.minimumStartIntervalMs;
+      const wait = startAt - currentTime;
+      if (wait > 0) await runtime.sleep(wait);
+      taskPromise = task();
+    } finally {
+      releaseAdmission!();
+    }
+    return taskPromise!;
   };
 
   const worker = async () => {
     while (nextIndex < tasks.length) {
       const index = nextIndex;
       nextIndex += 1;
-      await reserveStart();
-      results[index] = await tasks[index]!();
+      results[index] = await startTask(tasks[index]!);
     }
   };
 
