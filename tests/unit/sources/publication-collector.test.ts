@@ -50,6 +50,16 @@ function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
         allowedPorts: [""],
         allowedPathPrefixes: ["/research/"],
       },
+      feedUrlPolicy: {
+        allowedHosts: ["lab.example.org"],
+        allowedPorts: [""],
+        allowedPathPrefixes: ["/research/"],
+      },
+      articleUrlPolicy: {
+        allowedHosts: ["lab.example.org"],
+        allowedPorts: [""],
+        allowedPathPrefixes: ["/research/"],
+      },
     },
     discoveryMechanism: "page",
     sectionEligibility: ["research", "research_radar", "technology", "ai_policy"],
@@ -78,6 +88,16 @@ function rssSource(overrides: Partial<SourceRecord> = {}): SourceRecord {
         allowedPorts: [""],
         allowedPathPrefixes: ["/feed.xml", "/posts/"],
       },
+      feedUrlPolicy: {
+        allowedHosts: ["www.alignmentforum.org"],
+        allowedPorts: [""],
+        allowedPathPrefixes: ["/feed.xml"],
+      },
+      articleUrlPolicy: {
+        allowedHosts: ["www.alignmentforum.org"],
+        allowedPorts: [""],
+        allowedPathPrefixes: ["/posts/"],
+      },
     },
     discoveryMechanism: "rss",
     sectionEligibility: ["research", "research_radar"],
@@ -86,7 +106,6 @@ function rssSource(overrides: Partial<SourceRecord> = {}): SourceRecord {
 }
 
 function rssAdapterFor(feed: SourceRecord, body: string): RssAdapter {
-  const urlPolicy = feed.restrictions.urlPolicy!;
   return new RssAdapter(
     new SourceHttpClient({
       fetch: vi.fn(async () => new Response(body, {
@@ -97,10 +116,26 @@ function rssAdapterFor(feed: SourceRecord, body: string): RssAdapter {
     [{
       source: ResearchSourceRecordSchema.parse(feed),
       feedUrl: feed.restrictions.feedUrl,
-      feedUrlPolicy: urlPolicy,
-      articleUrlPolicy: urlPolicy,
+      feedUrlPolicy: feed.restrictions.feedUrlPolicy,
+      articleUrlPolicy: feed.restrictions.articleUrlPolicy,
     }],
   );
+}
+
+function rssHttp(articleUrl: string): SourceHttpClient {
+  const rss = `<?xml version="1.0"?><rss><channel><item>
+    <title>Task gaming in aligned models</title>
+    <link>${articleUrl}</link>
+    <guid>task-gaming</guid>
+    <pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate>
+    <description>We present a substantive alignment result.</description>
+  </item></channel></rss>`;
+  return new SourceHttpClient({
+    fetch: vi.fn(async () => new Response(rss, {
+      headers: { "content-type": "application/rss+xml" },
+    })),
+    now: () => new Date("2026-08-02T12:00:00.000Z"),
+  });
 }
 
 describe("PublicationCollector", () => {
@@ -179,6 +214,8 @@ describe("PublicationCollector", () => {
         contentUse: "ephemeral-summarization",
         feedUrl: "https://www.alignmentforum.org/feed.xml?view=frontpage",
         urlPolicy: { allowedHosts: ["www.alignmentforum.org"], allowedPorts: [""], allowedPathPrefixes: ["/feed.xml", "/posts/"] },
+        feedUrlPolicy: { allowedHosts: ["www.alignmentforum.org"], allowedPorts: [""], allowedPathPrefixes: ["/feed.xml"] },
+        articleUrlPolicy: { allowedHosts: ["www.alignmentforum.org"], allowedPorts: [""], allowedPathPrefixes: ["/posts/"] },
       },
       discoveryMechanism: "rss",
       sectionEligibility: ["research", "research_radar"],
@@ -193,6 +230,8 @@ describe("PublicationCollector", () => {
         contentUse: "ephemeral-summarization",
         feedUrl: "https://www.lesswrong.com/feed.xml?view=curated",
         urlPolicy: { allowedHosts: ["www.lesswrong.com"], allowedPorts: [""], allowedPathPrefixes: ["/feed.xml", "/posts/"] },
+        feedUrlPolicy: { allowedHosts: ["www.lesswrong.com"], allowedPorts: [""], allowedPathPrefixes: ["/feed.xml"] },
+        articleUrlPolicy: { allowedHosts: ["www.lesswrong.com"], allowedPorts: [""], allowedPathPrefixes: ["/posts/"] },
       },
       discoveryMechanism: "rss",
       sectionEligibility: ["research", "research_radar"],
@@ -225,6 +264,291 @@ describe("PublicationCollector", () => {
     ]);
   });
 
+  it("accepts a LessWrong article emitted by the Alignment Forum feed", async () => {
+    const forum = rssSource({
+      restrictions: {
+        ...rssSource().restrictions,
+        feedUrlPolicy: {
+          allowedHosts: ["www.alignmentforum.org"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/feed.xml"],
+        },
+        articleUrlPolicy: {
+          allowedHosts: ["www.alignmentforum.org", "www.lesswrong.com"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/posts/"],
+        },
+      },
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: rssHttp("https://www.lesswrong.com/posts/example/task-gaming"),
+      sources: [forum],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates[0]?.originalUrl)
+      .toBe("https://www.lesswrong.com/posts/example/task-gaming");
+  });
+
+  it("rejects a LessWrong article URL used as an Alignment Forum feed endpoint", async () => {
+    const forum = rssSource({
+      restrictions: {
+        ...rssSource().restrictions,
+        feedUrl: "https://www.lesswrong.com/posts/example/task-gaming",
+        urlPolicy: {
+          allowedHosts: ["www.alignmentforum.org", "www.lesswrong.com"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/feed.xml", "/posts/"],
+        },
+      },
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: rssHttp("https://www.lesswrong.com/posts/example/task-gaming"),
+      sources: [forum],
+    }).collect(window);
+
+    expect(result.candidates).toEqual([]);
+    expect(result.failures).toEqual([
+      { sourceId: "alignment-forum", kind: "policy" },
+    ]);
+  });
+
+  it("skips unrelated RSS article hosts while retaining policy-allowed articles", async () => {
+    const feed = `<?xml version="1.0"?><rss><channel>
+      <item><title>Off policy</title><link>https://unrelated.example/posts/nope</link><pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate></item>
+      <item><title>Allowed</title><link>https://www.lesswrong.com/posts/example/task-gaming</link><pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate></item>
+    </channel></rss>`;
+    const forum = rssSource({
+      restrictions: {
+        ...rssSource().restrictions,
+        articleUrlPolicy: {
+          allowedHosts: ["www.alignmentforum.org", "www.lesswrong.com"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/posts/"],
+        },
+      },
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(feed, {
+          headers: { "content-type": "application/rss+xml" },
+        })),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [forum],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates).toEqual([
+      expect.objectContaining({
+        originalUrl: "https://www.lesswrong.com/posts/example/task-gaming",
+      }),
+    ]);
+  });
+
+  it("uses the endpoint policy and article policy for their respective redirect lanes", async () => {
+    const listing = `<!doctype html><html><body><article>
+      <h2>Redirected research</h2><a href="/articles/example">Read</a>
+      <time datetime="2026-08-01T12:00:00Z"></time>
+    </article></body></html>`;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://lab.example.org/research/") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://lab.example.org/research/archive" },
+        });
+      }
+      if (url === "https://lab.example.org/research/archive") {
+        return new Response(listing, { headers: { "content-type": "text/html" } });
+      }
+      if (url === "https://lab.example.org/articles/example") {
+        return new Response(null, {
+          status: 302,
+          headers: { location: "https://lab.example.org/articles/redirected" },
+        });
+      }
+      if (url === "https://lab.example.org/articles/redirected") {
+        return new Response(article("Redirected detail"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const redirected = source({
+      restrictions: {
+        ...source().restrictions,
+        feedUrlPolicy: {
+          allowedHosts: ["lab.example.org"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/research/"],
+        },
+        articleUrlPolicy: {
+          allowedHosts: ["lab.example.org"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/articles/"],
+        },
+      },
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [redirected],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates).toEqual([
+      expect.objectContaining({
+        originalUrl: "https://lab.example.org/articles/redirected",
+        metadata: expect.objectContaining({
+          listingUrl: "https://lab.example.org/research/archive",
+        }),
+      }),
+    ]);
+  });
+
+  it("blocks a listing redirect into an article-only path", async () => {
+    const endpointPolicy = {
+      allowedHosts: ["lab.example.org"],
+      allowedPorts: [""],
+      allowedPathPrefixes: ["/research/"],
+    };
+    const articlePolicy = {
+      allowedHosts: ["lab.example.org"],
+      allowedPorts: [""],
+      allowedPathPrefixes: ["/articles/"],
+    };
+    const collector = createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(null, {
+          status: 302,
+          headers: { location: "https://lab.example.org/articles/not-a-listing" },
+        })),
+      }),
+      sources: [source({
+        restrictions: {
+          ...source().restrictions,
+          feedUrlPolicy: endpointPolicy,
+          articleUrlPolicy: articlePolicy,
+        },
+      })],
+    });
+
+    const result = await collector.collect(window);
+
+    expect(result.candidates).toEqual([]);
+    expect(result.failures).toEqual([
+      { sourceId: "example-lab", kind: "policy" },
+    ]);
+  });
+
+  it("skips an article whose redirect enters an endpoint-only path", async () => {
+    const listing = `<!doctype html><html><body><article>
+      <h2>Redirected research</h2><a href="/articles/example">Read</a>
+      <time datetime="2026-08-01T12:00:00Z"></time>
+    </article></body></html>`;
+    const endpointPolicy = {
+      allowedHosts: ["lab.example.org"],
+      allowedPorts: [""],
+      allowedPathPrefixes: ["/research/"],
+    };
+    const articlePolicy = {
+      allowedHosts: ["lab.example.org"],
+      allowedPorts: [""],
+      allowedPathPrefixes: ["/articles/"],
+    };
+    const collector = createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async (input: string | URL | Request) => {
+          switch (String(input)) {
+            case "https://lab.example.org/research/":
+              return new Response(listing, {
+                headers: { "content-type": "text/html" },
+              });
+            case "https://lab.example.org/articles/example":
+              return new Response(null, {
+                status: 302,
+                headers: { location: "https://lab.example.org/research/not-an-article" },
+              });
+            default:
+              throw new Error(`Unexpected URL: ${input}`);
+          }
+        }),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [source({
+        restrictions: {
+          ...source().restrictions,
+          feedUrlPolicy: endpointPolicy,
+          articleUrlPolicy: articlePolicy,
+        },
+      })],
+    });
+
+    const result = await collector.collect(window);
+
+    expect(result.candidates).toEqual([]);
+    expect(result.failures).toEqual([]);
+    expect(result.succeededSourceIds).toEqual(["example-lab"]);
+  });
+
+  it.each(["feedUrlPolicy", "articleUrlPolicy"] as const)(
+    "fails only the source missing split policy %s while a healthy RSS sibling succeeds",
+    async (missingPolicy) => {
+      const restrictions = { ...rssSource().restrictions };
+      delete restrictions[missingPolicy];
+      const broken = rssSource({ id: `missing-${missingPolicy}`, restrictions });
+      const healthy = rssSource({ id: "healthy-rss" });
+      const result = await createPublicationCollectorFromCatalog({
+        http: rssHttp("https://www.alignmentforum.org/posts/example/task-gaming"),
+        sources: [broken, healthy],
+      }).collect(window);
+
+      expect(result.candidates).toHaveLength(1);
+      expect(result.succeededSourceIds).toEqual(["healthy-rss"]);
+      expect(result.failures).toEqual([
+        { sourceId: `missing-${missingPolicy}`, kind: "parse" },
+      ]);
+    },
+  );
+
+  it("retains MIT RSS items under the separate article policy", async () => {
+    const mit = rssSource({
+      id: "mit-research",
+      canonicalName: "MIT News Research",
+      canonicalUrl: "https://news.mit.edu/",
+      restrictions: {
+        ...rssSource().restrictions,
+        feedUrl: "https://news.mit.edu/rss/topic/artificial-intelligence2",
+        urlPolicy: {
+          allowedHosts: ["news.mit.edu"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/rss/"],
+        },
+        feedUrlPolicy: {
+          allowedHosts: ["news.mit.edu"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/rss/"],
+        },
+        articleUrlPolicy: {
+          allowedHosts: ["news.mit.edu"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/202"],
+        },
+      },
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: rssHttp("https://news.mit.edu/2026/example-ai-research-0807"),
+      sources: [mit],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates[0]?.originalUrl)
+      .toBe("https://news.mit.edu/2026/example-ai-research-0807");
+  });
+
   it("marks oversized RSS bodies ephemeral so durable checkpoints bound them", async () => {
     const oversized = `${"feed evidence ".repeat(220)}RSS_BODY_TAIL`;
     const rss = `<?xml version="1.0"?><rss xmlns:content="http://purl.org/rss/1.0/modules/content/"><channel><item><title>Bounded feed study</title><link>https://www.alignmentforum.org/posts/example/bounded-feed</link><guid>bounded-feed</guid><pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate><content:encoded><![CDATA[${oversized}]]></content:encoded></item></channel></rss>`;
@@ -238,6 +562,8 @@ describe("PublicationCollector", () => {
         contentUse: "ephemeral-summarization",
         feedUrl: "https://www.alignmentforum.org/feed.xml?view=frontpage",
         urlPolicy: { allowedHosts: ["www.alignmentforum.org"], allowedPorts: [""], allowedPathPrefixes: ["/feed.xml", "/posts/"] },
+        feedUrlPolicy: { allowedHosts: ["www.alignmentforum.org"], allowedPorts: [""], allowedPathPrefixes: ["/feed.xml"] },
+        articleUrlPolicy: { allowedHosts: ["www.alignmentforum.org"], allowedPorts: [""], allowedPathPrefixes: ["/posts/"] },
       },
       discoveryMechanism: "rss",
       sectionEligibility: ["research", "research_radar"],
@@ -636,6 +962,16 @@ describe("RssAdapter feed normalization", () => {
             allowedHosts: ["www.lesswrong.com"],
             allowedPorts: [""],
             allowedPathPrefixes: ["/feed.xml", "/posts/"],
+          },
+          feedUrlPolicy: {
+            allowedHosts: ["www.lesswrong.com"],
+            allowedPorts: [""],
+            allowedPathPrefixes: ["/feed.xml"],
+          },
+          articleUrlPolicy: {
+            allowedHosts: ["www.lesswrong.com"],
+            allowedPorts: [""],
+            allowedPathPrefixes: ["/posts/"],
           },
         },
       }),

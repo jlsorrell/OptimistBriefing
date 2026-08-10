@@ -133,18 +133,19 @@ export class PublicationPageAdapter {
     private readonly http: SourceHttpClient,
     private readonly source: ResearchSourceRecord,
     pageUrl: string,
-    private readonly urlPolicy: OutboundUrlPolicy,
+    private readonly pageUrlPolicy: OutboundUrlPolicy,
+    private readonly articleUrlPolicy: OutboundUrlPolicy,
     listing?: unknown,
   ) {
     this.sourceId = source.id;
     this.laneId = `${source.id}:page`;
-    this.pageUrl = assertSafeOutboundUrl(pageUrl, urlPolicy).toString();
+    this.pageUrl = assertSafeOutboundUrl(pageUrl, pageUrlPolicy).toString();
     this.listing = listing === undefined ? null : ListingConfigSchema.parse(listing);
   }
 
   private permittedItem(input: Omit<ListingItem, "url"> & { url: string }, baseUrl: string): ListingItem | null {
     try {
-      return { ...input, url: assertSafeOutboundUrl(new URL(input.url, baseUrl), this.urlPolicy).toString() };
+      return { ...input, url: assertSafeOutboundUrl(new URL(input.url, baseUrl), this.articleUrlPolicy).toString() };
     } catch {
       return null;
     }
@@ -156,7 +157,7 @@ export class PublicationPageAdapter {
     const response = await this.http.get(this.source, this.pageUrl, {
       headers: { accept: "text/html,application/xhtml+xml" },
       useValidators: false,
-      urlPolicy: this.urlPolicy,
+      urlPolicy: this.pageUrlPolicy,
     });
     if (response.body === null) return [];
     const mediaType = response.contentType?.split(";", 1)[0]?.trim().toLowerCase();
@@ -212,7 +213,7 @@ export class PublicationPageAdapter {
           const detail = await this.http.get(this.source, item.url, {
             headers: { accept: "text/html,application/xhtml+xml" },
             useValidators: false,
-            urlPolicy: this.urlPolicy,
+            urlPolicy: this.articleUrlPolicy,
           });
           originalUrl = detail.finalUrl;
           retrievedAt = detail.retrievedAt;
