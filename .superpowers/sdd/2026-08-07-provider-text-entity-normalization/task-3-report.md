@@ -1,5 +1,58 @@
 # Task 3 — Entity-normalization regression gate
 
+## Final Round 21 pre-commit verification status
+
+**PASS, including independent review.** Round 21 adds one central checkpoint
+cross-marker invariant and a genuine D1 matrix for presentation-only shortlist,
+synthesize, and validate artifacts. No production display/evidence mapper,
+structural field path, database schema, deployment configuration, or historical
+row was changed.
+
+### Fresh Round 21 evidence
+
+1. Strict RED/GREEN D1 matrix:
+
+   ```sh
+   npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "presentation-only"
+   ```
+
+   RED: all 9 selected cases failed—three public writers accepted, three public
+   readers returned, and three pipeline resumes advanced past malformed
+   presentation-only state. GREEN: all 9 passed, 109 skipped.
+2. Valid marker lattice:
+
+   ```sh
+   npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "presentation-only|promotes legacy shortlist presentation|promotes legacy synthesize presentation|revalidates and promotes transformed legacy validate presentation|presentation envelope outside|inconsistent presentation envelopes|current presentation envelope through"
+   ```
+
+   Result: PASS (15 selected tests; 103 skipped). Normalization-only legacy
+   migration, wrong-stage error ordering, mixed-chunk rejection, and both-
+   current multi-chunk byte stability remain intact.
+3. Affected unit suites: PASS (22 files; 574 tests).
+4. Remaining non-Worker suite excluding the unrelated managed-OAuth fixture:
+   PASS (40 files; 803 tests).
+5. Full `npm run test:worker`: PASS (11 files; 255 tests), with only existing
+   third-party missing-sourcemap warnings.
+6. `npm run check`: PASS. `npm run evaluate`: PASS (precision@5 `1.00`, minimum
+   `0.80`, every assertion passed). `npm run build`: PASS (Vite 7.3.6; 53
+   modules). `git diff --check`: PASS.
+7. Trusted-HTML and targeted structural provider-normalizer misuse scans: no
+   matches.
+
+### Round 21 audit
+
+The only production change is the checkpoint parser in
+`src/workflow/run-editorial-pipeline.ts`; the existing whole-plan source audit
+therefore remains 23 production paths. Presentation-only state is rejected at
+the shared D1 write/read parser before restore or append-only promotion. Fully
+legacy, normalization-only, and both-current artifacts retain their existing
+semantics. Structural URLs, identifiers, dates, roles, access levels, claim
+source IDs, and arbitrary metadata are never transformed by the rejection.
+
+The fresh independent review found no Critical, Important, or Minor issues and
+returned `Ready to commit`. No Round 21 commit, deployment, migration, history
+rewrite, or historical-row mutation has been performed.
+
 ## Final Round 20 pre-commit verification status
 
 **PASS, including independent review** at the final Round 20 worktree. The

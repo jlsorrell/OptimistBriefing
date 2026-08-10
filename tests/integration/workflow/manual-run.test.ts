@@ -277,6 +277,59 @@ async function insertLegacyD1Checkpoint(
   ).run();
 }
 
+const PRESENTATION_CHECKPOINT_STAGES = [
+  "shortlist",
+  "synthesize",
+  "validate",
+] as const;
+
+type PresentationCheckpointStage =
+  (typeof PRESENTATION_CHECKPOINT_STAGES)[number];
+
+function presentationOnlyCheckpointOutput(
+  step: PresentationCheckpointStage,
+): unknown {
+  const item = presentationResearchItem("Reason &amp;amp;#8217; display");
+  if (step === "shortlist") return [item];
+  const candidate = {
+    item,
+    summary: legacyPresentationSummary(
+      step === "validate" ? "unknown-source" : "presentation-source",
+    ),
+  };
+  return step === "validate"
+    ? [{ ...candidate, valid: true }]
+    : [candidate];
+}
+
+async function insertPresentationOnlyD1Checkpoint(
+  runId: string,
+  step: PresentationCheckpointStage,
+): Promise<void> {
+  const output = presentationOnlyCheckpointOutput(step);
+  await env.DB.prepare(
+    `INSERT INTO audit_events (
+      id, run_id, event_type, event_json, created_at
+    ) VALUES (?, ?, 'workflow_checkpoint', ?, ?)`,
+  ).bind(
+    `presentation-only:${runId}:${step}`,
+    runId,
+    JSON.stringify({
+      step,
+      artifact: {
+        output,
+        attempts: 1,
+        durationMs: 0,
+        itemCount: Array.isArray(output) ? output.length : 1,
+        estimatedCostUsd: 0,
+        providerTextPresentationVersion:
+          PROVIDER_TEXT_PRESENTATION_VERSION,
+      },
+    }),
+    now,
+  ).run();
+}
+
 function compositionCheckpointFixture(
   runId: string,
   editionDate: string,
@@ -5382,6 +5435,155 @@ describe("manual editorial run", () => {
     );
   });
 
+  it.each(PRESENTATION_CHECKPOINT_STAGES)(
+    "rejects a presentation-only %s artifact at the public D1 writer without persisting it",
+    async (step) => {
+      // Removing the central cross-marker invariant must let this malformed
+      // state become a durable checkpoint through the public writer.
+      const runId = `run-d1-write-presentation-only-${step}`;
+      const store = createD1PipelineStore(env.DB);
+      await store.createRun({
+        id: runId,
+        editionDate: "2034-03-09",
+        status: "running",
+        currentStep: step,
+        retryable: false,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+        failureCode: null,
+      });
+      const output = presentationOnlyCheckpointOutput(step);
+
+      await expect(store.saveCheckpoint(runId, step, {
+        output,
+        attempts: 1,
+        durationMs: 0,
+        itemCount: Array.isArray(output) ? output.length : 1,
+        estimatedCostUsd: 0,
+        providerTextPresentationVersion:
+          PROVIDER_TEXT_PRESENTATION_VERSION,
+      })).rejects.toThrow(
+        "Provider-text presented checkpoint artifacts must also be marked provider-text normalized.",
+      );
+
+      const rows = await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+           AND json_extract(event_json, '$.step') = ?`,
+      ).bind(runId, step).first<{ count: number }>();
+      expect(rows).toEqual({ count: 0 });
+    },
+  );
+
+  it.each(PRESENTATION_CHECKPOINT_STAGES)(
+    "rejects a directly inserted presentation-only %s artifact at the public D1 reader",
+    async (step) => {
+      // A restore-only guard would miss the public artifact boundary and make
+      // this externally written malformed row appear trustworthy to callers.
+      const runId = `run-d1-read-presentation-only-${step}`;
+      const store = createD1PipelineStore(env.DB);
+      await store.createRun({
+        id: runId,
+        editionDate: "2034-03-10",
+        status: "running",
+        currentStep: step,
+        retryable: false,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+        failureCode: null,
+      });
+      await insertPresentationOnlyD1Checkpoint(runId, step);
+
+      await expect(store.readArtifact(runId, step)).rejects.toMatchObject({
+        message: `INVALID_CHECKPOINT_ARTIFACT:${step}`,
+        cause: {
+          message:
+            "Provider-text presented checkpoint artifacts must also be marked provider-text normalized.",
+        },
+      });
+    },
+  );
+
+  it.each(PRESENTATION_CHECKPOINT_STAGES)(
+    "does not promote or advance a presentation-only %s artifact during pipeline restore",
+    async (step) => {
+      // If reconciliation catches or tolerates this state, it can append both
+      // markers and bless presentation fields that were never migrated.
+      const runId = `run-d1-no-promotion-presentation-only-${step}`;
+      const store = createD1PipelineStore(env.DB);
+      await store.createRun({
+        id: runId,
+        editionDate: "2034-03-11",
+        status: "running",
+        currentStep: step,
+        retryable: false,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+        failureCode: null,
+      });
+      await seedD1CheckpointsBefore(store, runId, step);
+      if (step === "validate") {
+        await seedD1Items([
+          presentationResearchItem("Reason &amp;amp;#8217; display"),
+        ]);
+      }
+      await insertPresentationOnlyD1Checkpoint(runId, step);
+      let downstreamCalls = 0;
+      const context: PipelineContext = {
+        ...fixturePipelineContext({
+          editionDate: "2034-03-11",
+          runId,
+        }),
+        store,
+      };
+      if (step === "shortlist") {
+        context.synthesize = async () => {
+          downstreamCalls += 1;
+          throw new Error("UNEXPECTED_SYNTHESIZE_AFTER_INVALID_SHORTLIST");
+        };
+      } else if (step === "synthesize") {
+        context.validate = async () => {
+          downstreamCalls += 1;
+          throw new Error("UNEXPECTED_VALIDATE_AFTER_INVALID_SYNTHESIZE");
+        };
+      } else {
+        store.persistEdition = async () => {
+          downstreamCalls += 1;
+          throw new Error("UNEXPECTED_COMPOSE_AFTER_INVALID_VALIDATE");
+        };
+      }
+
+      await expect(runEditorialPipeline(context)).rejects.toThrow(
+        `INVALID_CHECKPOINT_ARTIFACT:${step}`,
+      );
+
+      const rows = await env.DB.prepare(
+        `SELECT
+           COUNT(*) AS count,
+           SUM(CASE WHEN
+             json_extract(event_json, '$.artifact.providerTextNormalizationVersion') = 1
+             AND json_extract(event_json, '$.artifact.providerTextPresentationVersion') = 1
+           THEN 1 ELSE 0 END) AS promoted
+         FROM audit_events
+         WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+           AND json_extract(event_json, '$.step') = ?`,
+      ).bind(runId, step).first<{ count: number; promoted: number }>();
+      expect(rows).toEqual({ count: 1, promoted: 0 });
+      expect(downstreamCalls).toBe(0);
+      await expect(store.getRun(runId)).resolves.toMatchObject({
+        currentStep: step,
+        status: "retryable",
+        failureCode: `INVALID_CHECKPOINT_ARTIFACT:${step}`,
+      });
+    },
+  );
+
   it("rejects a presentation envelope outside shortlist through validate", async () => {
     const runId = "run-d1-reject-presentation-normalize";
     const store = createD1PipelineStore(env.DB);
@@ -5406,6 +5608,17 @@ describe("manual editorial run", () => {
       estimatedCostUsd: 0,
       providerTextNormalizationVersion:
         PROVIDER_TEXT_NORMALIZATION_VERSION,
+      providerTextPresentationVersion:
+        PROVIDER_TEXT_PRESENTATION_VERSION,
+    })).rejects.toThrow(
+      "Only shortlist, synthesize, and validate checkpoint artifacts can be marked provider-text presented.",
+    );
+    await expect(store.saveCheckpoint(runId, "normalize", {
+      output: [fixtureItem("invalid-presentation-only-stage", "world")],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 1,
+      estimatedCostUsd: 0,
       providerTextPresentationVersion:
         PROVIDER_TEXT_PRESENTATION_VERSION,
     })).rejects.toThrow(

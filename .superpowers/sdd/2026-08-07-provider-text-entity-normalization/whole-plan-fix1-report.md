@@ -1980,6 +1980,151 @@ None. The fresh independent pre-commit review found no Critical, Important, or
 Minor issues and returned `Ready to commit`. Worker runs emit only the existing
 third-party missing-sourcemap warnings.
 
+## Whole-plan Fix Round 21
+
+Round 21 closes the final cross-marker coherence seam: a checkpoint cannot be
+trusted as provider-text presented unless its Item graph is also trusted as
+provider-text normalized. The change is confined to the central checkpoint
+artifact parser and genuine D1 boundary tests. It does not change valid legacy
+migration, current artifact bytes, structural fields, storage schema, or
+deployment state.
+
+### Approved implementation plan
+
+Root-cause tracing found that the parser independently accepts the presentation
+and normalization markers. A legal presentation-stage artifact carrying only
+`providerTextPresentationVersion: 1` therefore reaches restore. Restore
+normalizes the Item graph because its normalization marker is absent, skips
+selection-reason/summary migration and validate-state recomputation because its
+presentation marker is present, and the reconciliation path then appends both
+markers to that partially transformed output.
+
+The approved fix is one cross-field invariant in `parseCheckpointArtifact`,
+placed after existing individual stage-legality checks so their error ordering
+is unchanged: a present presentation marker requires
+`providerTextNormalizationVersion: 1`. Fully legacy artifacts, normalization-
+only artifacts awaiting presentation migration, and artifacts carrying both
+current markers remain valid.
+
+The strict TDD cycle is:
+
+1. Add a genuine D1 table-driven regression for shortlist, synthesize, and
+   validate. For each stage, prove the public writer rejects presentation-only
+   state without a row; a directly inserted unchunked artifact fails public
+   read; and pipeline resume fails before downstream work without appending a
+   promotion or moving the run.
+2. Run the focused Worker selection and record its failure against the missing
+   invariant.
+3. Add only the central parser condition and exact error. Rerun the focused
+   matrix plus the existing normalization-only legacy promotions, wrong-stage
+   presentation rejection, mixed-chunk rejection, and both-current byte-stable
+   round trip.
+4. Run affected/non-OAuth/full Worker/type/evaluation/build/diff/safety gates,
+   update this report and Task 3 evidence, obtain fresh independent review, and
+   create one new commit only if the review and final worktree remain clean.
+
+### RED evidence
+
+The complete public-writer, direct-reader, and pipeline-no-promotion matrix was
+run before the parser invariant existed:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "presentation-only"
+```
+
+Result: exit 1; all 9 selected tests failed and 109 were skipped. The three
+public writer cases resolved instead of rejecting, the three direct reader
+cases returned their malformed artifact, and all three pipeline restore cases
+advanced into downstream behavior instead of failing at artifact read. This
+proves the matrix exercises the missing invariant rather than only its final
+error text.
+
+### Implementation
+
+- Added one cross-marker check to `parseCheckpointArtifact`, after all existing
+  individual stage-legality checks. A present presentation marker now requires
+  the current normalization marker, with the exact bounded error
+  `Provider-text presented checkpoint artifacts must also be marked provider-text normalized.`
+- The D1 matrix uses valid stage-specific output for shortlist, synthesize, and
+  validate. It exercises `saveCheckpoint`, directly inserted unchunked audit
+  state through `readArtifact`, and full `runEditorialPipeline` reconciliation.
+  No parser mocks, private exports, storage migrations, or restore fallbacks are
+  used.
+- Fully legacy artifacts, normalization-only presentation-stage artifacts, and
+  artifacts carrying both current markers retain their prior behavior. Wrong-
+  stage marker errors still run before the new dependency check.
+
+### GREEN evidence
+
+Focused invariant matrix:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "presentation-only"
+```
+
+Result: exit 0; all 9 selected tests passed, 109 skipped.
+
+Focused valid-state lattice:
+
+```sh
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "presentation-only|promotes legacy shortlist presentation|promotes legacy synthesize presentation|revalidates and promotes transformed legacy validate presentation|presentation envelope outside|inconsistent presentation envelopes|current presentation envelope through"
+```
+
+Result: exit 0; all 15 selected tests passed, 103 skipped. This includes all
+three normalization-only legacy promotions, wrong-stage rejection, mixed-
+presentation chunk rejection, and both-current multi-chunk byte stability.
+
+Final broad gates:
+
+```sh
+npx vitest run tests/unit/editorial tests/unit/workflow tests/unit/sources
+npx vitest run --exclude tests/unit/config/preview-e2e-managed-oauth.test.ts
+npm run test:worker
+npm run check
+npm run evaluate
+npm run build
+git diff --check
+```
+
+Results: exit 0 throughout. Affected unit suites passed 22 files/574 tests;
+the non-OAuth suite passed 40 files/803 tests; the full Worker suite passed 11
+files/255 tests. TypeScript passed, evaluation reported precision@5 `1.00`
+against minimum `0.80` with every assertion passing, Vite 7.3.6 built 53
+modules, and the diff contained no whitespace errors. Trusted-HTML and targeted
+structural provider-normalizer misuse scans returned no matches. Worker output
+contained only existing third-party missing-sourcemap warnings.
+
+### Files changed
+
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/task-3-report.md`
+- `.superpowers/sdd/2026-08-07-provider-text-entity-normalization/whole-plan-fix1-report.md`
+- `src/workflow/run-editorial-pipeline.ts`
+- `tests/integration/workflow/manual-run.test.ts`
+
+### Self-review
+
+- The valid artifact lattice is explicit: neither marker is fully legacy;
+  normalization-only migrates presentation; both markers are current;
+  presentation-only is malformed. The writer already emits both markers on all
+  presentation stages, so no valid fresh artifact is rejected.
+- The invariant runs after wrong-stage presentation legality, preserving the
+  established error for a presentation marker on any other stage. D1 chunk
+  parsing applies the same invariant to every member before version agreement.
+- Malformed external rows fail before `restoredCheckpointOutput`, so Item
+  normalization, selection/summary migration, validate-state reuse, promotion,
+  run advancement, composition, and publication cannot bless partial state.
+- Each no-promotion case asserts one target-stage audit row, zero rows carrying
+  both markers, zero downstream calls, unchanged current step, and a bounded
+  retryable failure code. No structural output is transformed before rejection.
+- No deploy, migration, historical mutation, type redesign, OAuth change,
+  trusted-HTML insertion, or unrelated cleanup was performed.
+
+### Concerns
+
+None. The fresh independent review found no Critical, Important, or Minor
+issues and returned `Ready to commit`. Only existing third-party
+missing-sourcemap warnings appeared during Worker verification.
+
 ## Whole-plan Fix Round 12
 
 Round 12 closes the aggregate metadata contamination gap left by the Round 11

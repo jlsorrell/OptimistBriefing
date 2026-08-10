@@ -515,6 +515,14 @@ function parseCheckpointArtifact(
       "Only shortlist, synthesize, and validate checkpoint artifacts can be marked provider-text presented.",
     );
   }
+  if (
+    providerTextPresentationVersion !== undefined &&
+    providerTextNormalizationVersion !== PROVIDER_TEXT_NORMALIZATION_VERSION
+  ) {
+    throw new TypeError(
+      "Provider-text presented checkpoint artifacts must also be marked provider-text normalized.",
+    );
+  }
   return {
     output: checkpointOutputSchema(step).parse(record.output),
     attempts: ArtifactAttemptsSchema.parse(record.attempts),
