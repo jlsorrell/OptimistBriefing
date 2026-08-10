@@ -617,6 +617,67 @@ describe("PublicationCollector", () => {
     }]);
   });
 
+  it("fails open when the OpenAI listing receives a 403 while a healthy publication RSS lane survives", async () => {
+    const openai = source({
+      id: "openai",
+      canonicalName: "OpenAI Research",
+      canonicalUrl: "https://openai.com/research/",
+      restrictions: {
+        bodyRetrieval: "permitted",
+        paywall: "none",
+        contentUse: "ephemeral-summarization",
+        pageUrl: "https://openai.com/research/index/publication/",
+        urlPolicy: {
+          allowedHosts: ["openai.com"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/research/index/publication/", "/index/", "/research/"],
+        },
+        feedUrlPolicy: {
+          allowedHosts: ["openai.com"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/research/index/publication/"],
+        },
+        articleUrlPolicy: {
+          allowedHosts: ["openai.com"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/index/", "/research/"],
+        },
+      },
+    });
+    const healthy = rssSource({ id: "healthy-publication" });
+    const healthyFeed = `<?xml version="1.0"?><rss><channel><item>
+      <title>Healthy publication</title>
+      <link>https://www.alignmentforum.org/posts/example/healthy-publication</link>
+      <guid>healthy-publication</guid>
+      <pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate>
+      <description>Healthy RSS evidence.</description>
+    </item></channel></rss>`;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      if (String(input) === "https://openai.com/research/index/publication/") {
+        return new Response("blocked", { status: 403 });
+      }
+      return new Response(healthyFeed, {
+        headers: { "content-type": "application/rss+xml" },
+      });
+    });
+    const collector = createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [openai, healthy],
+    });
+
+    const result = await collector.collect(window);
+
+    expect(result.failures).toContainEqual({ sourceId: "openai", kind: "fetch" });
+    expect(result.candidates).toEqual([
+      expect.objectContaining({ sourceId: "healthy-publication" }),
+    ]);
+    expect(JSON.stringify(result)).not.toContain("blocked");
+  });
+
   it("retains a real page lane when collection succeeds with zero results", async () => {
     const collector = createPublicationCollectorFromCatalog({
       http: new SourceHttpClient({
