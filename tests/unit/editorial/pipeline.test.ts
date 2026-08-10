@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { clusterNews } from "../../../src/editorial/cluster";
 import { deduplicateItems } from "../../../src/editorial/deduplicate";
 import {
+  scoreNews,
   scoreNewsDevelopment,
 } from "../../../src/editorial/news-score";
 import { normalizeCandidate } from "../../../src/editorial/normalize";
@@ -13,10 +14,18 @@ import {
   type SectionBudgets,
   type ShortlistPreferences,
 } from "../../../src/editorial/shortlist";
+import type { Item } from "../../../src/contracts/editorial";
 import type {
   RawNewsCandidate,
   RawResearchCandidate,
 } from "../../../src/sources/types";
+import {
+  createProductionPipelineContext,
+} from "../../../src/workflow/run-editorial-pipeline";
+import {
+  WorkflowItemPayloadSchema,
+  type PipelineStore,
+} from "../../../src/workflow/types";
 
 const NOW = "2026-07-29T12:00:00.000Z";
 
@@ -106,7 +115,174 @@ function rawResearch(
   };
 }
 
+function withWorkflow(
+  item: Item,
+  workflow: Record<string, unknown>,
+): Item {
+  return {
+    ...item,
+    metadata: {
+      ...item.metadata,
+      workflow: { version: 1, ...workflow },
+    },
+  };
+}
+
+function workflowPayload(item: Item) {
+  return WorkflowItemPayloadSchema.parse(item.metadata.workflow);
+}
+
 describe("editorial production path", () => {
+  it("adds bounded technical-interest reasons for core-first and fallback selections", async () => {
+    const directRaw = {
+      ...rawResearch(
+        "2607.20001",
+        "Mechanistic interpretability for transformer circuits",
+        ["Interpretability"],
+      ),
+      abstract:
+        "ABSTRACT_SENTINEL_DIRECT describes the matched paper evidence.",
+    };
+    const adjacentRaws = [
+      {
+        ...rawResearch(
+          "2607.20002",
+          "Audit protocols for model governance",
+          ["AI governance"],
+        ),
+        abstract:
+          "ABSTRACT_SENTINEL_ADJACENT_ONE describes broader evidence.",
+      },
+      {
+        ...rawResearch(
+          "2607.20003",
+          "Accountability practices for AI oversight",
+          ["AI oversight"],
+        ),
+        abstract:
+          "ABSTRACT_SENTINEL_ADJACENT_TWO describes broader evidence.",
+      },
+    ];
+    const direct = normalizeCandidate(directRaw);
+    const adjacent = adjacentRaws.map(normalizeCandidate);
+    const rankedReasons = Array.from(
+      { length: 16 },
+      (_, index) => `Existing ranking reason ${index + 1}.`,
+    );
+    const research = [
+      withWorkflow(direct, {
+        embedding: [0.17, 0.83],
+        researchScore: {
+          itemId: direct.id,
+          topicalFit: 0.9,
+          technicalQuality: 0.9,
+          researchSignal: 0.7,
+          novelty: 0.7,
+          seriousAttention: 0.7,
+          total: 0.7,
+          selectionReasons: rankedReasons,
+        },
+      }),
+      ...adjacent.map((item, index) =>
+        withWorkflow(item, {
+          embedding: [0.17, 0.83],
+          researchScore: {
+            itemId: item.id,
+            topicalFit: 0.95 - index * 0.05,
+            technicalQuality: 0.9,
+            researchSignal: 0.8,
+            novelty: 0.8,
+            seriousAttention: 0.8,
+            total: 0.95 - index * 0.05,
+            selectionReasons: [`Adjacent ranking reason ${index + 1}.`],
+          },
+        })
+      ),
+    ];
+    const news = normalizeCandidate(
+      rawNews("selected-news", {
+        title: "Evaluation Agency publishes an AI oversight standard",
+      }),
+    );
+    const newsWithScore = withWorkflow(news, {
+      embedding: [0.17, 0.83],
+      newsScore: scoreNews({
+        itemId: news.id,
+        publicImportance: 0.9,
+        personalRelevance: 0.9,
+        sourceQuality: 0.9,
+        recency: 0.9,
+        geography: 0.3,
+        novelty: 0.8,
+        evidence: news.sourceRefs.map((source) => ({
+          sourceId: source.id,
+          role: source.role,
+          accessLevel: news.accessLevel,
+          provenanceUrl: source.url,
+          canCorroborateFacts: true,
+        })),
+      }),
+    });
+    const provider = {} as never;
+    const context = createProductionPipelineContext({
+      editionDate: "2026-07-29",
+      runId: "tiered-selection-reasons",
+      store: {} as PipelineStore,
+      now: () => NOW,
+      providers: { summary: provider, assessment: provider },
+      collectCandidates: async () => [],
+    });
+
+    const selected = await context.shortlist(
+      await context.cluster([...research, newsWithScore]),
+    );
+    const selectedResearch = selected.filter(
+      (item) => item.kind === "paper" || item.kind === "blog",
+    );
+    const coreSelected = selectedResearch.find(({ id }) => id === direct.id);
+    const adjacentSelected = selectedResearch.find(
+      ({ id }) => id === adjacent[0]?.id,
+    );
+    const newsSelected = selected.find(
+      (item) => item.kind !== "paper" && item.kind !== "blog",
+    );
+    expect(selectedResearch.map(({ id }) => id)).toEqual([
+      direct.id,
+      adjacent[0]?.id,
+      adjacent[1]?.id,
+    ]);
+    expect(coreSelected).toBeDefined();
+    expect(adjacentSelected).toBeDefined();
+    expect(newsSelected).toBeDefined();
+    if (
+      coreSelected === undefined ||
+      adjacentSelected === undefined ||
+      newsSelected === undefined
+    ) {
+      return;
+    }
+
+    const coreReasons = workflowPayload(coreSelected).selectionReasons ?? [];
+    const adjacentReasons =
+      workflowPayload(adjacentSelected).selectionReasons ?? [];
+    const newsReasons = workflowPayload(newsSelected).selectionReasons ?? [];
+    expect(coreReasons).toContain("Direct technical-interest match.");
+    expect(adjacentReasons)
+      .toContain("Broader research match used as fallback.");
+    expect(newsReasons).not.toContain("Direct technical-interest match.");
+    expect(newsReasons)
+      .not.toContain("Broader research match used as fallback.");
+    expect(coreReasons).toHaveLength(16);
+    expect(coreReasons).not.toContain("Existing ranking reason 16.");
+    expect(selected.every(
+      (item) => (workflowPayload(item).selectionReasons?.length ?? 0) <= 16,
+    )).toBe(true);
+    expect([...coreReasons, ...adjacentReasons, ...newsReasons].join(" "))
+      .not.toMatch(
+        /ABSTRACT_SENTINEL|mechanistic interpretability|0\.17|directPredicates/i,
+      );
+  });
+
   it("selects a scored cluster by development ID with combined evidence", () => {
     const official = rawNews("agency", {
       kind: "document",

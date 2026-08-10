@@ -52,6 +52,10 @@ import {
   mapResearchTopicIds,
 } from "../editorial/research-topics";
 import {
+  classifyResearchRelevance,
+  researchRelevanceReason,
+} from "../editorial/research-relevance";
+import {
   normalizeLegacyStructuredSummaryProviderText,
   prepareCurrentStructuredSummaryProviderText,
 } from "../editorial/summary-provider-text";
@@ -3000,7 +3004,15 @@ export function createProductionPipelineContext(
       const result = ordered.map(({ id, section }) => {
         const item = byId.get(id);
         if (item === undefined) throw new Error(`MISSING_SHORTLIST_ITEM:${id}`);
-        const reasons = [...selectionReasons(item)];
+        const reasons = [
+          ...selectionReasons(item).slice(
+            0,
+            item.kind === "paper" || item.kind === "blog" ? 15 : 16,
+          ),
+          ...(item.kind === "paper" || item.kind === "blog"
+            ? [researchRelevanceReason(classifyResearchRelevance(item))]
+            : []),
+        ];
         return withWorkflowPayload(
           item,
           {
