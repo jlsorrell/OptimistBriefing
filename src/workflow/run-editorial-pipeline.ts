@@ -91,9 +91,14 @@ import { READER_PROFILE } from "../config/reader-profile";
 import { createPaperDiscoveryAdapters } from "../sources/paper-discovery";
 import { SemanticScholarAdapter } from "../sources/semantic-scholar";
 import { OpenAlexAdapter } from "../sources/openalex";
-import { ResearchCollector } from "../sources/research-collector";
-import type { ProviderSchedulerRuntime } from
-  "../sources/provider-scheduler";
+import {
+  RESEARCH_PROVIDER_REQUEST_POLICIES,
+  ResearchCollector,
+} from "../sources/research-collector";
+import {
+  createProviderRequestAdmission,
+  type ProviderSchedulerRuntime,
+} from "../sources/provider-scheduler";
 import {
   boundProviderSourceName,
   boundProviderText,
@@ -3149,7 +3154,12 @@ export function createD1ProductionPipelineContext(
         if (match === undefined) throw new Error(`MISSING_CATALOG_SOURCE:${id}`);
         return catalogSourceInput(match);
       };
-      const http = new SourceHttpClient();
+      const http = new SourceHttpClient({
+        requestAdmission: createProviderRequestAdmission(
+          RESEARCH_PROVIDER_REQUEST_POLICIES,
+          options.schedulerRuntime,
+        ),
+      });
       const newsCollector = createNewsCollectorFromCatalog({ http, sources });
       const publicationCollector = createPublicationCollectorFromCatalog({
         http,

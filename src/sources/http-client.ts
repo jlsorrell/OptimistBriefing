@@ -4,6 +4,10 @@ import {
   UnsafeOutboundUrlError,
   type OutboundUrlPolicy,
 } from "./outbound-url";
+import type {
+  ProviderRequestAdmission,
+  ProviderRequestAdmissionLease,
+} from "./provider-scheduler";
 
 export const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 export const DEFAULT_MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
@@ -29,6 +33,7 @@ type SourceHttpClientOptions = {
   maxRetries?: number;
   sleep?: Sleep;
   now?: () => Date;
+  requestAdmission?: ProviderRequestAdmission;
 };
 
 export type SourceRequestOptions = {
@@ -107,6 +112,56 @@ function systemSleep(milliseconds: number): Promise<void> {
   });
 }
 
+async function settleWithAbort<T>(
+  operation: () => Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) throw signal.reason;
+
+  let rejectOnAbort: (() => void) | undefined;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    rejectOnAbort = () => reject(
+      signal.reason ?? new Error("source request timed out"),
+    );
+    signal.addEventListener("abort", rejectOnAbort, { once: true });
+  });
+  try {
+    return await Promise.race([operation(), aborted]);
+  } finally {
+    if (rejectOnAbort !== undefined) {
+      signal.removeEventListener("abort", rejectOnAbort);
+    }
+  }
+}
+
+async function cancelResponseBody(
+  response: Response,
+  signal: AbortSignal,
+): Promise<void> {
+  if (response.body === null) return;
+  await settleWithAbort(() => response.body!.cancel(), signal);
+}
+
+function responseBodyFailure(
+  sourceId: string,
+  status: number,
+  signal: AbortSignal,
+): SourceFetchError {
+  return new SourceFetchError({
+    sourceId,
+    status,
+    retryable: true,
+    failureKind: signal.aborted ? "timeout" : "transport",
+    reason: signal.aborted
+      ? "request timed out while reading response"
+      : "network error while reading response",
+  });
+}
+
+const passThroughAdmission: ProviderRequestAdmission = Object.freeze({
+  acquire: async () => ({ release: () => undefined }),
+});
+
 function retryDelayMilliseconds(
   retryAfter: string | null,
   attempt: number,
@@ -139,6 +194,7 @@ async function readBoundedBody(
   response: Response,
   maxBytes: number,
   sourceId: string,
+  signal: AbortSignal,
 ): Promise<string> {
   const declaredLength = response.headers.get("content-length");
   if (
@@ -146,7 +202,11 @@ async function readBoundedBody(
     Number.isFinite(Number(declaredLength)) &&
     Number(declaredLength) > maxBytes
   ) {
-    await response.body?.cancel();
+    try {
+      await cancelResponseBody(response, signal);
+    } catch {
+      // The known non-retryable response-size rejection remains authoritative.
+    }
     throw new SourceFetchError({
       sourceId,
       status: response.status,
@@ -165,13 +225,17 @@ async function readBoundedBody(
   let body = "";
   try {
     while (true) {
-      const part = await reader.read();
+      const part = await settleWithAbort(() => reader.read(), signal);
       if (part.done) {
         break;
       }
       byteCount += part.value.byteLength;
       if (byteCount > maxBytes) {
-        await reader.cancel();
+        try {
+          await settleWithAbort(() => reader.cancel(), signal);
+        } catch {
+          // The known non-retryable response-size rejection remains authoritative.
+        }
         throw new SourceFetchError({
           sourceId,
           status: response.status,
@@ -196,6 +260,7 @@ export class SourceHttpClient {
   private readonly maxRetries: number;
   private readonly sleep: Sleep;
   private readonly now: () => Date;
+  private readonly requestAdmission: ProviderRequestAdmission;
   private readonly validators = new Map<string, Validators>();
 
   constructor(options: SourceHttpClientOptions = {}) {
@@ -223,6 +288,7 @@ export class SourceHttpClient {
     this.maxRetries = maxRetries;
     this.sleep = options.sleep ?? systemSleep;
     this.now = options.now ?? (() => new Date());
+    this.requestAdmission = options.requestAdmission ?? passThroughAdmission;
   }
 
   get(
@@ -313,124 +379,196 @@ export class SourceHttpClient {
         }
       }
 
+      const firstAdmission = await this.requestAdmission.acquire(source.id);
       const abortController = new AbortController();
       const timeout = setTimeout(() => {
         abortController.abort(new Error("source request timed out"));
       }, this.timeoutMs);
       let response: Response;
       let finalUrl = initialUrl;
+      let responseAdmission: ProviderRequestAdmissionLease | null = null;
       try {
         let redirectCount = 0;
         let requestHeaders = headers;
+        let pendingAdmission: ProviderRequestAdmissionLease | null =
+          firstAdmission;
         while (true) {
-          response = await this.fetch(finalUrl.toString(), {
-            method,
-            headers: requestHeaders,
-            signal: abortController.signal,
-            redirect: "manual",
-            ...(options.body === undefined ? {} : { body: options.body }),
-          });
-          if (response.redirected) {
-            await response.body?.cancel();
-            throw new SourceFetchError({
-              sourceId: source.id,
-              status: response.status,
-              retryable: false,
-              failureKind: "policy",
-              reason: "automatic redirect rejected",
-            });
-          }
-          if (response.url !== "") {
-            finalUrl = assertSafeOutboundUrl(
-              response.url,
-              options.urlPolicy,
-            );
-          }
-          if (!REDIRECT_STATUSES.has(response.status)) {
-            break;
-          }
-          const location = response.headers.get("location");
-          if (
-            method !== "GET" ||
-            location === null ||
-            redirectCount >= MAX_REDIRECTS
-          ) {
-            await response.body?.cancel();
-            throw new SourceFetchError({
-              sourceId: source.id,
-              status: response.status,
-              retryable: false,
-              failureKind: "transport",
-              reason: "redirect rejected",
-            });
-          }
-          const previousOrigin = finalUrl.origin;
-          let resolvedLocation: URL;
+          const admission = pendingAdmission ??
+            await this.requestAdmission.acquire(source.id);
+          pendingAdmission = null;
+          let retainAdmission = false;
           try {
-            resolvedLocation = new URL(location, finalUrl);
-          } catch {
-            throw new UnsafeOutboundUrlError("invalid redirect location");
-          }
-          const nextUrl = assertSafeOutboundUrl(
-            resolvedLocation,
-            options.urlPolicy,
-          );
-          await response.body?.cancel();
-          if (
-            nextUrl.origin !== previousOrigin &&
-            sensitiveNames.some((name) => finalUrl.searchParams.has(name))
-          ) {
-            throw new SourceFetchError({
-              sourceId: source.id,
-              status: response.status,
-              retryable: false,
-              failureKind: "policy",
-              reason: "sensitive query redirect rejected",
+            response = await this.fetch(finalUrl.toString(), {
+              method,
+              headers: requestHeaders,
+              signal: abortController.signal,
+              redirect: "manual",
+              ...(options.body === undefined ? {} : { body: options.body }),
             });
-          }
-          redirectCount += 1;
-          if (nextUrl.origin !== previousOrigin) {
-            requestHeaders = new Headers();
-            for (const name of ["accept", "accept-language", "user-agent"]) {
-              const value = headers.get(name);
-              if (value !== null) {
-                requestHeaders.set(name, value);
+            if (response.redirected) {
+              try {
+                await cancelResponseBody(response, abortController.signal);
+              } catch {
+                // The known policy rejection remains authoritative.
+              }
+              throw new SourceFetchError({
+                sourceId: source.id,
+                status: response.status,
+                retryable: false,
+                failureKind: "policy",
+                reason: "automatic redirect rejected",
+              });
+            }
+            if (response.url !== "") {
+              try {
+                finalUrl = assertSafeOutboundUrl(
+                  response.url,
+                  options.urlPolicy,
+                );
+              } catch (error) {
+                try {
+                  await cancelResponseBody(response, abortController.signal);
+                } catch {
+                  // The known response-URL policy rejection remains authoritative.
+                }
+                throw error;
               }
             }
+            if (!REDIRECT_STATUSES.has(response.status)) {
+              responseAdmission = admission;
+              retainAdmission = true;
+              break;
+            }
+            const location = response.headers.get("location");
+            if (
+              method !== "GET" ||
+              location === null ||
+              redirectCount >= MAX_REDIRECTS
+            ) {
+              try {
+                await cancelResponseBody(response, abortController.signal);
+              } catch {
+                // The known non-retryable redirect rejection remains authoritative.
+              }
+              throw new SourceFetchError({
+                sourceId: source.id,
+                status: response.status,
+                retryable: false,
+                failureKind: "transport",
+                reason: "redirect rejected",
+              });
+            }
+            const previousOrigin = finalUrl.origin;
+            let nextUrl: URL;
+            try {
+              let resolvedLocation: URL;
+              try {
+                resolvedLocation = new URL(location, finalUrl);
+              } catch {
+                throw new UnsafeOutboundUrlError("invalid redirect location");
+              }
+              nextUrl = assertSafeOutboundUrl(
+                resolvedLocation,
+                options.urlPolicy,
+              );
+            } catch (error) {
+              try {
+                await cancelResponseBody(response, abortController.signal);
+              } catch {
+                // The known redirect-URL policy rejection remains authoritative.
+              }
+              throw error;
+            }
+            if (
+              nextUrl.origin !== previousOrigin &&
+              sensitiveNames.some((name) => finalUrl.searchParams.has(name))
+            ) {
+              try {
+                await cancelResponseBody(response, abortController.signal);
+              } catch {
+                // The known policy rejection remains authoritative.
+              }
+              throw new SourceFetchError({
+                sourceId: source.id,
+                status: response.status,
+                retryable: false,
+                failureKind: "policy",
+                reason: "sensitive query redirect rejected",
+              });
+            }
+            await cancelResponseBody(response, abortController.signal);
+            redirectCount += 1;
+            if (nextUrl.origin !== previousOrigin) {
+              requestHeaders = new Headers();
+              for (const name of ["accept", "accept-language", "user-agent"]) {
+                const value = headers.get(name);
+                if (value !== null) {
+                  requestHeaders.set(name, value);
+                }
+              }
+            }
+            finalUrl = nextUrl;
+          } finally {
+            if (!retainAdmission) admission.release();
           }
-          finalUrl = nextUrl;
         }
       } catch (error) {
         clearTimeout(timeout);
+        let failure: SourceFetchError;
         if (error instanceof SourceFetchError) {
-          throw error;
-        }
-        if (error instanceof UnsafeOutboundUrlError) {
-          throw new SourceFetchError({
+          failure = error;
+        } else if (error instanceof UnsafeOutboundUrlError) {
+          failure = new SourceFetchError({
             sourceId: source.id,
             status: null,
             retryable: false,
             failureKind: "policy",
             reason: "unsafe redirect URL",
           });
+        } else {
+          failure = new SourceFetchError({
+            sourceId: source.id,
+            status: null,
+            retryable: true,
+            failureKind: abortController.signal.aborted
+              ? "timeout"
+              : "transport",
+            reason: abortController.signal.aborted
+              ? "request timed out"
+              : "network error",
+          });
         }
-        throw new SourceFetchError({
-          sourceId: source.id,
-          status: null,
-          retryable: true,
-          failureKind: abortController.signal.aborted
-            ? "timeout"
-            : "transport",
-          reason: abortController.signal.aborted
-            ? "request timed out"
-            : "network error",
-        });
+        if (failure.retryable && attempt < maxRetries) {
+          await this.sleep(retryDelayMilliseconds(null, attempt, this.now()));
+          continue;
+        }
+        throw failure;
       }
 
       const retrievedAt = this.now().toISOString();
       if (response.status === 304 && options.useValidators === true) {
-        clearTimeout(timeout);
-        await response.body?.cancel();
+        let cancellationFailure: SourceFetchError | null = null;
+        try {
+          await cancelResponseBody(response, abortController.signal);
+        } catch {
+          cancellationFailure = responseBodyFailure(
+            source.id,
+            response.status,
+            abortController.signal,
+          );
+        } finally {
+          clearTimeout(timeout);
+          responseAdmission?.release();
+        }
+        if (cancellationFailure !== null) {
+          if (attempt < maxRetries) {
+            await this.sleep(
+              retryDelayMilliseconds(null, attempt, this.now()),
+            );
+            continue;
+          }
+          throw cancellationFailure;
+        }
         return {
           status: 304,
           body: null,
@@ -445,19 +583,25 @@ export class SourceHttpClient {
 
       if (!response.ok) {
         const retryable = RETRYABLE_STATUSES.has(response.status);
-        if (retryable && attempt < maxRetries) {
-          const delay = retryDelayMilliseconds(
+        const delay = retryable && attempt < maxRetries
+          ? retryDelayMilliseconds(
             response.headers.get("retry-after"),
             attempt,
             this.now(),
-          );
+          )
+          : null;
+        try {
+          await cancelResponseBody(response, abortController.signal);
+        } catch {
+          // The known HTTP status remains authoritative and sanitized.
+        } finally {
           clearTimeout(timeout);
-          await response.body?.cancel();
+          responseAdmission?.release();
+        }
+        if (delay !== null) {
           await this.sleep(delay);
           continue;
         }
-        clearTimeout(timeout);
-        await response.body?.cancel();
         throw new SourceFetchError({
           sourceId: source.id,
           status: response.status,
@@ -467,30 +611,35 @@ export class SourceHttpClient {
         });
       }
 
-      let body: string;
+      let body = "";
+      let bodyFailure: SourceFetchError | null = null;
       try {
         body = await readBoundedBody(
           response,
           this.maxResponseBytes,
           source.id,
+          abortController.signal,
         );
       } catch (error) {
         if (error instanceof SourceFetchError) {
-          throw error;
+          bodyFailure = error;
+        } else {
+          bodyFailure = responseBodyFailure(
+            source.id,
+            response.status,
+            abortController.signal,
+          );
         }
-        throw new SourceFetchError({
-          sourceId: source.id,
-          status: response.status,
-          retryable: true,
-          failureKind: abortController.signal.aborted
-            ? "timeout"
-            : "transport",
-          reason: abortController.signal.aborted
-            ? "request timed out while reading response"
-            : "network error while reading response",
-        });
       } finally {
         clearTimeout(timeout);
+        responseAdmission?.release();
+      }
+      if (bodyFailure !== null) {
+        if (bodyFailure.retryable && attempt < maxRetries) {
+          await this.sleep(retryDelayMilliseconds(null, attempt, this.now()));
+          continue;
+        }
+        throw bodyFailure;
       }
       const etag = response.headers.get("etag");
       const lastModified = response.headers.get("last-modified");

@@ -24,6 +24,15 @@ async function source(id: string, database = env.UPGRADE_DB) {
   return found;
 }
 
+async function executeMigrationSql(
+  database: D1Database,
+  migration: D1Migration,
+): Promise<void> {
+  await database.batch(
+    migration.queries.map((query) => database.prepare(query)),
+  );
+}
+
 const PRE_0011 = env.TEST_MIGRATIONS.filter(
   ({ name }) => name <= "0010_release_terminal_model_reservations.sql",
 );
@@ -178,6 +187,154 @@ describe("publication URL policy migration", () => {
       });
   });
 
+  it("preserves explicit split policies that exactly equal the legacy policy", async () => {
+    await applyD1Migrations(env.UPGRADE_DB, PRE_0011);
+    const mit = await source("mit-research", env.UPGRADE_DB);
+    const legacyPolicy = mit.restrictions.urlPolicy;
+    const before = {
+      ...mit.restrictions,
+      feedUrlPolicy: legacyPolicy,
+      articleUrlPolicy: legacyPolicy,
+    };
+    await env.UPGRADE_DB.prepare(
+      "UPDATE sources SET restrictions_json = ? WHERE id = ?",
+    ).bind(JSON.stringify(before), "mit-research").run();
+
+    await applyD1Migrations(env.UPGRADE_DB, [requiredMigration(MIGRATION_NAME)]);
+
+    expect((await source("mit-research", env.UPGRADE_DB)).restrictions)
+      .toEqual(before);
+  });
+
+  it("fills a missing split peer without rewriting an explicit exact-legacy field", async () => {
+    await applyD1Migrations(env.UPGRADE_DB, PRE_0011);
+    const lessWrong = await source("lesswrong-curated", env.UPGRADE_DB);
+    const legacyPolicy = lessWrong.restrictions.urlPolicy;
+    const before = {
+      ...lessWrong.restrictions,
+      feedUrlPolicy: legacyPolicy,
+    };
+    await env.UPGRADE_DB.prepare(
+      "UPDATE sources SET restrictions_json = ? WHERE id = ?",
+    ).bind(JSON.stringify(before), "lesswrong-curated").run();
+
+    await applyD1Migrations(env.UPGRADE_DB, [requiredMigration(MIGRATION_NAME)]);
+
+    expect((await source("lesswrong-curated", env.UPGRADE_DB)).restrictions)
+      .toEqual({
+        ...before,
+        articleUrlPolicy: legacyPolicy,
+      });
+  });
+
+  it("fills a missing feed peer without rewriting an exact-legacy article policy", async () => {
+    await applyD1Migrations(env.UPGRADE_DB, PRE_0011);
+    const alignmentForum = await source("alignment-forum", env.UPGRADE_DB);
+    const legacyPolicy = alignmentForum.restrictions.urlPolicy;
+    const before = {
+      ...alignmentForum.restrictions,
+      articleUrlPolicy: legacyPolicy,
+    };
+    await env.UPGRADE_DB.prepare(
+      "UPDATE sources SET restrictions_json = ? WHERE id = ?",
+    ).bind(JSON.stringify(before), "alignment-forum").run();
+
+    await applyD1Migrations(env.UPGRADE_DB, [requiredMigration(MIGRATION_NAME)]);
+
+    expect((await source("alignment-forum", env.UPGRADE_DB)).restrictions)
+      .toEqual({
+        ...before,
+        feedUrlPolicy: legacyPolicy,
+      });
+  });
+
+  it("preserves a custom OpenAI page when split policies were absent", async () => {
+    await applyD1Migrations(env.UPGRADE_DB, PRE_0011);
+    const openai = await source("openai", env.UPGRADE_DB);
+    const customPageUrl = "https://openai.com/research/custom-publications/";
+    const before = {
+      ...openai.restrictions,
+      pageUrl: customPageUrl,
+    };
+    await env.UPGRADE_DB.prepare(
+      "UPDATE sources SET restrictions_json = ? WHERE id = ?",
+    ).bind(JSON.stringify(before), "openai").run();
+
+    await applyD1Migrations(env.UPGRADE_DB, [requiredMigration(MIGRATION_NAME)]);
+
+    expect((await source("openai", env.UPGRADE_DB)).restrictions).toEqual({
+      ...before,
+      feedUrlPolicy: openai.restrictions.urlPolicy,
+      articleUrlPolicy: openai.restrictions.urlPolicy,
+    });
+  });
+
+  it.each([
+    ["alignment-forum", "https://www.alignmentforum.org/operator-feed.xml"],
+    ["lesswrong-curated", "https://www.lesswrong.com/operator-feed.xml"],
+    ["mit-research", "https://news.mit.edu/rss/operator-feed"],
+  ])(
+    "preserves a custom %s feed endpoint when split policies were absent",
+    async (sourceId, customFeedUrl) => {
+      await applyD1Migrations(env.UPGRADE_DB, PRE_0011);
+      const current = await source(sourceId, env.UPGRADE_DB);
+      const before = {
+        ...current.restrictions,
+        feedUrl: customFeedUrl,
+      };
+      await env.UPGRADE_DB.prepare(
+        "UPDATE sources SET restrictions_json = ? WHERE id = ?",
+      ).bind(JSON.stringify(before), sourceId).run();
+
+      await applyD1Migrations(
+        env.UPGRADE_DB,
+        [requiredMigration(MIGRATION_NAME)],
+      );
+
+      expect((await source(sourceId, env.UPGRADE_DB)).restrictions).toEqual({
+        ...before,
+        feedUrlPolicy: current.restrictions.urlPolicy,
+        articleUrlPolicy: current.restrictions.urlPolicy,
+      });
+    },
+  );
+
+  it.each([
+    "alignment-forum",
+    "lesswrong-curated",
+    "mit-research",
+    "openai",
+  ])(
+    "preserves a custom legacy policy for %s when split policies were absent",
+    async (sourceId) => {
+      await applyD1Migrations(env.UPGRADE_DB, PRE_0011);
+      const current = await source(sourceId, env.UPGRADE_DB);
+      const customLegacyPolicy = {
+        allowedHosts: ["operator.example"],
+        allowedPorts: ["8443"],
+        allowedPathPrefixes: ["/operator/"],
+      };
+      const before = {
+        ...current.restrictions,
+        urlPolicy: customLegacyPolicy,
+      };
+      await env.UPGRADE_DB.prepare(
+        "UPDATE sources SET restrictions_json = ? WHERE id = ?",
+      ).bind(JSON.stringify(before), sourceId).run();
+
+      await applyD1Migrations(
+        env.UPGRADE_DB,
+        [requiredMigration(MIGRATION_NAME)],
+      );
+
+      expect((await source(sourceId, env.UPGRADE_DB)).restrictions).toEqual({
+        ...before,
+        feedUrlPolicy: customLegacyPolicy,
+        articleUrlPolicy: customLegacyPolicy,
+      });
+    },
+  );
+
   it("fills only missing split policy fields from the legacy policy", async () => {
     await applyD1Migrations(env.UPGRADE_DB, PRE_0011);
     const mit = await source("mit-research", env.UPGRADE_DB);
@@ -233,9 +390,9 @@ describe("publication URL policy migration", () => {
     await applyD1Migrations(env.UPGRADE_DB, PRE_0011);
     const migration = requiredMigration(MIGRATION_NAME);
 
-    await applyD1Migrations(env.UPGRADE_DB, [migration]);
+    await executeMigrationSql(env.UPGRADE_DB, migration);
     const once = await new D1BriefingRepository(env.UPGRADE_DB).listSources();
-    await applyD1Migrations(env.UPGRADE_DB, [migration]);
+    await executeMigrationSql(env.UPGRADE_DB, migration);
 
     expect(await new D1BriefingRepository(env.UPGRADE_DB).listSources())
       .toEqual(once);

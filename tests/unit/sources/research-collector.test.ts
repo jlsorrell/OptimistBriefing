@@ -20,6 +20,8 @@ import {
   OpenAlexDiscoveryAdapter,
 } from "../../../src/sources/openalex";
 import { PaperContentRetriever } from "../../../src/sources/paper-content";
+import { createProviderRequestAdmission } from
+  "../../../src/sources/provider-scheduler";
 import {
   createPaperDiscoveryAdapters,
   SEMANTIC_SCHOLAR_SEED_SET_V1,
@@ -205,7 +207,7 @@ async function collectorWithFixtures() {
 }
 
 describe("ResearchCollector", () => {
-  it("serializes and paces Semantic Scholar lanes", async () => {
+  it("serializes Semantic Scholar lanes without owning request pacing", async () => {
     const clock = logicalSchedulerRuntime();
     const starts: number[] = [];
     let active = 0;
@@ -242,7 +244,7 @@ describe("ResearchCollector", () => {
 
     expect(startsWhileFirstLaneIsHeld).toEqual([0]);
     expect(maximumActiveWhileFirstLaneIsHeld).toBe(1);
-    expect(starts).toEqual([0, 1_000, 2_000]);
+    expect(starts).toEqual([0, 0, 0]);
     expect(maximumActive).toBe(1);
   });
 
@@ -297,6 +299,15 @@ describe("ResearchCollector", () => {
       sleep: httpSleep,
       now: () => new Date(baseTime + currentTime),
       maxRetries: 1,
+      requestAdmission: createProviderRequestAdmission(new Map([
+        ["semantic-scholar", {
+          maxConcurrency: 1,
+          minimumStartIntervalMs: 1_000,
+        }],
+      ]), {
+        now: () => currentTime,
+        sleep: schedulerSleep,
+      }),
     });
     const adapters = [...laneUrls].map(([laneId, url]) => ({
       sourceId: "semantic-scholar",
@@ -340,13 +351,14 @@ describe("ResearchCollector", () => {
       {
         laneId: "semantic-scholar:02-healthy",
         activeLanes: 1,
-        time: 2_000,
+        time: 3_000,
       },
     ]);
     expect(fetch).toHaveBeenCalledTimes(3);
     expect(httpSleep).toHaveBeenCalledTimes(1);
     expect(httpSleep).toHaveBeenCalledWith(2_000);
-    expect(schedulerSleep).not.toHaveBeenCalled();
+    expect(schedulerSleep).toHaveBeenCalledOnce();
+    expect(schedulerSleep).toHaveBeenCalledWith(1_000);
     expect(maximumActiveLanes).toBe(1);
     expect(completedLanes).toEqual([
       "semantic-scholar:01-retry",
@@ -526,7 +538,7 @@ describe("ResearchCollector", () => {
       }),
     ]));
     expect(JSON.stringify(result)).not.toContain("secret.example");
-    expect(clock.now()).toBe(1_000);
+    expect(clock.now()).toBe(0);
   });
 
   it.each(["constructor", "__proto__"])(
@@ -1776,6 +1788,155 @@ describe("RssAdapter", () => {
 });
 
 describe("SourceHttpClient", () => {
+  it("paces every Semantic Scholar retry attempt after fallback backoff", async () => {
+    const baseTime = Date.parse("2026-07-29T08:30:00.000Z");
+    const clock = logicalSchedulerRuntime();
+    const starts: number[] = [];
+    const fetch = vi.fn(async () => {
+      starts.push(clock.now());
+      return starts.length === 1
+        ? new Response(null, { status: 503 })
+        : new Response("ok");
+    });
+    const http = new SourceHttpClient({
+      fetch,
+      maxRetries: 1,
+      sleep: clock.sleep,
+      now: () => new Date(baseTime + clock.now()),
+      requestAdmission: createProviderRequestAdmission(new Map([
+        ["semantic-scholar", {
+          maxConcurrency: 1,
+          minimumStartIntervalMs: 1_000,
+        }],
+      ]), clock),
+    });
+
+    const response = await http.get(
+      semanticScholarSource,
+      "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+    );
+
+    expect(response.body).toBe("ok");
+    expect(starts).toEqual([0, 1_000]);
+    expect(clock.sleep.mock.calls.map(([milliseconds]) => milliseconds))
+      .toEqual([500, 500]);
+  });
+
+  it("paces every allowed Semantic Scholar redirect hop", async () => {
+    const clock = logicalSchedulerRuntime();
+    const starts: number[] = [];
+    const fetch = vi.fn(async () => {
+      starts.push(clock.now());
+      return starts.length === 1
+        ? new Response(null, {
+            status: 302,
+            headers: {
+              location:
+                "https://api.semanticscholar.org/graph/v1/paper/search/bulk?cursor=next",
+            },
+          })
+        : new Response("ok");
+    });
+    const http = new SourceHttpClient({
+      fetch,
+      requestAdmission: createProviderRequestAdmission(new Map([
+        ["semantic-scholar", {
+          maxConcurrency: 1,
+          minimumStartIntervalMs: 1_000,
+        }],
+      ]), clock),
+    });
+
+    const response = await http.get(
+      semanticScholarSource,
+      "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+    );
+
+    expect(response.body).toBe("ok");
+    expect(starts).toEqual([0, 1_000]);
+  });
+
+  it("holds Semantic Scholar admission until a successful body is consumed", async () => {
+    const clock = logicalSchedulerRuntime();
+    const starts: number[] = [];
+    let finishFirstBody: (() => void) | undefined;
+    const firstBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        finishFirstBody = () => {
+          controller.enqueue(new TextEncoder().encode("first"));
+          controller.close();
+        };
+      },
+    });
+    const fetch = vi.fn(async () => {
+      starts.push(clock.now());
+      return starts.length === 1
+        ? new Response(firstBody)
+        : new Response("second");
+    });
+    const http = new SourceHttpClient({
+      fetch,
+      requestAdmission: createProviderRequestAdmission(new Map([
+        ["semantic-scholar", {
+          maxConcurrency: 1,
+          minimumStartIntervalMs: 1_000,
+        }],
+      ]), clock),
+    });
+
+    const first = http.get(
+      semanticScholarSource,
+      "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=first",
+    );
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    const second = http.get(
+      semanticScholarSource,
+      "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=second",
+    );
+    await Promise.resolve();
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    finishFirstBody?.();
+
+    expect((await first).body).toBe("first");
+    expect((await second).body).toBe("second");
+    expect(starts).toEqual([0, 1_000]);
+  });
+
+  it("starts the network timeout after queued provider admission", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi.fn(async () => new Response("admitted"));
+      const admission = createProviderRequestAdmission(new Map([
+        ["semantic-scholar", {
+          maxConcurrency: 1,
+          minimumStartIntervalMs: 0,
+        }],
+      ]));
+      const http = new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        timeoutMs: 10,
+        requestAdmission: admission,
+      });
+
+      const held = await admission.acquire("semantic-scholar");
+      const request = http.get(
+        semanticScholarSource,
+        "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=queued",
+      );
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetch).not.toHaveBeenCalled();
+      held.release();
+
+      expect((await request).body).toBe("admitted");
+      expect(fetch).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     "http://public.example.org/feed",
     "https://reader:secret@public.example.org/feed",
@@ -1814,6 +1975,102 @@ describe("SourceHttpClient", () => {
     });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch.mock.calls[0]?.[1]?.redirect).toBe("manual");
+  });
+
+  it("cancels an unsafe redirect body without overriding policy failure", async () => {
+    const privateDetail = "private unsafe redirect cancellation detail";
+    const cancel = vi.fn(async () => {
+      throw new Error(privateDetail);
+    });
+    const fetch = vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({ cancel }),
+      {
+        status: 302,
+        headers: { location: "https://169.254.169.254/latest/meta-data" },
+      },
+    ));
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    let observed: unknown;
+
+    try {
+      await new SourceHttpClient({
+        fetch,
+        sleep,
+        maxRetries: 2,
+      }).get(arxivSource, "https://example.org/start");
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toMatchObject({
+      name: "SourceFetchError",
+      sourceId: "arxiv",
+      status: null,
+      retryable: false,
+      failureKind: "policy",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
+    expect(String(observed)).not.toContain(privateDetail);
+    expect(JSON.stringify(observed)).not.toContain(privateDetail);
+  });
+
+  it("bounds unsafe redirect cancellation before releasing admission", async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn(() => new Promise<void>(() => undefined));
+      const fetch = vi.fn(async () =>
+        fetch.mock.calls.length === 1
+          ? new Response(new ReadableStream<Uint8Array>({ cancel }), {
+            status: 302,
+            headers: {
+              location: "https://169.254.169.254/latest/meta-data",
+            },
+          })
+          : new Response("second")
+      );
+      const http = new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        timeoutMs: 10,
+        requestAdmission: createProviderRequestAdmission(new Map([
+          ["semantic-scholar", {
+            maxConcurrency: 1,
+            minimumStartIntervalMs: 0,
+          }],
+        ])),
+      });
+      let firstFailure: unknown;
+      const first = http.get(
+        semanticScholarSource,
+        "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=first",
+      ).catch((error: unknown) => {
+        firstFailure = error;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const second = http.get(
+        semanticScholarSource,
+        "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=second",
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(10);
+
+      await first;
+      expect(firstFailure).toMatchObject({
+        name: "SourceFetchError",
+        status: null,
+        retryable: false,
+        failureKind: "policy",
+      });
+      expect((await second).body).toBe("second");
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(cancel).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not forward caller-supplied credentials across origins", async () => {
@@ -1873,7 +2130,7 @@ describe("SourceHttpClient", () => {
 
   it("honors a request-local zero-retry limit", async () => {
     const fetch = vi.fn(async () => new Response(null, { status: 429 }));
-    const sleep = vi.fn(async () => undefined);
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
     await expect(new SourceHttpClient({ fetch, sleep, maxRetries: 2 }).get(
       openAlexSource,
       "https://api.openalex.org/works",
@@ -1946,6 +2203,351 @@ describe("SourceHttpClient", () => {
     expect(sleep).toHaveBeenCalledWith(2_000);
   });
 
+  it("uses bounded fallback retries for transient fetch failures", async () => {
+    const privateFailure = new Error("private fetch transport detail");
+    const fetch = vi.fn()
+      .mockRejectedValueOnce(privateFailure)
+      .mockRejectedValueOnce(privateFailure)
+      .mockResolvedValueOnce(new Response("ok"));
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    const http = new SourceHttpClient({ fetch, sleep, maxRetries: 2 });
+
+    const response = await http.get(
+      arxivSource,
+      "https://export.arxiv.org/api/query",
+    );
+
+    expect(response.body).toBe("ok");
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([
+      500,
+      1_000,
+    ]);
+  });
+
+  it("retries a transient body read failure without retaining partial state", async () => {
+    const baseTime = Date.parse("2026-07-29T08:30:00.000Z");
+    const clock = logicalSchedulerRuntime();
+    const starts: number[] = [];
+    const failingBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error("private body transport detail"));
+      },
+    });
+    const fetch = vi.fn(async () => {
+      starts.push(clock.now());
+      return starts.length === 1
+        ? new Response(failingBody, { headers: { etag: '"partial"' } })
+        : new Response("ok", { headers: { etag: '"complete"' } });
+    });
+    const http = new SourceHttpClient({
+      fetch,
+      sleep: clock.sleep,
+      now: () => new Date(baseTime + clock.now()),
+      maxRetries: 1,
+      requestAdmission: createProviderRequestAdmission(new Map([
+        ["semantic-scholar", {
+          maxConcurrency: 1,
+          minimumStartIntervalMs: 1_000,
+        }],
+      ]), clock),
+    });
+
+    const response = await http.get(
+      semanticScholarSource,
+      "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+    );
+
+    expect(response.body).toBe("ok");
+    expect(response.etag).toBe('"complete"');
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(starts).toEqual([0, 1_000]);
+    expect(clock.sleep.mock.calls.map(([milliseconds]) => milliseconds))
+      .toEqual([500, 500]);
+  });
+
+  it("bounds and sanitizes response cancellation failures on retryable statuses", async () => {
+    const privateDetail = "private response cancellation detail";
+    const cancel = vi.fn(async () => {
+      throw new Error(privateDetail);
+    });
+    const fetch = vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({ cancel }),
+      { status: 503 },
+    ));
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    let observed: unknown;
+
+    try {
+      await new SourceHttpClient({
+        fetch,
+        sleep,
+        maxRetries: 1,
+      }).get(arxivSource, "https://export.arxiv.org/api/query");
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toMatchObject({
+      name: "SourceFetchError",
+      sourceId: "arxiv",
+      status: 503,
+      retryable: true,
+      failureKind: "transport",
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(500);
+    expect(String(observed)).not.toContain(privateDetail);
+    expect(JSON.stringify(observed)).not.toContain(privateDetail);
+  });
+
+  it("retries a failed 304 body cancellation within the request cap", async () => {
+    const cancel = vi.fn(async () => {
+      throw new Error("private not-modified cancellation detail");
+    });
+    const notModified = new Response(null, { status: 304 });
+    Object.defineProperty(notModified, "body", {
+      configurable: true,
+      value: { cancel },
+    });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(notModified)
+      .mockResolvedValueOnce(new Response("ok"));
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+
+    const response = await new SourceHttpClient({
+      fetch,
+      sleep,
+      maxRetries: 1,
+    }).get(arxivSource, "https://export.arxiv.org/api/query");
+
+    expect(response.body).toBe("ok");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(500);
+  });
+
+  it("does not let cancellation failures make authentication retryable", async () => {
+    const privateDetail = "private authentication cancellation detail";
+    const cancel = vi.fn(async () => {
+      throw new Error(privateDetail);
+    });
+    const fetch = vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({ cancel }),
+      { status: 401 },
+    ));
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    let observed: unknown;
+
+    try {
+      await new SourceHttpClient({
+        fetch,
+        sleep,
+        maxRetries: 2,
+      }).get(arxivSource, "https://export.arxiv.org/api/query");
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toMatchObject({
+      name: "SourceFetchError",
+      status: 401,
+      retryable: false,
+      failureKind: "transport",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
+    expect(String(observed)).not.toContain(privateDetail);
+    expect(JSON.stringify(observed)).not.toContain(privateDetail);
+  });
+
+  it("bounds response cancellation and releases queued provider admission", async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn(() => new Promise<void>(() => undefined));
+      const fetch = vi.fn(async () =>
+        fetch.mock.calls.length === 1
+          ? new Response(new ReadableStream<Uint8Array>({ cancel }), {
+            status: 503,
+          })
+          : new Response("second")
+      );
+      const http = new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        timeoutMs: 10,
+        requestAdmission: createProviderRequestAdmission(new Map([
+          ["semantic-scholar", {
+            maxConcurrency: 1,
+            minimumStartIntervalMs: 0,
+          }],
+        ])),
+      });
+      let firstFailure: unknown;
+      const first = http.get(
+        semanticScholarSource,
+        "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=first",
+      ).catch((error: unknown) => {
+        firstFailure = error;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const second = http.get(
+        semanticScholarSource,
+        "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=second",
+      );
+
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(fetch).toHaveBeenCalledTimes(2);
+      await first;
+      expect(firstFailure).toMatchObject({
+        name: "SourceFetchError",
+        status: 503,
+        retryable: true,
+      });
+      expect((await second).body).toBe("second");
+      expect(cancel).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([429, 502, 503, 504])(
+    "retries only the approved transient HTTP status %i",
+    async (status) => {
+      const fetch = vi.fn()
+        .mockResolvedValueOnce(new Response(null, { status }))
+        .mockResolvedValueOnce(new Response("ok"));
+      const sleep = vi.fn(async (_milliseconds: number) => undefined);
+
+      const response = await new SourceHttpClient({
+        fetch,
+        sleep,
+        maxRetries: 1,
+      }).get(arxivSource, "https://export.arxiv.org/api/query");
+
+      expect(response.body).toBe("ok");
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(sleep).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([400, 401, 403, 404, 501])(
+    "does not retry non-transient HTTP status %i",
+    async (status) => {
+      const fetch = vi.fn(async () => new Response(null, { status }));
+      const sleep = vi.fn(async (_milliseconds: number) => undefined);
+
+      await expect(new SourceHttpClient({
+        fetch,
+        sleep,
+        maxRetries: 2,
+      }).get(
+        arxivSource,
+        "https://export.arxiv.org/api/query",
+      )).rejects.toMatchObject({ status, retryable: false });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+    },
+  );
+
+  it("caps Retry-After and fallback delays at their existing bounds", async () => {
+    const retryAfterFetch = vi.fn()
+      .mockResolvedValueOnce(new Response(null, {
+        status: 429,
+        headers: { "retry-after": "999" },
+      }))
+      .mockResolvedValueOnce(new Response("ok"));
+    const retryAfterSleep = vi.fn(async (_milliseconds: number) => undefined);
+    await new SourceHttpClient({
+      fetch: retryAfterFetch,
+      sleep: retryAfterSleep,
+      maxRetries: 1,
+    }).get(arxivSource, "https://export.arxiv.org/api/query");
+    expect(retryAfterSleep).toHaveBeenCalledWith(60_000);
+
+    const fallbackFetch = vi.fn(async () => new Response(null, {
+      status: 503,
+    }));
+    const fallbackSleep = vi.fn(async (_milliseconds: number) => undefined);
+    await expect(new SourceHttpClient({
+      fetch: fallbackFetch,
+      sleep: fallbackSleep,
+      maxRetries: 5,
+    }).get(
+      arxivSource,
+      "https://export.arxiv.org/api/query",
+    )).rejects.toMatchObject({ status: 503, retryable: true });
+    expect(fallbackSleep.mock.calls.map(([milliseconds]) => milliseconds))
+      .toEqual([500, 1_000, 2_000, 4_000, 8_000]);
+  });
+
+  it("honors zero retries for transient fetch and body failures", async () => {
+    const fetchFailure = vi.fn(async () => {
+      throw new Error("private fetch detail");
+    });
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    await expect(new SourceHttpClient({
+      fetch: fetchFailure,
+      sleep,
+      maxRetries: 0,
+    }).get(
+      arxivSource,
+      "https://export.arxiv.org/api/query",
+    )).rejects.toMatchObject({ retryable: true, failureKind: "transport" });
+
+    const bodyFailure = vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.error(new Error("private body detail"));
+        },
+      }),
+    ));
+    await expect(new SourceHttpClient({
+      fetch: bodyFailure,
+      sleep,
+      maxRetries: 0,
+    }).get(
+      arxivSource,
+      "https://export.arxiv.org/api/query",
+    )).rejects.toMatchObject({ retryable: true, failureKind: "transport" });
+
+    expect(fetchFailure).toHaveBeenCalledOnce();
+    expect(bodyFailure).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes a transient fetch failure after exhausting its retry cap", async () => {
+    const privateDetail = "private fetch transport and https://secret.example";
+    const fetch = vi.fn(async () => {
+      throw new Error(privateDetail);
+    });
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    let observed: unknown;
+    try {
+      await new SourceHttpClient({
+        fetch,
+        sleep,
+        maxRetries: 1,
+      }).get(arxivSource, "https://export.arxiv.org/api/query");
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toMatchObject({
+      name: "SourceFetchError",
+      retryable: true,
+      failureKind: "transport",
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(500);
+    expect(String(observed)).not.toContain(privateDetail);
+    expect(JSON.stringify(observed)).not.toContain(privateDetail);
+  });
+
   it("rejects oversized responses before retaining their body", async () => {
     const fetch = vi.fn(async () =>
       new Response("not read", {
@@ -1966,6 +2568,47 @@ describe("SourceHttpClient", () => {
     });
   });
 
+  it("keeps an oversized response nonretryable when reader cancellation fails", async () => {
+    const privateDetail = "private oversized cancellation detail";
+    const cancel = vi.fn(async () => {
+      throw new Error(privateDetail);
+    });
+    const fetch = vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+        },
+        cancel,
+      }),
+    ));
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    let observed: unknown;
+
+    try {
+      await new SourceHttpClient({
+        fetch,
+        sleep,
+        maxResponseBytes: 3,
+        maxRetries: 2,
+      }).get(arxivSource, "https://export.arxiv.org/api/query");
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toMatchObject({
+      name: "SourceFetchError",
+      sourceId: "arxiv",
+      status: 200,
+      retryable: false,
+      failureKind: "transport",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
+    expect(String(observed)).not.toContain(privateDetail);
+    expect(JSON.stringify(observed)).not.toContain(privateDetail);
+  });
+
   it("aborts a request after the configured 15-second deadline", async () => {
     let capturedSignal: AbortSignal | undefined;
     const fetch = vi.fn(
@@ -1978,7 +2621,7 @@ describe("SourceHttpClient", () => {
         }),
     );
     vi.useFakeTimers();
-    const http = new SourceHttpClient({ fetch });
+    const http = new SourceHttpClient({ fetch, maxRetries: 0 });
     const request = http.get(arxivSource, "https://example.org/hangs");
     const rejection = expect(request).rejects.toMatchObject({
       name: "SourceFetchError",
@@ -1992,6 +2635,97 @@ describe("SourceHttpClient", () => {
     await rejection;
     expect(capturedSignal?.aborted).toBe(true);
     vi.useRealTimers();
+  });
+
+  it("bounds retries for transient request timeouts", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi.fn(
+        (_input: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(init.signal?.reason);
+            });
+          }),
+      );
+      const sleep = vi.fn(async (_milliseconds: number) => undefined);
+      const http = new SourceHttpClient({
+        fetch,
+        sleep,
+        timeoutMs: 10,
+        maxRetries: 1,
+      });
+
+      const request = http.get(
+        arxivSource,
+        "https://export.arxiv.org/api/query",
+      );
+      let observed: unknown;
+      const settled = request.catch((error: unknown) => {
+        observed = error;
+      });
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(10);
+
+      await settled;
+      expect(observed).toMatchObject({
+        name: "SourceFetchError",
+        sourceId: "arxiv",
+        status: null,
+        retryable: true,
+        failureKind: "timeout",
+      });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(sleep).toHaveBeenCalledOnce();
+      expect(sleep).toHaveBeenCalledWith(500);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds retries for response bodies that never produce a chunk", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi.fn(async () => new Response(
+        new ReadableStream<Uint8Array>({
+          pull: () => new Promise<void>(() => undefined),
+        }),
+      ));
+      const sleep = vi.fn(async (_milliseconds: number) => undefined);
+      const http = new SourceHttpClient({
+        fetch,
+        sleep,
+        timeoutMs: 10,
+        maxRetries: 1,
+      });
+      let observed: unknown;
+      const settled = http.get(
+        arxivSource,
+        "https://export.arxiv.org/api/query",
+      ).catch((error: unknown) => {
+        observed = error;
+      });
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(10);
+
+      await settled;
+      expect(observed).toMatchObject({
+        name: "SourceFetchError",
+        sourceId: "arxiv",
+        status: 200,
+        retryable: true,
+        failureKind: "timeout",
+      });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(sleep).toHaveBeenCalledOnce();
+      expect(sleep).toHaveBeenCalledWith(500);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("sanitizes typed fetch errors and never exposes response bodies", async () => {

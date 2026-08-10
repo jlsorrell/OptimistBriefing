@@ -42,18 +42,32 @@ const RECOGNIZED_PROVIDER_NAMES = new Set([
   "semanticscholar",
 ]);
 
-export const RESEARCH_PROVIDER_SCHEDULE_POLICIES: Readonly<
+export const RESEARCH_PROVIDER_LANE_POLICIES: Readonly<
   Record<string, ProviderSchedulePolicy>
 > = Object.freeze({
   "semantic-scholar": {
     maxConcurrency: 1,
-    minimumStartIntervalMs: 1_000,
+    minimumStartIntervalMs: 0,
   },
   openalex: {
     maxConcurrency: 2,
     minimumStartIntervalMs: 0,
   },
 });
+
+export const RESEARCH_PROVIDER_REQUEST_POLICIES: ReadonlyMap<
+  string,
+  ProviderSchedulePolicy
+> = new Map([
+  ["semantic-scholar", {
+    maxConcurrency: 1,
+    minimumStartIntervalMs: 1_000,
+  }],
+  ["openalex", {
+    maxConcurrency: 2,
+    minimumStartIntervalMs: 0,
+  }],
+]);
 
 const DEFAULT_PROVIDER_POLICY = Object.freeze({
   maxConcurrency: 16,
@@ -420,8 +434,8 @@ export class ResearchCollector {
           providerAdapters.map((adapter) =>
             () => collectDiscoveryLane(adapter, validWindow)
           ),
-          Object.hasOwn(RESEARCH_PROVIDER_SCHEDULE_POLICIES, sourceId)
-            ? RESEARCH_PROVIDER_SCHEDULE_POLICIES[sourceId]!
+          Object.hasOwn(RESEARCH_PROVIDER_LANE_POLICIES, sourceId)
+            ? RESEARCH_PROVIDER_LANE_POLICIES[sourceId]!
             : DEFAULT_PROVIDER_POLICY,
           this.options.schedulerRuntime,
         )

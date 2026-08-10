@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { runProviderTasks } from "../../../src/sources/provider-scheduler";
+import {
+  createProviderRequestAdmission,
+  runProviderTasks,
+} from "../../../src/sources/provider-scheduler";
 
 function runtime() {
   let currentTime = 0;
@@ -131,5 +134,62 @@ describe("runProviderTasks", () => {
       maxConcurrency: 1,
       minimumStartIntervalMs: 0,
     })).rejects.toBe(failure);
+  });
+});
+
+describe("createProviderRequestAdmission", () => {
+  it("paces actual request admissions and holds one in-flight lease", async () => {
+    const clock = runtime();
+    const admission = createProviderRequestAdmission(new Map([
+      ["semantic-scholar", {
+        maxConcurrency: 1,
+        minimumStartIntervalMs: 1_000,
+      }],
+    ]), clock);
+
+    const first = await admission.acquire("semantic-scholar");
+    let secondStarted = false;
+    const secondPending = admission.acquire("semantic-scholar").then(
+      (lease) => {
+        secondStarted = true;
+        return lease;
+      },
+    );
+    await Promise.resolve();
+
+    expect(secondStarted).toBe(false);
+    expect(clock.now()).toBe(0);
+
+    first.release();
+    const second = await secondPending;
+
+    expect(secondStarted).toBe(true);
+    expect(clock.now()).toBe(1_000);
+    second.release();
+  });
+
+  it("allows the configured request concurrency without using inherited keys", async () => {
+    const admission = createProviderRequestAdmission(new Map([
+      ["openalex", { maxConcurrency: 2, minimumStartIntervalMs: 0 }],
+    ]));
+
+    const first = await admission.acquire("openalex");
+    const second = await admission.acquire("openalex");
+    let thirdStarted = false;
+    const thirdPending = admission.acquire("openalex").then((lease) => {
+      thirdStarted = true;
+      return lease;
+    });
+    const inherited = await admission.acquire("constructor");
+    await Promise.resolve();
+
+    expect(thirdStarted).toBe(false);
+    inherited.release();
+    first.release();
+    const third = await thirdPending;
+    expect(thirdStarted).toBe(true);
+
+    second.release();
+    third.release();
   });
 });

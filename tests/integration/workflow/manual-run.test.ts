@@ -7684,6 +7684,8 @@ describe("manual editorial run", () => {
         </entry>
       </feed>`;
     const sourceUrl = "https://arxiv.org/abs/2608.01919v1";
+    const schedulerRuntime = logicalProviderSchedulerRuntime();
+    const semanticScholarStarts: number[] = [];
     const sourceFetch = vi.fn(
       async (input: string | URL | Request): Promise<Response> => {
         const url = String(input);
@@ -7695,6 +7697,7 @@ describe("manual editorial run", () => {
         if (url.startsWith(
           "https://api.semanticscholar.org/graph/v1/paper/batch",
         )) {
+          semanticScholarStarts.push(schedulerRuntime.now());
           return Response.json([{
             paperId: "S2-2608-01919",
             externalIds: { ArXiv: "2608.01919" },
@@ -7715,11 +7718,13 @@ describe("manual editorial run", () => {
         if (url.startsWith(
           "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
         )) {
+          semanticScholarStarts.push(schedulerRuntime.now());
           return Response.json({ total: 0, data: [] });
         }
         if (url.startsWith(
           "https://api.semanticscholar.org/recommendations/v1/papers",
         )) {
+          semanticScholarStarts.push(schedulerRuntime.now());
           return Response.json({ recommendedPapers: [] });
         }
         throw new Error(`Unexpected prepared-contract URL: ${url}`);
@@ -7730,7 +7735,6 @@ describe("manual editorial run", () => {
       const runId = "run-production-research-prepared-contract";
       const editionDate = "2034-05-01";
       const store = createD1PipelineStore(env.DB);
-      const schedulerRuntime = logicalProviderSchedulerRuntime();
       const firstContext = createD1ProductionPipelineContext(
         store,
         editionDate,
@@ -7748,7 +7752,16 @@ describe("manual editorial run", () => {
       await expect(runEditorialPipeline(firstContext)).rejects.toThrow(
         "STOP_AFTER_PRODUCTION_NORMALIZE",
       );
-      expect(schedulerRuntime.now()).toBe(5_000);
+      expect(semanticScholarStarts).toEqual([
+        0,
+        1_000,
+        2_000,
+        3_000,
+        4_000,
+        5_000,
+        6_000,
+      ]);
+      expect(schedulerRuntime.now()).toBe(6_000);
 
       const collectArtifact = await store.readArtifact(runId, "collect") as
         CheckpointArtifact<RawResearchCandidate[]>;
@@ -8006,7 +8019,7 @@ describe("manual editorial run", () => {
       await expect(runEditorialPipeline(firstContext)).rejects.toThrow(
         "TRANSIENT_SUMMARY_FAILURE",
       );
-      expect(schedulerRuntime.now()).toBe(5_000);
+      expect(schedulerRuntime.now()).toBe(6_000);
       const fetchCallsAfterCollect = sourceFetch.mock.calls.length;
       expect(await firstStore.readCollectionSourceFailures(
         "run-fail-open-production",
