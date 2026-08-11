@@ -1500,6 +1500,107 @@ describe("bibliographic discovery", () => {
     )).toBe(true);
   });
 
+  it("recovers an omitted OpenAlex arXiv identity from its landing page", async () => {
+    const work = {
+      id: "https://openalex.org/W7197052950",
+      doi: null,
+      title: "Recovered OpenAlex identity",
+      publication_date: "2026-07-29",
+      updated_date: "2026-07-29T08:00:00.000Z",
+      cited_by_count: 1,
+      ids: { openalex: "https://openalex.org/W7197052950" },
+      authorships: [],
+      topics: [],
+      abstract_inverted_index: null,
+      primary_location: {
+        landing_page_url: "https://arxiv.org/abs/2608.03626v2",
+        source: { display_name: "arXiv" },
+      },
+    };
+    const adapter = new OpenAlexDiscoveryAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({ results: [work] })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      openAlexSource,
+      { laneId: "openalex:text:identity", mode: "text", query: "alignment" },
+      { apiKey: "fixture-openalex-key" },
+    );
+
+    const result = await adapter.collect(fixedWindow());
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      originalUrl: "https://arxiv.org/abs/2608.03626v2",
+      externalId: "arXiv:2608.03626",
+      externalIds: ["OpenAlex:W7197052950", "arXiv:2608.03626"],
+    });
+  });
+
+  it.each([
+    {
+      caseName: "keeps a non-arXiv landing page OpenAlex-only",
+      ids: { openalex: "https://openalex.org/W-NON-ARXIV" },
+      landingPageUrl: "https://publisher.example/papers/non-arxiv",
+      expectedExternalId: "OpenAlex:W-NON-ARXIV",
+      expectedExternalIds: ["OpenAlex:W-NON-ARXIV"],
+    },
+    {
+      caseName: "prefers the explicit arXiv identity over a conflicting landing page",
+      ids: {
+        openalex: "https://openalex.org/W-EXPLICIT",
+        arxiv: "https://arxiv.org/abs/2608.00001v3",
+      },
+      landingPageUrl: "https://arxiv.org/abs/2608.99999",
+      expectedExternalId: "arXiv:2608.00001",
+      expectedExternalIds: ["OpenAlex:W-EXPLICIT", "arXiv:2608.00001"],
+    },
+    {
+      caseName: "falls back when the explicit OpenAlex arXiv URL is invalid",
+      ids: {
+        openalex: "https://openalex.org/W-INVALID-EXPLICIT",
+        arxiv: "https://publisher.example/not-an-arxiv-identifier",
+      },
+      landingPageUrl: "https://arxiv.org/abs/2608.00002v4",
+      expectedExternalId: "arXiv:2608.00002",
+      expectedExternalIds: [
+        "OpenAlex:W-INVALID-EXPLICIT",
+        "arXiv:2608.00002",
+      ],
+    },
+  ])("$caseName", async ({ ids, landingPageUrl, expectedExternalId, expectedExternalIds }) => {
+    const work = {
+      id: ids.openalex,
+      doi: null,
+      title: "OpenAlex identity inverse",
+      publication_date: "2026-07-29",
+      updated_date: "2026-07-29T08:00:00.000Z",
+      cited_by_count: 0,
+      ids,
+      authorships: [],
+      topics: [],
+      abstract_inverted_index: null,
+      primary_location: {
+        landing_page_url: landingPageUrl,
+        source: { display_name: "Fixture publisher" },
+      },
+    };
+    const adapter = new OpenAlexDiscoveryAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({ results: [work] })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      openAlexSource,
+      { laneId: "openalex:text:identity-inverse", mode: "text", query: "alignment" },
+      { apiKey: "fixture-openalex-key" },
+    );
+
+    const result = await adapter.collect(fixedWindow());
+
+    expect(result[0]?.externalId).toBe(expectedExternalId);
+    expect(result[0]?.externalIds).toEqual(expectedExternalIds);
+  });
+
   it("bounds large OpenAlex provider arrays without rejecting the lane", async () => {
     const payload = JSON.parse(await loadFixture("openalex-discovery.json"));
     payload.results[0].authorships = Array.from({ length: 65 }, (_, index) => ({

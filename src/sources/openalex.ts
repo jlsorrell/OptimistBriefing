@@ -396,12 +396,17 @@ export class OpenAlexDiscoveryAdapter implements DiscoverySourceAdapter {
     retrievedAt: string,
   ): RawItem {
     const doi = work.doi === null ? null : normalizeDoi(work.doi);
-    const arxiv = work.ids.arxiv === undefined
+    const landingPageUrl = work.primary_location?.landing_page_url ?? null;
+    const explicitArxiv = work.ids.arxiv === undefined
       ? null
       : normalizeArxivIdentifier(work.ids.arxiv);
+    const arxiv = explicitArxiv ?? (
+      landingPageUrl === null
+        ? null
+        : normalizeArxivIdentifier(landingPageUrl)
+    );
     const openAlexId = openAlexIdentifier(work.id);
     const abstract = reconstructAbstract(work.abstract_inverted_index);
-    const landingPageUrl = work.primary_location?.landing_page_url ?? null;
     return RawItemSchema.parse({
       kind: "paper",
       sourceId: this.source.id,
