@@ -62,6 +62,56 @@ for (const [name, fixture] of [
   });
 }
 
+test("rejects a rendered title that differs from the API title", async ({
+  page,
+}) => {
+  const seeded = fixtureEdition();
+  const morningEntry = seeded.entries.find(({ section }) =>
+    section === "morning_brief"
+  );
+  const researchEntry = seeded.entries.find(({ section }) =>
+    section === "research"
+  );
+  if (morningEntry === undefined || researchEntry === undefined) {
+    throw new Error("Preview fixture lacks title-rendering examples");
+  }
+  const apiEdition: EditionWithEntries = {
+    ...seeded,
+    entries: [morningEntry, { ...researchEntry, sourceRefs: [] }],
+  };
+  await page.route((url) => url.pathname === "/", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `
+        <h1>The day, thoughtfully distilled.</h1>
+        <p class="header-date">Wednesday, July 29, 2026</p>
+        <section id="morning_brief">
+          <div class="section-heading">
+            <h2>Morning brief</h2>
+            <span>1 item</span>
+          </div>
+          <div data-entry-id="${morningEntry.id}">
+            <strong>${morningEntry.summary.title}</strong>
+          </div>
+        </section>
+        <section id="research">
+          <div class="section-heading">
+            <h2>Research</h2>
+            <span>1 item</span>
+          </div>
+          <article data-entry-id="${researchEntry.id}">
+            <h3>${researchEntry.summary.title} — rendered mismatch</h3>
+          </article>
+        </section>
+      `,
+    });
+  });
+
+  await expect(
+    expectRenderedPreviewEdition(page, parsePreviewEdition(apiEdition)),
+  ).rejects.toThrow();
+});
+
 test("shows the latest published edition and leaves run state unchanged", async ({
   page,
 }) => {

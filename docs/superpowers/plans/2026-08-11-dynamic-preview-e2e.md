@@ -274,7 +274,7 @@ Run: `npm run test:e2e:preview`
 
 Complete ordinary-browser Managed OAuth approval if prompted. Expected: authentication and `/health` succeed, then content fails because latest is newer than `2026-07-29`. Retain only numeric exit status and safe diagnostics; retain no URLs, callback parameters, tokens, cookies, storage, screenshots, traces, or video.
 
-- [ ] **Step 2: Add seeded and sparse cases importing the absent comparator**
+- [ ] **Step 2: Add seeded, sparse, and mismatched-title cases importing the absent comparator**
 
 At the top of `tests/preview-e2e/content.spec.ts`, add:
 
@@ -314,6 +314,56 @@ for (const [name, fixture] of [
     expect(await readArray(page, "/api/runs")).toEqual(runsBefore);
   });
 }
+
+test("rejects a rendered title that differs from the API title", async ({
+  page,
+}) => {
+  const seeded = fixtureEdition();
+  const morningEntry = seeded.entries.find(({ section }) =>
+    section === "morning_brief"
+  );
+  const researchEntry = seeded.entries.find(({ section }) =>
+    section === "research"
+  );
+  if (morningEntry === undefined || researchEntry === undefined) {
+    throw new Error("Preview fixture lacks title-rendering examples");
+  }
+  const apiEdition = {
+    ...seeded,
+    entries: [morningEntry, { ...researchEntry, sourceRefs: [] }],
+  };
+  await page.route((url) => url.pathname === "/", async (route) => {
+    await route.fulfill({
+      contentType: "text/html",
+      body: `
+        <h1>The day, thoughtfully distilled.</h1>
+        <p class="header-date">Wednesday, July 29, 2026</p>
+        <section id="morning_brief">
+          <div class="section-heading">
+            <h2>Morning brief</h2>
+            <span>1 item</span>
+          </div>
+          <div data-entry-id="${morningEntry.id}">
+            <strong>${morningEntry.summary.title}</strong>
+          </div>
+        </section>
+        <section id="research">
+          <div class="section-heading">
+            <h2>Research</h2>
+            <span>1 item</span>
+          </div>
+          <article data-entry-id="${researchEntry.id}">
+            <h3>${researchEntry.summary.title} — rendered mismatch</h3>
+          </article>
+        </section>
+      `,
+    });
+  });
+
+  await expect(
+    expectRenderedPreviewEdition(page, parsePreviewEdition(apiEdition)),
+  ).rejects.toThrow();
+});
 ```
 
 - [ ] **Step 3: Confirm RED before the comparator exists**
@@ -365,16 +415,18 @@ export async function expectRenderedPreviewEdition(
     await expect(renderedSection.locator(".section-heading > span")).toHaveText(
       `${expected.length} ${expected.length === 1 ? "item" : "items"}`,
     );
-    const renderedEntries = await renderedSection.locator("[data-entry-id]")
-      .evaluateAll((nodes) => nodes.map((node) => ({
-        id: node.getAttribute("data-entry-id"),
-        text: node.textContent ?? "",
-      })));
-    expect(renderedEntries.map(({ id }) => id)).toEqual(
+    const renderedEntries = renderedSection.locator("[data-entry-id]");
+    const renderedEntryIds = await renderedEntries.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-entry-id"))
+    );
+    expect(renderedEntryIds).toEqual(
       expected.map(({ id }) => id),
     );
     for (const [index, entry] of expected.entries()) {
-      expect(renderedEntries[index]?.text).toContain(entry.summary.title);
+      const title = renderedEntries.nth(index).locator(
+        section === "morning_brief" ? "strong" : "h3",
+      );
+      await expect(title).toHaveText(entry.summary.title);
     }
   }
 

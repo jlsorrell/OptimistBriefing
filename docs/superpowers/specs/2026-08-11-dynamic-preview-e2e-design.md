@@ -95,8 +95,9 @@ The live content test will:
 5. Group entries by section. For each canonical section, require its section element,
    heading, and singular/plural item count when entries exist, and require that the
    section is omitted when no entries exist. Match every API entry ID to its rendered
-   `data-entry-id` element inside the expected section and require that element to
-   contain the API title.
+   `data-entry-id` element inside the expected section, preserving exact order. For
+   every matching entry, require exact API-title equality on the title-bearing
+   element: `strong` for `morning_brief` and `h3` for every card-rendered section.
 6. Derive expected source hosts from valid source URLs belonging to card-rendered
    entries. `morning_brief` is excluded because it intentionally renders overview
    links rather than source lists. Compare the deduplicated rendered host set for
@@ -124,6 +125,10 @@ currently stored remotely:
   mix; and
 - a newer sparse/partial canary shape, including omitted sections and a reduced
   source mix.
+
+A separate negative deterministic case will keep entry IDs and order equal while
+rendering one card title with extra text. The comparator must reject that mismatch,
+proving title agreement is exact rather than whole-card containment.
 
 The existing layered-research test will use deterministic fixture data rather than
 requiring the live edition to contain representative Research, World, and AI Policy

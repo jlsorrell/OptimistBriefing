@@ -36,16 +36,18 @@ export async function expectRenderedPreviewEdition(
     await expect(renderedSection.locator(".section-heading > span")).toHaveText(
       `${expected.length} ${expected.length === 1 ? "item" : "items"}`,
     );
-    const renderedEntries = await renderedSection.locator("[data-entry-id]")
-      .evaluateAll((nodes) => nodes.map((node) => ({
-        id: node.getAttribute("data-entry-id"),
-        text: node.textContent ?? "",
-      })));
-    expect(renderedEntries.map(({ id }) => id)).toEqual(
+    const renderedEntries = renderedSection.locator("[data-entry-id]");
+    const renderedEntryIds = await renderedEntries.evaluateAll((nodes) =>
+      nodes.map((node) => node.getAttribute("data-entry-id"))
+    );
+    expect(renderedEntryIds).toEqual(
       expected.map(({ id }) => id),
     );
     for (const [index, entry] of expected.entries()) {
-      expect(renderedEntries[index]?.text).toContain(entry.summary.title);
+      const title = renderedEntries.nth(index).locator(
+        section === "morning_brief" ? "strong" : "h3",
+      );
+      await expect(title).toHaveText(entry.summary.title);
     }
   }
 
