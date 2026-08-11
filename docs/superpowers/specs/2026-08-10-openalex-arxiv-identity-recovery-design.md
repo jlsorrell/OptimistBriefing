@@ -1,7 +1,7 @@
 # OpenAlex arXiv Identity Recovery Design
 
 **Date:** 2026-08-10
-**Status:** Approved approach; pending written-spec review
+**Status:** Approved approach; final-review compatibility ruling incorporated
 
 ## Problem
 
@@ -40,8 +40,9 @@ all-provider normalization behavior.
 - Repair the already-persisted `2026-08-10` collect checkpoint without repeating
   provider discovery.
 - Preserve OpenAlex provenance alongside the recovered arXiv identity.
-- Keep DOI precedence, canonical URL handling, provider-text boundaries,
-  deduplication, model budgets, and publication rules unchanged.
+- Keep historical durable-identity ordering, canonical URL handling,
+  provider-text boundaries, deduplication, model budgets, and publication rules
+  unchanged.
 - Fail open when a landing URL is not a valid arXiv identifier.
 
 ## Non-goals
@@ -61,6 +62,17 @@ The adapter path prevents future collect checkpoints from losing the identity.
 The normalization fallback is also required because the current canary's
 completed collect checkpoint already contains the older OpenAlex-only record.
 It allows that checkpoint to resume without repeating external provider calls.
+
+## Final-review compatibility ruling
+
+At normalization, URL recovery is allowed only when the supplied identifiers
+contain neither a valid arXiv identifier nor a valid DOI, as determined by
+`normalizeArxivIdentifier` and `normalizeDoi`. A supplied dual DOI+arXiv
+candidate retains the historical arXiv-derived Item ID produced by the
+normalized, sorted DOI/arXiv selection. Malformed `arXiv:` or `DOI:` text is not
+an explicit identity and is excluded from stable-ID eligibility. This ruling
+supersedes any earlier global DOI-first interpretation; Task 1 adapter behavior
+is unchanged.
 
 This remains narrower than globally deriving identifiers from every candidate
 URL. It is also safer than teaching repository persistence to change item IDs on
@@ -86,11 +98,13 @@ landing-page identifier. A non-arXiv landing page produces no inferred ID.
 
 At normalization, when and only when `sourceId` is `openalex`:
 
-1. inspect the already-canonicalized candidate URL with
+1. parse every supplied identifier for valid explicit arXiv and DOI identities;
+2. only when neither kind is present, inspect the already-canonicalized URL with
    `normalizeArxivIdentifier`;
-2. add a recovered arXiv identifier to the candidate's normalized durable
-   identifiers when it is not already present; and
-3. derive the item ID through the existing DOI/arXiv/provider precedence.
+3. add any recovered arXiv identifier to the normalized durable identifiers;
+   and
+4. derive the Item ID through the historical normalized/sorted DOI-or-arXiv,
+   provider, then canonical-URL selection.
 
 No URL is decoded as provider display text, and no provider can assert a
 prepared-state marker. The URL remains structural data.
@@ -105,8 +119,9 @@ the canonical-URL uniqueness constraint.
   identity and retain current OpenAlex-ID behavior.
 - Explicit and inferred arXiv values use the existing version-stripping and
   canonical formatting rules.
-- DOI-bearing OpenAlex records retain the existing DOI URL and durable-identity
-  precedence.
+- An explicit DOI without an explicit arXiv identity suppresses normalization
+  fallback; a supplied dual DOI+arXiv candidate retains its historical
+  arXiv-derived Item ID.
 - The fix does not catch or suppress genuine D1 uniqueness errors; unexpected
   conflicts remain visible and retryable.
 - Raw article text, titles, credentials, and full provider responses are not

@@ -360,7 +360,53 @@ describe("research normalization", () => {
     ].sort((left, right) => left.localeCompare(right)));
   });
 
-  it("prefers a DOI durable identity over an inferred OpenAlex arXiv identity", () => {
+  it("recovers an OpenAlex arXiv URL when the explicit arXiv text is malformed", () => {
+    const arxiv = normalizeCandidate(candidate({
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "arXiv:2608.03626",
+      externalIds: ["arXiv:2608.03626"],
+    }));
+    const openAlex = normalizeCandidate(candidate({
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      sourceRole: "analysis",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "OpenAlex:W7197052953",
+      externalIds: ["OpenAlex:W7197052953", "arXiv:not-valid"],
+      metadata: { discoveryFamily: "bibliographic" },
+    }));
+
+    expect(openAlex.id).toBe(arxiv.id);
+    expect(openAlex.metadata.externalIds).toEqual([
+      "arXiv:2608.03626",
+      "arXiv:not-valid",
+      "OpenAlex:W7197052953",
+    ].sort((left, right) => left.localeCompare(right)));
+  });
+
+  it("keeps the historical arXiv durable identity for dual DOI and arXiv identifiers", () => {
+    const arxiv = normalizeCandidate(candidate({
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "arXiv:2608.03626",
+      externalIds: ["arXiv:2608.03626"],
+    }));
+    const dual = normalizeCandidate(candidate({
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "DOI:10.1000/identity-compatibility",
+      externalIds: [
+        "DOI:10.1000/identity-compatibility",
+        "arXiv:2608.03626",
+      ],
+    }));
+
+    expect(dual.id).toBe(arxiv.id);
+    expect(dual.metadata.externalIds).toEqual([
+      "arXiv:2608.03626",
+      "DOI:10.1000/identity-compatibility",
+    ].sort((left, right) => left.localeCompare(right)));
+  });
+
+  it("does not infer an OpenAlex arXiv identity when a valid DOI is explicit", () => {
     const doi = normalizeCandidate(candidate({
       originalUrl: "https://doi.org/10.1000/identity-precedence",
       externalId: "DOI:10.1000/identity-precedence",
@@ -381,7 +427,6 @@ describe("research normalization", () => {
 
     expect(openAlex.id).toBe(doi.id);
     expect(openAlex.metadata.externalIds).toEqual([
-      "arXiv:2608.03626",
       "DOI:10.1000/identity-precedence",
       "OpenAlex:W7197052952",
     ].sort((left, right) => left.localeCompare(right)));

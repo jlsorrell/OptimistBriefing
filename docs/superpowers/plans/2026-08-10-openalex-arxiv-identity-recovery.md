@@ -4,7 +4,7 @@
 
 **Goal:** Recover omitted arXiv identities from OpenAlex landing URLs so a retryable preview run can persist an already-known paper without repeating discovery or violating the canonical-URL uniqueness constraint.
 
-**Architecture:** Keep the behavior OpenAlex-specific. New OpenAlex observations infer an arXiv identifier from `primary_location.landing_page_url` only when `ids.arxiv` is absent or invalid; normalization applies the same source-scoped fallback to older collect checkpoints before deriving the durable item ID. Repository conflict semantics and historical rows remain unchanged.
+**Architecture:** Keep the behavior OpenAlex-specific. New OpenAlex observations infer an arXiv identifier from `primary_location.landing_page_url` only when `ids.arxiv` is absent or invalid; normalization applies a source-scoped fallback to older collect checkpoints only when their supplied identifiers contain neither a valid arXiv identity nor a valid DOI. Repository conflict semantics and historical rows remain unchanged.
 
 **Tech Stack:** TypeScript 5.8, Zod 3, Vitest 4, Cloudflare Workers, D1, Cloudflare Workflows, Wrangler 4.
 
@@ -13,12 +13,22 @@
 - Do not change the `items.canonical_url` uniqueness constraint.
 - Do not re-key, delete, or rewrite historical items or editions.
 - Do not infer identifiers globally; recovery applies only when `sourceId === "openalex"`.
-- Preserve DOI precedence, structural URL handling, provider-text boundaries, deduplication, model budgets, and publication rules.
+- Preserve historical normalized/sorted DOI-or-arXiv stable selection, structural URL handling, provider-text boundaries, deduplication, model budgets, and publication rules.
 - An explicit valid OpenAlex arXiv identifier takes precedence over an inferred landing-page identifier.
 - A malformed or non-arXiv landing URL must retain current OpenAlex-only behavior.
 - Do not repeat the completed discovery stage or create a second `2026-08-10` run.
 - Deploy only to `optimist-briefing-preview`; do not change production, schedules, credentials, models, or D1 schemas.
 - Use strict RED/GREEN TDD for every production behavior change.
+
+## Final-review compatibility ruling
+
+Normalization must determine explicit arXiv and DOI presence with
+`normalizeArxivIdentifier` and `normalizeDoi`. Infer from an OpenAlex canonical
+URL only when neither valid kind is supplied. Preserve the historical
+arXiv-derived Item ID for supplied dual DOI+arXiv candidates, and exclude
+malformed `arXiv:` or `DOI:` pseudo-identifiers from stable-ID eligibility.
+This ruling supersedes any older Task 2 wording that implies global DOI-first
+selection; Task 1 adapter behavior remains unchanged.
 
 ---
 
@@ -227,7 +237,7 @@ git commit -m "fix: recover OpenAlex arXiv landing identities"
 
 **Interfaces:**
 - Consumes: `normalizeArxivIdentifier(value: string): string | null` and the raw candidate fields `sourceId`, `originalUrl`, `externalId`, and `externalIds`.
-- Produces: `normalizeCandidate(candidate): Item` with a source-scoped recovered arXiv identity before stable Item ID derivation.
+- Produces: `normalizeCandidate(candidate): Item` with source-scoped arXiv recovery, valid explicit-identity gating, and baseline-compatible stable Item ID derivation.
 
 - [ ] **Step 1: Add the failing checkpoint-shaped identity test**
 
@@ -278,13 +288,25 @@ const canonicalUrl = candidateCanonicalUrl(
   candidate.originalUrl,
   candidate.metadata,
 );
-const restoredOpenAlexArxiv = candidate.sourceId === "openalex"
+const suppliedExternalIds = [
+  candidate.externalId,
+  ...candidate.externalIds,
+];
+const hasExplicitArxiv = suppliedExternalIds.some(
+  (identifier) => normalizeArxivIdentifier(identifier) !== null,
+);
+const hasExplicitDoi = suppliedExternalIds.some(
+  (identifier) => normalizeDoi(identifier) !== null,
+);
+const restoredOpenAlexArxiv =
+  candidate.sourceId === "openalex" &&
+    !hasExplicitArxiv &&
+    !hasExplicitDoi
   ? normalizeArxivIdentifier(canonicalUrl)
   : null;
 const externalIds = uniqueSorted(
   [
-    candidate.externalId,
-    ...candidate.externalIds,
+    ...suppliedExternalIds,
     ...(restoredOpenAlexArxiv === null ? [] : [restoredOpenAlexArxiv]),
   ].map(canonicalIdentifier),
 );
@@ -466,7 +488,7 @@ Expected: all tests pass; evaluator precision@5 remains at least `0.80`; build a
 Review the exact Task 1-3 diff for:
 
 - OpenAlex-only scope at both recovery sites;
-- explicit-ID precedence;
+- valid explicit-ID gating and historical dual-ID compatibility;
 - no provider-text decoding of URLs;
 - no repository, schema, migration, budget, schedule, or production changes;
 - mutation-sensitive RED/GREEN evidence; and

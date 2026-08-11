@@ -101,6 +101,16 @@ function canonicalIdentifier(value: string): string {
   }
 }
 
+function stableExternalIdentifier(value: string): boolean {
+  if (
+    normalizeDoi(value) !== null ||
+    normalizeArxivIdentifier(value) !== null
+  ) {
+    return true;
+  }
+  return !/^(?:doi|arxiv)\s*:/i.test(value);
+}
+
 function uniqueSorted(values: readonly string[]): string[] {
   return [...new Set(values)].sort((left, right) =>
     left.localeCompare(right),
@@ -378,15 +388,21 @@ export function normalizePreparedCandidate(
     candidate.originalUrl,
     candidate.metadata,
   );
-  const explicitExternalIds = [
+  const suppliedExternalIds = [
     candidate.externalId,
     ...candidate.externalIds,
-  ].map(canonicalIdentifier);
+  ];
+  const hasExplicitArxiv = suppliedExternalIds.some(
+    (identifier) => normalizeArxivIdentifier(identifier) !== null,
+  );
+  const hasExplicitDoi = suppliedExternalIds.some(
+    (identifier) => normalizeDoi(identifier) !== null,
+  );
+  const explicitExternalIds = suppliedExternalIds.map(canonicalIdentifier);
   const restoredOpenAlexArxiv =
     candidate.sourceId === "openalex" &&
-      !explicitExternalIds.some((identifier) =>
-        identifier.startsWith("arXiv:")
-      )
+      !hasExplicitArxiv &&
+      !hasExplicitDoi
     ? normalizeArxivIdentifier(canonicalUrl)
     : null;
   const externalIds = uniqueSorted(
@@ -560,12 +576,11 @@ export function normalizePreparedCandidate(
       : new Date(candidate.publishedAt).toISOString();
   const stableIdentifier =
     externalIds.find(
-      (identifier) => identifier.startsWith("DOI:"),
+      (identifier) =>
+        normalizeDoi(identifier) !== null ||
+        normalizeArxivIdentifier(identifier) !== null,
     ) ??
-    externalIds.find(
-      (identifier) => identifier.startsWith("arXiv:"),
-    ) ??
-    externalIds[0] ??
+    externalIds.find(stableExternalIdentifier) ??
     canonicalUrl;
   const id = `item-${stableHash(
     `${candidate.kind}:${stableIdentifier}`,

@@ -7581,7 +7581,7 @@ describe("manual editorial run", () => {
     expect(shortlisted.length).toBeLessThanOrEqual(8);
   });
 
-  it("persists a restored OpenAlex checkpoint candidate over its existing arXiv item", async () => {
+  it("persists a dual DOI and arXiv observation over its historical arXiv item", async () => {
     const repository = new D1BriefingRepository(env.DB);
     const arxivRaw: RawResearchCandidate = {
       kind: "paper",
@@ -7614,8 +7614,12 @@ describe("manual editorial run", () => {
       sourceId: "openalex",
       sourceName: "OpenAlex",
       sourceRole: "analysis",
-      externalId: "OpenAlex:W7197052950",
-      externalIds: ["OpenAlex:W7197052950"],
+      externalId: "DOI:10.1000/stable-identity-paper",
+      externalIds: [
+        "DOI:10.1000/stable-identity-paper",
+        "OpenAlex:W7197052950",
+        "arXiv:2608.03626",
+      ],
       metadata: { discoveryFamily: "bibliographic" },
     });
 
@@ -7632,6 +7636,7 @@ describe("manual editorial run", () => {
     expect(JSON.parse(rows.results[0]!.normalized_json).metadata.externalIds)
       .toEqual(expect.arrayContaining([
         "arXiv:2608.03626",
+        "DOI:10.1000/stable-identity-paper",
         "OpenAlex:W7197052950",
       ]));
   });
