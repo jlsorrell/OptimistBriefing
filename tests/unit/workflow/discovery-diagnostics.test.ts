@@ -46,15 +46,55 @@ describe("DiscoveryDiagnosticsTracker", () => {
         ...diagnostic("lane:a", 1),
         deduplicated: 1,
         triaged: 1,
+        fallbackTriaged: 0,
         assessed: 1,
       },
       {
         ...diagnostic("lane:b", 2),
         deduplicated: 1,
         triaged: 1,
+        fallbackTriaged: 0,
         assessed: 1,
       },
     ]);
+  });
+
+  it("records a bounded fallback subset and replaces it on prefilter replay", () => {
+    const tracker = new DiscoveryDiagnosticsTracker([
+      diagnostic("openalex:topic", 5),
+    ]);
+    const triaged = [
+      { laneId: "openalex:topic", identity: "paper-1" },
+      { laneId: "openalex:topic", identity: "paper-2" },
+      { laneId: "openalex:topic", identity: "paper-3" },
+    ];
+    tracker.setStage("deduplicated", triaged);
+    tracker.beginStage("prefilter");
+    tracker.setStage("triaged", triaged);
+    tracker.setFallbackTriaged(triaged.slice(1));
+
+    expect(tracker.snapshot()[0]).toMatchObject({
+      triaged: 3,
+      fallbackTriaged: 2,
+    });
+
+    tracker.setFallbackTriaged([
+      triaged[1]!,
+      triaged[1]!,
+      { laneId: "unknown:lane", identity: "private-candidate" },
+    ]);
+    expect(tracker.snapshot()[0]).toMatchObject({ fallbackTriaged: 1 });
+    expect(JSON.stringify(tracker.state())).not.toContain("paper-2");
+    expect(JSON.stringify(tracker.state())).not.toContain("private-candidate");
+
+    const replay = new DiscoveryDiagnosticsTracker(tracker.state());
+    replay.beginStage("prefilter");
+    replay.setStage("triaged", triaged.slice(0, 1));
+    replay.setFallbackTriaged([]);
+    expect(replay.snapshot()[0]).toMatchObject({
+      triaged: 1,
+      fallbackTriaged: 0,
+    });
   });
 
   it("counts each rejection identity once per reason and ignores unknown lanes", () => {

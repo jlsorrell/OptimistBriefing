@@ -67,8 +67,22 @@ export class DiscoveryDiagnosticsTracker {
           preceding,
           identities.get(diagnostic.laneId)?.size ?? 0,
         ),
+        ...(stage === "triaged" ? { fallbackTriaged: 0 } : {}),
       });
     });
+  }
+
+  setFallbackTriaged(refs: readonly DiscoveryDiagnosticRef[]): void {
+    const identities = this.identitiesByLane(refs);
+    this.diagnostics = this.diagnostics.map((diagnostic) =>
+      DiscoveryLaneDiagnosticSchema.parse({
+        ...diagnostic,
+        fallbackTriaged: Math.min(
+          diagnostic.triaged,
+          identities.get(diagnostic.laneId)?.size ?? 0,
+        ),
+      })
+    );
   }
 
   reject(
