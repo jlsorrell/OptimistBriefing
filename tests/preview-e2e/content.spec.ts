@@ -190,7 +190,7 @@ test("renders layered research context and omits empty sections without mutation
     }),
   ).toBeVisible();
   await expect(featuredCard.getByText("Research blog", { exact: true }))
-    .toBeVisible();
+    .toHaveCount(2);
 
   const officialLabEntry = (section: "technology" | "ai_policy") =>
     fixture.entries.find((entry) =>

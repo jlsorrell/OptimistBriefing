@@ -64,6 +64,7 @@ export async function expectRenderedPreviewEdition(
 
   const forecastCount = edition.entries
     .filter(({ section }) => section === "forecast").length;
-  await expect(page.getByText("Forecast, not fact", { exact: true }))
-    .toHaveCount(forecastCount);
+  await expect(page.locator(".forecast-card .content-label", {
+    hasText: "Forecast, not fact",
+  })).toHaveCount(forecastCount);
 }
