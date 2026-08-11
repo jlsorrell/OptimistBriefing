@@ -5184,7 +5184,8 @@ describe("manual editorial run", () => {
     }));
 
     await expect(runEditorialPipeline(context)).resolves.toMatchObject({
-      status: "failed",
+      status: "partial",
+      missingSections: ["dmv_or_baltimore"],
     });
     expect(await store.readCheckpoint(context.runId, "cluster")).toBe(true);
     expect(await store.readCheckpoint(context.runId, "shortlist")).toBe(true);
