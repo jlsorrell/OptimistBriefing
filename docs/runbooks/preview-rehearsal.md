@@ -111,5 +111,5 @@ cookies, browser storage, or test artifacts.
 The harness covers an allowed Google session and a signed-out Access
 challenge. A real login attempt by a nonallowed Google account is unavailable
 and remains unresolved. That missing result continues to block production
-approval even when all 42 preview tests pass; policy inspection or fabricated
+approval even when all preview tests pass; policy inspection or fabricated
 credentials are not a substitute.
