@@ -1993,6 +1993,7 @@ describe("manual editorial run", () => {
       entries: [expect.objectContaining({ section: "research" })],
     });
     expect(await context.store.getLatestEdition()).not.toEqual(prior);
+    expect(context.store.editions.get(prior.editionDate)).toEqual(prior);
   });
 
   it("fails six valid entries when they omit required coverage", async () => {
