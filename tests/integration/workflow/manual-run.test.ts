@@ -7641,6 +7641,61 @@ describe("manual editorial run", () => {
       ]));
   });
 
+  it("persists a restored OpenAlex checkpoint candidate over its existing arXiv item", async () => {
+    const repository = new D1BriefingRepository(env.DB);
+    const arxivRaw: RawResearchCandidate = {
+      kind: "paper",
+      sourceId: "arxiv",
+      sourceName: "arXiv",
+      sourceRole: "primary",
+      title: "Stable identity paper",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "arXiv:2608.03626",
+      externalIds: ["arXiv:2608.03626"],
+      publishedAt: "2026-08-08T12:00:00.000Z",
+      retrievedAt: "2026-08-10T09:00:00.000Z",
+      accessLevel: "abstract",
+      authors: [],
+      institutions: [],
+      abstract: "Stable identity evidence.",
+      content: null,
+      relatedPaperIds: [],
+      preferredInstitutionMatches: [],
+      citationCount: null,
+      influentialCitationCount: null,
+      topics: [],
+      metadata: { discoveryFamily: "arxiv" },
+    };
+    const stored = normalizeCandidate(arxivRaw);
+    await repository.upsertItems([stored]);
+
+    const restored = normalizeCandidate({
+      ...arxivRaw,
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      sourceRole: "analysis",
+      externalId: "OpenAlex:W7197052950",
+      externalIds: ["OpenAlex:W7197052950"],
+      metadata: { discoveryFamily: "bibliographic" },
+    });
+
+    expect(restored.id).toBe(stored.id);
+    await expect(repository.upsertItems([restored])).resolves.toBeUndefined();
+    const rows = await env.DB.prepare(
+      "SELECT id, normalized_json FROM items WHERE canonical_url = ?",
+    ).bind("https://arxiv.org/abs/2608.03626").all<{
+      id: string;
+      normalized_json: string;
+    }>();
+    expect(rows.results).toHaveLength(1);
+    expect(rows.results[0]?.id).toBe(stored.id);
+    expect(JSON.parse(rows.results[0]!.normalized_json).metadata.externalIds)
+      .toEqual(expect.arrayContaining([
+        "arXiv:2608.03626",
+        "OpenAlex:W7197052950",
+      ]));
+  });
+
   it("persists normalized production items before clustered-news publication and does not re-persist them on resume", async () => {
     const editionDate = "2033-02-07";
     const runId = "run-production-d1-persistence";

@@ -363,9 +363,9 @@ git commit -m "fix: restore OpenAlex checkpoint identities"
 
 **Interfaces:**
 - Consumes: `createProductionPipelineContext`, `D1BriefingRepository.upsertItems`, and the Task 2 `normalizeCandidate` behavior.
-- Produces: a Worker/D1 regression proving one canonical URL remains one row and retains both arXiv and OpenAlex identifiers.
+- Produces: separate Worker/D1 regressions for OpenAlex-only URL recovery and historical dual DOI+arXiv compatibility, each proving one canonical URL remains one row with the expected durable identifiers.
 
-- [ ] **Step 1: Add the D1 regression**
+- [ ] **Step 1: Add both D1 regressions**
 
 ```ts
 it("persists a restored OpenAlex checkpoint candidate over its existing arXiv item", async () => {
@@ -424,6 +424,11 @@ it("persists a restored OpenAlex checkpoint candidate over its existing arXiv it
 });
 ```
 
+Keep this OpenAlex-only recovery test separate from
+`"persists a dual DOI and arXiv observation over its historical arXiv item"`.
+The latter supplies both durable identifiers and protects historical selection;
+the former supplies only the OpenAlex ID and protects canonical-URL recovery.
+
 - [ ] **Step 2: Mutation-check the regression**
 
 Temporarily remove the OpenAlex normalization fallback added in Task 2 and run:
@@ -434,19 +439,20 @@ npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manua
 
 Expected: FAIL before the upsert assertion because the IDs differ, or fail with the same `items.canonical_url` uniqueness error observed in preview. Restore the Task 2 implementation immediately after confirming RED.
 
-- [ ] **Step 3: Run the restored GREEN regression**
+- [ ] **Step 3: Run both GREEN regressions**
 
 ```bash
-npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "persists a restored OpenAlex checkpoint candidate"
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "persists a restored OpenAlex checkpoint candidate|persists a dual DOI and arXiv observation"
 ```
 
-Expected: PASS with one D1 row and both durable identifiers.
+Expected: both tests PASS; each retains one D1 row and the scenario's durable
+identifiers.
 
 - [ ] **Step 4: Run affected suites**
 
 ```bash
 npx vitest run tests/unit/sources/research-collector.test.ts tests/unit/editorial/normalize.test.ts
-npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts
+npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "persists a restored OpenAlex checkpoint candidate|persists a dual DOI and arXiv observation"
 npm run check
 ```
 
