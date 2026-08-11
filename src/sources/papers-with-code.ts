@@ -3,8 +3,10 @@ import { parseHTML } from "linkedom";
 import { SourceHttpClient } from "./http-client";
 import { normalizeArxivIdentifier } from "./identifiers";
 import { assertSafeOutboundUrl, type OutboundUrlPolicy } from "./outbound-url";
+import { boundProviderText } from "./provider-text";
 import {
   CollectionWindowSchema,
+  MAX_PROVIDER_TITLE_CHARACTERS,
   RawPublicationCandidateSchema,
   type CollectionWindow,
   type RawPublicationCandidate,
@@ -109,7 +111,9 @@ export class PapersWithCodeAdapter {
         } catch { return false; }
       });
       if (paperLink === undefined) return [];
-      const title = normalizedText(paperLink.textContent);
+      const title = boundProviderText(paperLink.textContent, {
+        maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+      });
       let paperUrl: URL;
       try { paperUrl = assertSafeOutboundUrl(new URL(paperLink.getAttribute("href") ?? "", finalUrl), PAPERS_WITH_CODE_POLICY); } catch { return []; }
       const identifier = paperIdentity(paperUrl.pathname);

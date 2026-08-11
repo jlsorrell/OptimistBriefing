@@ -26,8 +26,15 @@ import {
 } from "./outbound-url";
 import { PolymarketAdapter } from "./polymarket";
 import {
+  boundProviderText,
+  normalizedProviderSignalText,
+} from "./provider-text";
+import {
   bodyRetrievalPermitted,
   CollectionWindowSchema,
+  MAX_PROVIDER_CONTENT_CHARACTERS,
+  MAX_PROVIDER_EVIDENCE_CHARACTERS,
+  MAX_PROVIDER_TITLE_CHARACTERS,
   RawNewsCandidateSchema,
   ResearchSourceRecordSchema,
   type CollectionBatch,
@@ -189,9 +196,11 @@ function catalogInputMayBeNews(source: SourceRecord): boolean {
   return source.enabled && isNewsCatalogSource(source);
 }
 
-function normalizedText(value: string | null | undefined): string | null {
-  const normalized = value?.replace(/\s+/g, " ").trim() ?? "";
-  return normalized.length === 0 ? null : normalized;
+function normalizedText(
+  value: string | null | undefined,
+  maxCharacters = MAX_PROVIDER_TITLE_CHARACTERS,
+): string | null {
+  return boundProviderText(value, { maxCharacters });
 }
 
 function listingDate(value: string): string | null {
@@ -304,6 +313,7 @@ class DirectPageAdapter implements NewsSourceAdapter {
                   item,
                   this.listing.summarySelector,
                 )?.textContent,
+                MAX_PROVIDER_EVIDENCE_CHARACTERS,
               );
         return [{ title, originalUrl, publishedAt, summary }];
       });
@@ -369,6 +379,19 @@ class DirectPageAdapter implements NewsSourceAdapter {
             discoveryMechanism: "page",
             listingUrl: response.finalUrl,
           };
+          const signalTitle = normalizedProviderSignalText(
+            item.title,
+            MAX_PROVIDER_TITLE_CHARACTERS,
+          );
+          if (signalTitle === null) return null;
+          const signalAbstract = normalizedProviderSignalText(
+            extraction.excerpt ?? item.summary,
+            MAX_PROVIDER_EVIDENCE_CHARACTERS,
+          );
+          const signalContent = normalizedProviderSignalText(
+            extraction.text,
+            MAX_PROVIDER_CONTENT_CHARACTERS,
+          );
           return RawNewsCandidateSchema.parse({
             kind,
             sourceId: this.source.id,
@@ -390,9 +413,9 @@ class DirectPageAdapter implements NewsSourceAdapter {
             canCorroborateFacts: canCorroborateFacts(this.source.role),
             ...deriveNewsSignals({
               kind,
-              title: item.title,
-              abstract: extraction.excerpt ?? item.summary,
-              content: extraction.text,
+              title: signalTitle,
+              abstract: signalAbstract,
+              content: signalContent,
               originalUrl,
               sectionEligibility:
                 this.source.sectionEligibility ?? [],
@@ -470,6 +493,24 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
       } catch {
         return [];
       }
+      const title = boundProviderText(item.title, {
+        maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+      });
+      if (title === null) return [];
+      const abstractPresent =
+        item.abstract !== null && item.abstract !== undefined;
+      const abstract = boundProviderText(item.abstract, {
+        maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS,
+      });
+      const signalTitle = normalizedProviderSignalText(
+        title,
+        MAX_PROVIDER_TITLE_CHARACTERS,
+      );
+      if (signalTitle === null) return [];
+      const signalAbstract = normalizedProviderSignalText(
+        abstract,
+        MAX_PROVIDER_EVIDENCE_CHARACTERS,
+      );
       const metadata = {
         documentNumber: item.document_number,
         documentType: item.type ?? null,
@@ -481,26 +522,24 @@ class FederalRegisterAdapter implements NewsSourceAdapter {
           sourceId: this.source.id,
           sourceName: this.source.canonicalName,
           sourceRole: this.source.role,
-          title: item.title,
+          title,
           originalUrl,
           externalId: `FederalRegister:${item.document_number}`,
           externalIds: [`FederalRegister:${item.document_number}`],
           publishedAt,
           retrievedAt: response.retrievedAt,
           accessLevel:
-            item.abstract === null || item.abstract === undefined
-              ? "metadata"
-              : "secondary",
+            abstractPresent ? "secondary" : "metadata",
           authors: [],
           institutions: [],
-          abstract: item.abstract ?? null,
+          abstract: signalAbstract === null ? null : abstract,
           content: null,
           relatedPaperIds: [],
           canCorroborateFacts: canCorroborateFacts(this.source.role),
           ...deriveNewsSignals({
             kind: "document",
-            title: item.title,
-            abstract: item.abstract ?? null,
+            title: signalTitle,
+            abstract: signalAbstract,
             content: null,
             originalUrl,
             sectionEligibility:
@@ -617,6 +656,19 @@ export class NewsCollector {
                   paywall,
                   retention: "ephemeral-only",
                 };
+                const signalTitle = normalizedProviderSignalText(
+                  item.title,
+                  MAX_PROVIDER_TITLE_CHARACTERS,
+                );
+                if (signalTitle === null) return null;
+                const signalAbstract = normalizedProviderSignalText(
+                  item.abstract,
+                  MAX_PROVIDER_EVIDENCE_CHARACTERS,
+                );
+                const signalContent = normalizedProviderSignalText(
+                  extraction.text,
+                  MAX_PROVIDER_CONTENT_CHARACTERS,
+                );
                 return RawNewsCandidateSchema.parse({
                   ...item,
                   kind,
@@ -627,9 +679,9 @@ export class NewsCollector {
                   ),
                   ...deriveNewsSignals({
                     kind,
-                    title: item.title,
-                    abstract: item.abstract,
-                    content: extraction.text,
+                    title: signalTitle,
+                    abstract: signalAbstract,
+                    content: signalContent,
                     originalUrl: item.originalUrl,
                     sectionEligibility: source.sectionEligibility ?? [],
                     metadata,

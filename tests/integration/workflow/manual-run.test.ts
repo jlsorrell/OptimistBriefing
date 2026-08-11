@@ -20,7 +20,14 @@ import {
   type PipelineRun,
   type PipelineStore,
 } from "../../../src/workflow/run-editorial-pipeline";
-import type { CheckpointArtifact } from "../../../src/workflow/types";
+import {
+  PROVIDER_TEXT_COMPOSITION_VERSION,
+  PROVIDER_TEXT_NORMALIZATION_VERSION,
+  PROVIDER_TEXT_PREPARATION_VERSION,
+  PROVIDER_TEXT_PRESENTATION_VERSION,
+  type CheckpointArtifact,
+  type CompositionResult,
+} from "../../../src/workflow/types";
 import { createApp, type WorkflowLauncher } from "../../../src/api/app";
 import {
   createD1PipelineStore,
@@ -39,20 +46,33 @@ import { D1BriefingRepository } from "../../../src/db/d1-repository";
 import { FakeModelProvider } from "../../../src/models/fake-provider";
 import { OpenAIModelProvider } from "../../../src/models/openai-provider";
 import { clusterNews } from "../../../src/editorial/cluster";
-import { canonicalResearchIdentity } from "../../../src/editorial/research-identity";
-import { researchFingerprints } from "../../../src/editorial/research-triage";
+import { scoreNewsDevelopment } from "../../../src/editorial/news-score";
+import {
+  canonicalResearchIdentity,
+  consolidateResearchCandidates,
+} from "../../../src/editorial/research-identity";
+import {
+  researchFingerprints,
+  triageResearch,
+} from "../../../src/editorial/research-triage";
+import { CONFIGURED_RESEARCH_TOPIC_IDS } from "../../../src/editorial/research-topics";
 import { composeEdition } from "../../../src/workflow/compose-edition";
+import { sourcePacketForItem } from "../../../src/workflow/source-packet";
+import { normalizeCandidate } from "../../../src/editorial/normalize";
 import type {
   GenerateObjectRequest,
   ModelProvider,
 } from "../../../src/models/provider";
 import type {
   DiscoveryDiagnosticsState,
+  DiscoveryLaneDiagnostic,
   DiscoveryObservation,
   RawNewsCandidate,
   RawPublicationCandidate,
   RawResearchCandidate,
 } from "../../../src/sources/types";
+import type { ProviderSchedulerRuntime } from
+  "../../../src/sources/provider-scheduler";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv {
@@ -61,6 +81,16 @@ declare module "cloudflare:test" {
 }
 
 const now = "2026-07-30T09:00:00.000Z";
+
+function logicalProviderSchedulerRuntime(): ProviderSchedulerRuntime {
+  let currentTime = 0;
+  return {
+    now: () => currentTime,
+    sleep: async (milliseconds) => {
+      currentTime += milliseconds;
+    },
+  };
+}
 
 function fixturePreferences(
   overrides: Partial<Pick<
@@ -127,6 +157,238 @@ function fixtureSummary(item: Item): StructuredSummary {
       evidenceExcerpt: `${item.title} is supported by the fixture source.`,
     }],
     accessLevel: "abstract",
+  };
+}
+
+function presentationResearchItem(
+  selectionReason = "Reason &amp;amp;#8217; display",
+): Item {
+  const rawResearch = rawResearchCandidate(
+    "2608.presentation",
+    "Presentation &#8217; title",
+  );
+  const item = fixtureItem("presentation-research", "research");
+  return ItemSchema.parse({
+    ...item,
+    title: "Presentation &#8217; title",
+    normalizedText: [
+      "Presentation &#8217; claim evidence supports the result.",
+      "Presentation &#8217; importance is documented.",
+      "Presentation &#8217; uncertainty remains.",
+    ].join(" "),
+    sourceRefs: [{
+      id: "presentation-source",
+      name: "Presentation Source",
+      url: "https://example.com/presentation?cursor=a%26amp%3Bb",
+      role: "primary",
+      retrievedAt: now,
+    }],
+    metadata: {
+      section: "research",
+      primaryResearchSourceIds: ["presentation-source"],
+      workflow: {
+        version: 1,
+        rawResearch,
+        topicalFit: 0.9,
+        assessment: {
+          technicalQuality: 0.9,
+          novelty: 0.8,
+          strengths: ["Concrete method."],
+          limitations: ["Limited sample."],
+          rationale: "The evidence supports assessment.",
+          accessLevel: "abstract",
+        },
+        researchScore: {
+          itemId: item.id,
+          topicalFit: 0.9,
+          technicalQuality: 0.9,
+          researchSignal: 0.8,
+          novelty: 0.8,
+          seriousAttention: 0.7,
+          total: 0.84,
+          selectionReasons: ["System score reason."],
+        },
+        section: "research",
+        selectionReasons: [selectionReason],
+      },
+    },
+  });
+}
+
+function legacyPresentationSummary(
+  sourceId = "presentation-source",
+): StructuredSummary {
+  return {
+    title: "Presentation &amp;amp;#8217; title",
+    oneSentence:
+      "Presentation &amp;amp;#8217; claim evidence supports the result.",
+    whyItMatters:
+      "Presentation &amp;amp;#8217; importance is documented.",
+    uncertainty:
+      "Presentation &amp;amp;#8217; uncertainty remains.",
+    claims: [{
+      text:
+        "Presentation &amp;amp;#8217; claim evidence supports the result.",
+      sourceIds: [sourceId],
+      evidenceExcerpt:
+        "Presentation &amp;amp;#8217; claim evidence supports the result.",
+    }],
+    accessLevel: "abstract",
+  };
+}
+
+async function seedD1CheckpointsBefore(
+  store: PipelineStore,
+  runId: string,
+  target: (typeof PIPELINE_STEPS)[number],
+  outputs: Readonly<Partial<Record<(typeof PIPELINE_STEPS)[number], unknown>>> = {},
+): Promise<void> {
+  for (const step of PIPELINE_STEPS.slice(0, PIPELINE_STEPS.indexOf(target))) {
+    const output = outputs[step] ?? [];
+    await store.saveCheckpoint(runId, step, {
+      output,
+      attempts: 1,
+      durationMs: 0,
+      itemCount: Array.isArray(output) ? output.length : 1,
+      estimatedCostUsd: 0,
+      ...(step === "collect"
+        ? {}
+        : {
+            providerTextNormalizationVersion:
+              PROVIDER_TEXT_NORMALIZATION_VERSION,
+          }),
+    });
+  }
+}
+
+async function insertLegacyD1Checkpoint(
+  runId: string,
+  step: (typeof PIPELINE_STEPS)[number],
+  output: unknown,
+): Promise<void> {
+  await env.DB.prepare(
+    `INSERT INTO audit_events (
+      id, run_id, event_type, event_json, created_at
+    ) VALUES (?, ?, 'workflow_checkpoint', ?, ?)`,
+  ).bind(
+    `legacy-presentation:${runId}:${step}`,
+    runId,
+    JSON.stringify({
+      step,
+      artifact: {
+        output,
+        attempts: 1,
+        durationMs: 0,
+        itemCount: Array.isArray(output) ? output.length : 1,
+        estimatedCostUsd: 0,
+        providerTextNormalizationVersion:
+          PROVIDER_TEXT_NORMALIZATION_VERSION,
+      },
+    }),
+    now,
+  ).run();
+}
+
+const PRESENTATION_CHECKPOINT_STAGES = [
+  "shortlist",
+  "synthesize",
+  "validate",
+] as const;
+
+type PresentationCheckpointStage =
+  (typeof PRESENTATION_CHECKPOINT_STAGES)[number];
+
+function presentationOnlyCheckpointOutput(
+  step: PresentationCheckpointStage,
+): unknown {
+  const item = presentationResearchItem("Reason &amp;amp;#8217; display");
+  if (step === "shortlist") return [item];
+  const candidate = {
+    item,
+    summary: legacyPresentationSummary(
+      step === "validate" ? "unknown-source" : "presentation-source",
+    ),
+  };
+  return step === "validate"
+    ? [{ ...candidate, valid: true }]
+    : [candidate];
+}
+
+async function insertPresentationOnlyD1Checkpoint(
+  runId: string,
+  step: PresentationCheckpointStage,
+): Promise<void> {
+  const output = presentationOnlyCheckpointOutput(step);
+  await env.DB.prepare(
+    `INSERT INTO audit_events (
+      id, run_id, event_type, event_json, created_at
+    ) VALUES (?, ?, 'workflow_checkpoint', ?, ?)`,
+  ).bind(
+    `presentation-only:${runId}:${step}`,
+    runId,
+    JSON.stringify({
+      step,
+      artifact: {
+        output,
+        attempts: 1,
+        durationMs: 0,
+        itemCount: Array.isArray(output) ? output.length : 1,
+        estimatedCostUsd: 0,
+        providerTextPresentationVersion:
+          PROVIDER_TEXT_PRESENTATION_VERSION,
+      },
+    }),
+    now,
+  ).run();
+}
+
+function compositionCheckpointFixture(
+  runId: string,
+  editionDate: string,
+  sourceName = "Source &amp;amp;#83;yndicate",
+): CompositionResult {
+  const editionId = `edition:${runId}`;
+  return {
+    edition: {
+      id: editionId,
+      editionDate,
+      runId,
+      status: "draft",
+      readingMinutes: 20,
+      publishedAt: null,
+      createdAt: now,
+      metadata: { missingSections: [], sourceFailures: [] },
+    },
+    entries: [{
+      id: `${editionId}:entry:0`,
+      editionId,
+      itemId: null,
+      section: "world",
+      position: 0,
+      summary: {
+        title: "Title &amp;amp;#8217; display",
+        oneSentence: "Sentence &amp;amp;#8217; display",
+        whyItMatters: "Why &amp;amp;#8217; display",
+        uncertainty: "Uncertainty &amp;amp;#8217; display",
+        claims: [{
+          text: "Claim &amp;amp;#8217; display",
+          sourceIds: ["source-structural-id"],
+          evidenceExcerpt: "Evidence &amp;amp;#8217; display",
+        }],
+        accessLevel: "secondary",
+      },
+      selectionReasons: ["Reason &amp;amp;#8217; display"],
+      sourceRefs: [{
+        id: "source-structural-id",
+        name: sourceName,
+        url: "https://example.com/report?cursor=a%26amp%3Bb",
+        role: "reporting",
+        retrievedAt: now,
+      }],
+    }],
+    status: "partial",
+    missingSections: [],
+    sourceFailures: [],
   };
 }
 
@@ -323,6 +585,23 @@ class GroundedProductionProvider implements ModelProvider {
         uncertainty: provenance,
       },
     };
+  }
+}
+
+class SparseResearchEmbeddingProvider extends GroundedProductionProvider {
+  override async embed(
+    texts: readonly string[],
+  ): Promise<readonly number[][]> {
+    return texts.map((text) => {
+      const fit = text.includes("NORMAL_FIT")
+        ? 0.8
+        : text.includes("NEAR_FIT")
+          ? 0.4
+          : text.includes("BELOW_FLOOR")
+            ? 0.3
+            : 1;
+      return [fit, Math.sqrt(1 - fit * fit)];
+    });
   }
 }
 
@@ -616,6 +895,14 @@ class RankingEmbeddingProvider implements ModelProvider {
     texts: readonly string[],
   ): Promise<readonly (readonly number[])[]> {
     return texts.map((text) => {
+      const coverageLocalIndex = /coverage-local-(\d+)/.exec(text)?.[1];
+      if (coverageLocalIndex !== undefined) {
+        const index = Number(coverageLocalIndex);
+        const embedding = this.basis(1);
+        embedding[6 + index] = 1;
+        return embedding;
+      }
+      if (text.includes("Source coverage-world")) return this.basis(3);
       const highNewsIndex = /high-news-(\d+)/.exec(text)?.[1];
       if (highNewsIndex !== undefined) {
         const index = Number(highNewsIndex);
@@ -897,6 +1184,590 @@ async function publishD1FixtureEdition(
 }
 
 describe("manual editorial run", () => {
+  it.each([
+    ["title", "&lt;br&gt;"],
+    ["sourceName", "&lt;br&gt;"],
+    ["title", "&#65308;br&#65310;"],
+    ["sourceName", "&#65308;br&#65310;"],
+  ] as const)(
+    "isolates an empty prepared %s value %s without swallowing structural errors",
+    async (invalidField, invalidValue) => {
+      const laneId = `official-publication:empty-prepared-${invalidField}`;
+      const diagnosticWrites: DiscoveryLaneDiagnostic[][] = [];
+      const invalid = {
+        ...rawNewsCandidate(`empty-prepared-${invalidField}`, "world"),
+        [invalidField]: invalidValue,
+        metadata: {
+          discoveryFamily: "official-publication",
+          discoveryLaneIds: [laneId],
+        },
+      };
+      const valid = {
+        ...rawNewsCandidate("valid-prepared-title", "world"),
+        metadata: {
+          discoveryFamily: "official-publication",
+          discoveryLaneIds: [laneId],
+        },
+      };
+      const context = createProductionPipelineContext({
+        editionDate: "2033-01-01",
+        runId: "run-isolate-empty-prepared-title",
+        store: new FixtureStore(),
+        now: () => now,
+        providers: {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+        collectCandidates: async () => [invalid, valid],
+        loadDiscoveryDiagnostics: () => [{
+          laneId,
+          sourceId: "custom",
+          discoveryFamily: "official-publication",
+          discovered: 2,
+          deduplicated: 0,
+          triaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: {},
+        }],
+        researchRepository: {
+          getDiscoveryObservations: async () => [],
+          upsertDiscoveryObservations: async () => undefined,
+          getCachedResearchAssessment: async () => null,
+          putCachedResearchAssessment: async () => undefined,
+          recordDiscoveryDiagnostics: async (_runId, diagnostics) => {
+            diagnosticWrites.push(structuredClone([...diagnostics]));
+          },
+        },
+      });
+
+      const collected = await context.collect();
+      expect(diagnosticWrites[0]?.[0]?.rejectionCounts).toEqual({
+        quality_rejected: 1,
+      });
+      const normalized = await context.normalize(collected);
+
+      expect(collected).toHaveLength(1);
+      expect(normalized).toHaveLength(1);
+      expect(normalized[0]?.title).toBe(valid.title);
+      await expect(context.normalize([{
+        ...valid,
+        originalUrl: "javascript:alert(1)",
+      }])).rejects.toThrow();
+    },
+  );
+
+  it.each([
+    ["title", "&lt;br&gt;"],
+    ["sourceName", "&lt;br&gt;"],
+    ["title", "&#65308;br&#65310;"],
+    ["sourceName", "&#65308;br&#65310;"],
+  ] as const)(
+    "isolates an encoded-markup-only stored Item %s value %s from its valid sibling",
+    async (invalidField, invalidValue) => {
+      const laneId = `official-publication:stored-item-${invalidField}`;
+      const diagnosticWrites: DiscoveryLaneDiagnostic[][] = [];
+      const invalidFixture = fixtureItem(
+        `stored-empty-${invalidField}`,
+        "world",
+      );
+      const invalid = ItemSchema.parse({
+        ...invalidFixture,
+        ...(invalidField === "title" ? { title: invalidValue } : {}),
+        sourceRefs: invalidFixture.sourceRefs.map((source) => ({
+          ...source,
+          ...(invalidField === "sourceName" ? { name: invalidValue } : {}),
+        })),
+        metadata: {
+          ...invalidFixture.metadata,
+          discoveryFamily: "official-publication",
+          discoveryLaneIds: [laneId],
+        },
+      });
+      const valid = ItemSchema.parse({
+        ...fixtureItem("stored-valid-title", "world"),
+        metadata: {
+          ...fixtureItem("stored-valid-title", "world").metadata,
+          discoveryFamily: "official-publication",
+          discoveryLaneIds: [laneId],
+        },
+      });
+      const context = createProductionPipelineContext({
+        editionDate: "2033-01-01",
+        runId: "run-isolate-stored-empty-title",
+        store: new FixtureStore(),
+        now: () => now,
+        providers: {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+        collectCandidates: async () => [],
+        loadDiscoveryDiagnostics: () => [{
+          laneId,
+          sourceId: "stored-items",
+          discoveryFamily: "official-publication",
+          discovered: 2,
+          deduplicated: 0,
+          triaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: {},
+        }],
+        researchRepository: {
+          getDiscoveryObservations: async () => [],
+          upsertDiscoveryObservations: async () => undefined,
+          getCachedResearchAssessment: async () => null,
+          putCachedResearchAssessment: async () => undefined,
+          recordDiscoveryDiagnostics: async (_runId, diagnostics) => {
+            diagnosticWrites.push(structuredClone([...diagnostics]));
+          },
+        },
+      });
+
+      const normalized = await context.normalize([invalid, valid]);
+
+      expect(normalized).toHaveLength(1);
+      expect(normalized[0]?.id).toBe(valid.id);
+      expect(diagnosticWrites.at(-1)?.[0]?.rejectionCounts).toEqual({
+        quality_rejected: 1,
+      });
+    },
+  );
+
+  it("isolates a packet-unsafe current source name during synthesis and continues with its valid sibling", async () => {
+    // Removing the typed synthesize catch must turn the first candidate's
+    // packet boundary into a whole-stage failure before the valid candidate.
+    const encoded = presentationResearchItem("Prepared system reason.");
+    const valid = ItemSchema.parse({
+      ...encoded,
+      title: "Presentation ’ title",
+      normalizedText: [
+        "Presentation ’ claim evidence supports the result.",
+        "Presentation ’ importance is documented.",
+        "Presentation ’ uncertainty remains.",
+      ].join(" "),
+    });
+    const unsafe = ItemSchema.parse({
+      ...valid,
+      id: "presentation-unsafe-source",
+      sourceRefs: valid.sourceRefs.map((source) => ({
+        ...source,
+        name: "Unsafe\u0000Source",
+      })),
+    });
+    const summaryProvider = new GroundedProductionProvider();
+    summaryProvider.failNextSummary = false;
+    const rejectionErrors: string[][] = [];
+    const store = new FixtureStore() as FixtureStore & {
+      recordSummaryRejection: NonNullable<PipelineStore["recordSummaryRejection"]>;
+    };
+    store.recordSummaryRejection = async (_runId, _itemId, event) => {
+      rejectionErrors.push([...event.errors]);
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2034-06-04",
+      runId: "run-isolate-unsafe-packet-source-name",
+      store,
+      now: () => now,
+      providers: {
+        summary: summaryProvider,
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    const summaries = await context.synthesize([unsafe, valid]);
+
+    expect(rejectionErrors).toEqual([]);
+    expect(summaries).toHaveLength(1);
+    expect(summaries[0]?.item.id).toBe(valid.id);
+    expect(summaries[0]?.item.sourceRefs[0]).toMatchObject({
+      id: "presentation-source",
+      url: "https://example.com/presentation?cursor=a%26amp%3Bb",
+      retrievedAt: now,
+      role: "primary",
+    });
+    expect(summaryProvider.generateRequests).toHaveLength(1);
+  });
+
+  it("strips encoded wrappers from stored display and evidence without decoding URLs", async () => {
+    const fixture = fixtureItem("stored-useful-markup", "world");
+    const originalUrl =
+      "https://example.com/stored-useful-markup?label=%26lt%3Bbr%26gt%3B";
+    const stored = ItemSchema.parse({
+      ...fixture,
+      canonicalUrl: originalUrl,
+      title:
+        "&#65308;script&#65310;Useful stored title&#65308;/script&#65310;",
+      primaryTopic: "&#119;orld",
+      sourceRefs: fixture.sourceRefs.map((source) => ({
+        ...source,
+        name:
+          "&#65308;em&#65310;Useful stored source&#65308;/em&#65310;",
+      })),
+      normalizedText:
+        "&#65308;p&#65310;Useful stored evidence&#65308;/p&#65310;",
+      metadata: {
+        ...fixture.metadata,
+        authors: [
+          "&#65308;strong&#65310;Useful stored author&#65308;/strong&#65310;",
+        ],
+        venue:
+          "&#65308;em&#65310;Useful stored venue&#65308;/em&#65310;",
+        structuralId: "structural-＆#8217;",
+      },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2034-04-02",
+      runId: "run-stored-useful-markup",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    const normalized = (await context.normalize([stored]))[0]!;
+
+    expect(normalized.title).toBe("Useful stored title");
+    expect(normalized.sourceRefs[0]?.name).toBe("Useful stored source");
+    expect(normalized.normalizedText).toBe("Useful stored evidence");
+    expect(normalized.metadata.authors).toEqual(["Useful stored author"]);
+    expect(normalized.metadata.venue).toBe("Useful stored venue");
+    expect(normalized.metadata.structuralId).toBe("structural-＆#8217;");
+    expect(normalized.canonicalUrl).toBe(originalUrl);
+    expect(normalized.primaryTopic).toBe("&#119;orld");
+    expect(JSON.stringify(normalized)).not.toMatch(
+      /<(?:script|em|strong|p)>/i,
+    );
+  });
+
+  it("rebuilds an ordinary stored aggregate after filtering typed-invalid nested display text", async () => {
+    const relatedItem = (id: string): Item => ItemSchema.parse({
+      ...fixtureItem(id, "world"),
+      metadata: {
+        ...fixtureItem(id, "world").metadata,
+        primarySection: "world",
+        sectionEligibility: ["world"],
+        namedEntities: ["Ordinary Development Agency"],
+        normalizedAuthors: [],
+        primaryDocumentUrl:
+          "https://example.com/documents/ordinary-development",
+        primaryDocumentUrls: [
+          "https://example.com/documents/ordinary-development",
+        ],
+      },
+    });
+    const validA = relatedItem("ordinary-development-valid-a");
+    const validB = relatedItem("ordinary-development-valid-b");
+    const invalidTitle = ItemSchema.parse({
+      ...relatedItem("ordinary-development-invalid-title"),
+      title: "&lt;br&gt;",
+    });
+    const invalidSourceFixture = relatedItem(
+      "ordinary-development-invalid-source",
+    );
+    const invalidSource = ItemSchema.parse({
+      ...invalidSourceFixture,
+      sourceRefs: invalidSourceFixture.sourceRefs.map((source) => ({
+        ...source,
+        name: "&lt;br&gt;",
+      })),
+    });
+    const staleDevelopment = clusterNews([
+      invalidTitle,
+      invalidSource,
+      validA,
+      validB,
+    ], {})[0]!;
+    const freshDevelopment = clusterNews([validA, validB], {})[0]!;
+    const scoreInputs = {
+      publicImportance: 0.81,
+      personalRelevance: 0.72,
+      sourceQuality: 0.91,
+      recency: 0.84,
+      geography: 0.25,
+      novelty: 0.63,
+    };
+    const aggregate = ItemSchema.parse({
+      ...staleDevelopment.representativeItem,
+      id: staleDevelopment.id,
+      title: staleDevelopment.title,
+      sourceRefs: staleDevelopment.sourceRefs,
+      normalizedText: staleDevelopment.items
+        .map((item) => item.normalizedText)
+        .join(" "),
+      primaryTopic: staleDevelopment.primarySection,
+      metadata: {
+        ...staleDevelopment.representativeItem.metadata,
+        ordinaryAggregateSentinel: "must-not-survive",
+        workflow: {
+          version: 1,
+          embedding: [0.25],
+          personalRelevance: scoreInputs.personalRelevance,
+          development: staleDevelopment,
+          developmentScore: scoreNewsDevelopment(
+            staleDevelopment,
+            scoreInputs,
+          ),
+          section: "technology",
+          selectionReasons: ["Preserved selection reason."],
+        },
+      },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2034-04-03",
+      runId: "run-ordinary-development-typed-filter",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    const normalized = await context.normalize([aggregate]);
+
+    expect(normalized).toHaveLength(1);
+    const rebuilt = normalized[0]!;
+    const rebuiltWorkflow = rebuilt.metadata.workflow as {
+      development: typeof freshDevelopment;
+      developmentScore: ReturnType<typeof scoreNewsDevelopment>;
+      embedding?: readonly number[];
+      personalRelevance?: number;
+      section?: string;
+      selectionReasons?: readonly string[];
+    };
+    expect(rebuiltWorkflow.development).toEqual(freshDevelopment);
+    expect(rebuiltWorkflow.developmentScore).toEqual(
+      scoreNewsDevelopment(freshDevelopment, scoreInputs),
+    );
+    expect(rebuilt).toMatchObject({
+      id: freshDevelopment.id,
+      title: freshDevelopment.title,
+      sourceRefs: freshDevelopment.sourceRefs,
+      normalizedText: freshDevelopment.items
+        .map((item) => item.normalizedText)
+        .join(" "),
+      primaryTopic: freshDevelopment.primarySection,
+    });
+    expect(rebuiltWorkflow.embedding).toBeUndefined();
+    expect(rebuiltWorkflow.personalRelevance).toBe(
+      scoreInputs.personalRelevance,
+    );
+    expect(rebuiltWorkflow.section).toBe(freshDevelopment.primarySection);
+    expect(rebuiltWorkflow.selectionReasons).toEqual([
+      "Preserved selection reason.",
+    ]);
+    expect(rebuilt.metadata.ordinaryAggregateSentinel).toBeUndefined();
+    expect(JSON.stringify(rebuilt)).not.toContain("<br>");
+  });
+
+  it("drops an ordinary stored aggregate only when every nested Item is typed-invalid", async () => {
+    const relatedItem = (id: string): Item => ItemSchema.parse({
+      ...fixtureItem(id, "world"),
+      metadata: {
+        ...fixtureItem(id, "world").metadata,
+        primarySection: "world",
+        sectionEligibility: ["world"],
+        namedEntities: ["All Bad Development Agency"],
+        normalizedAuthors: [],
+        primaryDocumentUrl:
+          "https://example.com/documents/all-bad-development",
+        primaryDocumentUrls: [
+          "https://example.com/documents/all-bad-development",
+        ],
+      },
+    });
+    const invalidTitle = ItemSchema.parse({
+      ...relatedItem("ordinary-all-bad-title"),
+      title: "&lt;br&gt;",
+    });
+    const invalidSourceFixture = relatedItem("ordinary-all-bad-source");
+    const invalidSource = ItemSchema.parse({
+      ...invalidSourceFixture,
+      sourceRefs: invalidSourceFixture.sourceRefs.map((source) => ({
+        ...source,
+        name: "&lt;br&gt;",
+      })),
+    });
+    const staleDevelopment = clusterNews(
+      [invalidTitle, invalidSource],
+      {},
+    )[0]!;
+    const aggregate = ItemSchema.parse({
+      ...staleDevelopment.representativeItem,
+      id: staleDevelopment.id,
+      metadata: {
+        ...staleDevelopment.representativeItem.metadata,
+        workflow: {
+          version: 1,
+          development: staleDevelopment,
+        },
+      },
+    });
+    const validSibling = fixtureItem("ordinary-all-bad-valid-sibling", "world");
+    const context = createProductionPipelineContext({
+      editionDate: "2034-04-04",
+      runId: "run-ordinary-development-all-bad",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    const normalized = await context.normalize([aggregate, validSibling]);
+
+    expect(normalized.map(({ id }) => id)).toEqual([validSibling.id]);
+  });
+
+  it("propagates a structurally invalid nested Item from an ordinary stored aggregate", async () => {
+    const validNews = fixtureItem("ordinary-structural-news", "world");
+    const validDevelopment = clusterNews([validNews], {})[0]!;
+    const researchItem = fixtureItem("ordinary-structural-paper", "research");
+    const structurallyInvalidDevelopment = {
+      ...validDevelopment,
+      title: researchItem.title,
+      itemIds: [researchItem.id],
+      items: [researchItem],
+      representativeItem: researchItem,
+      sourceRefs: researchItem.sourceRefs,
+    };
+    const aggregate = ItemSchema.parse({
+      ...validNews,
+      id: validDevelopment.id,
+      metadata: {
+        ...validNews.metadata,
+        workflow: {
+          version: 1,
+          development: structurallyInvalidDevelopment,
+        },
+      },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2034-04-05",
+      runId: "run-ordinary-development-structural-bad",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [],
+    });
+
+    await expect(context.normalize([aggregate])).rejects.toThrow(
+      "News developments require only news Items.",
+    );
+  });
+
+  it("prepares publication text before routing without changing structure", async () => {
+    const publication: RawPublicationCandidate = {
+      ...rawOfficialPublicationCandidate(
+        "technology",
+        "encoded-route",
+        now,
+        "The paper reports a substantive study with bounded evidence.",
+      ),
+      title: "A study of &amp;#105;nterpretability",
+      originalUrl: "https://nist.example/publications/encoded?id=%26amp%3B",
+      externalId: "publication&#65;",
+      externalIds: ["publication&#65;"],
+      sectionEligibility: ["research", "research_radar"],
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-01",
+      runId: "run-prepare-before-route",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [publication],
+    });
+
+    const normalized = await context.normalize([publication]);
+
+    expect(normalized).toHaveLength(1);
+    expect(normalized[0]).toMatchObject({
+      kind: "blog",
+      title: "A study of interpretability",
+      canonicalUrl: "https://nist.example/publications/encoded?id=%26amp%3B",
+      publishedAt: now,
+    });
+    expect(normalized[0]?.metadata.externalIds).toContain(
+      "publication&#65;",
+    );
+    expect(normalized[0]?.metadata.configuredTopics).toContain(
+      "alignment-interpretability",
+    );
+  });
+
+  it("bounds assessment evidence without splitting astral characters", async () => {
+    const provider = new FakeModelProvider({
+      generatedObjects: [
+        researchAssessment,
+        { ...researchAssessment, accessLevel: "full_text" },
+      ],
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-01",
+      runId: "run-safe-assessment-bounds",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: { summary: new FakeModelProvider(), assessment: provider },
+      collectCandidates: async () => [],
+    });
+    const storedResearch = (
+      id: string,
+      accessLevel: "abstract" | "full_text",
+      normalizedText: string,
+    ): Item => {
+      const item = fixtureItem(id, "research");
+      return ItemSchema.parse({
+        ...item,
+        accessLevel,
+        normalizedText,
+        metadata: {
+          ...item.metadata,
+          workflow: {
+            version: 1,
+            rawResearch: {
+              ...rawResearchCandidate(`2607.${id}`, `Assessment ${id}`),
+              accessLevel,
+            },
+          },
+        },
+      });
+    };
+    const abstractItem = storedResearch(
+      "astral-abstract",
+      "abstract",
+      `${"a".repeat(3_999)}😀tail`,
+    );
+    const fullTextItem = storedResearch(
+      "astral-full",
+      "full_text",
+      `${"b".repeat(99_999)}😀tail`,
+    );
+
+    await expect(context.assess([abstractItem, fullTextItem])).resolves
+      .toHaveLength(2);
+
+    expect(provider.generateRequests).toHaveLength(2);
+    for (const request of provider.generateRequests) {
+      expect(request.sourcePacket).not.toMatch(/\\ud[89ab][0-9a-f]{2}/i);
+      expect(request.sourcePacket).not.toMatch(/\\ud[c-f][0-9a-f]{2}/i);
+    }
+  });
+
   it("collects, validates, and atomically publishes one edition", async () => {
     // This fails if the orchestrator omits validation, composition, or publication.
     const context = fixturePipelineContext();
@@ -909,6 +1780,56 @@ describe("manual editorial run", () => {
     expect(await Promise.all(PIPELINE_STEPS.map((step) => context.store.readCheckpoint("run-fixture", step)))).toEqual(
       PIPELINE_STEPS.map(() => true),
     );
+  });
+
+  it.each([
+    {
+      name: "research with local but no nonlocal news",
+      sections: ["research", "dmv"],
+      status: "partial",
+      missingSections: ["nonlocal_news"],
+    },
+    {
+      name: "research with nonlocal but no local news",
+      sections: ["research", "world"],
+      status: "partial",
+      missingSections: ["dmv_or_baltimore"],
+    },
+    {
+      name: "research only",
+      sections: ["research"],
+      status: "partial",
+      missingSections: ["nonlocal_news", "dmv_or_baltimore"],
+    },
+    {
+      name: "news only",
+      sections: ["world", "dmv"],
+      status: "failed",
+      missingSections: ["research"],
+    },
+    {
+      name: "no valid entries",
+      sections: [],
+      status: "failed",
+      missingSections: ["research", "nonlocal_news", "dmv_or_baltimore"],
+    },
+  ])("classifies $name", async ({ sections, status, missingSections }) => {
+    const items = sections.map((section, index) =>
+      fixtureItem(`composition-${section}-${index}`, section),
+    );
+    const composition = await composeEdition(
+      fixturePipelineContext({ runId: `compose-${sections.join("-") || "empty"}` }),
+      items.map((item) => ({
+        item,
+        summary: fixtureSummary(item),
+        valid: true,
+      })),
+      items,
+    );
+
+    expect(composition.status).toBe(status);
+    expect(composition.missingSections).toEqual(missingSections);
+    expect(composition.edition.metadata?.missingSections).toEqual(missingSections);
   });
 
   it("preserves the calculated shortlist reasons in the persisted edition", async () => {
@@ -1045,7 +1966,7 @@ describe("manual editorial run", () => {
     expect(synthesisCalls).toBe(1);
   });
 
-  it("publishes a source-partial edition only when research, nonlocal news, and DMV coverage remain", async () => {
+  it("publishes a covered undersized edition as partial", async () => {
     const context = fixturePipelineContext({
       runId: "run-partial",
       synthesize: async (items) => items
@@ -1057,9 +1978,9 @@ describe("manual editorial run", () => {
     expect((await context.store.getLatestEdition())?.status).toBe("partial");
   });
 
-  it("leaves a failed minimum draft unpublished and preserves the prior edition", async () => {
+  it("publishes a research-only partial edition with honest missing coverage", async () => {
     const context = fixturePipelineContext({
-      runId: "run-failed-minimum",
+      runId: "run-research-only-partial",
       synthesize: async (items) => items
         .filter((item) => item.id === "research")
         .map((item) => ({ item, summary: fixtureSummary(item) })),
@@ -1076,8 +1997,20 @@ describe("manual editorial run", () => {
     };
     context.store.editions.set(prior.editionDate, prior);
 
-    await expect(runEditorialPipeline(context)).resolves.toMatchObject({ status: "failed" });
-    expect(await context.store.getLatestEdition()).toEqual(prior);
+    await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+      status: "partial",
+      missingSections: ["nonlocal_news", "dmv_or_baltimore"],
+    });
+    await expect(context.store.getLatestEdition()).resolves.toMatchObject({
+      runId: "run-research-only-partial",
+      status: "partial",
+      metadata: {
+        missingSections: ["nonlocal_news", "dmv_or_baltimore"],
+      },
+      entries: [expect.objectContaining({ section: "research" })],
+    });
+    expect(await context.store.getLatestEdition()).not.toEqual(prior);
+    expect(context.store.editions.get(prior.editionDate)).toEqual(prior);
   });
 
   it("fails six valid entries when they omit required coverage", async () => {
@@ -1127,6 +2060,1535 @@ describe("manual editorial run", () => {
     await expect(runEditorialPipeline(context)).resolves.toMatchObject({ status: "published" });
     expect(completedStageWasRepeated).toBe(false);
     expect(await context.store.readCheckpoint(context.runId, "publish")).toBe(true);
+  });
+
+  it("normalizes legacy completed checkpoints in memory before assessment", async () => {
+    const store = new FixtureStore();
+    const observedEvidenceFingerprints: string[] = [];
+    const legacyRaw: RawResearchCandidate = {
+      ...rawResearchCandidate(
+        "2607.checkpoint-legacy",
+        "Checkpoint &#114;esearch title",
+      ),
+      sourceName: "Checkpoint &amp; Source",
+      metadata: { arbitraryRawDisplay: "Legacy &#82;aw metadata" },
+    };
+    const freshLegacyResearch = normalizeCandidate({
+      ...legacyRaw,
+      title: "Checkpoint research title",
+      abstract: "Checkpoint evidence for assessment.",
+      metadata: {},
+    });
+    const structuralProvenance = {
+      sourceId: "source&#65;",
+      sourceName: "Checkpoint &amp; Source",
+      role: "primary",
+      accessLevel: "abstract",
+      url: "https://example.com/paper?id=%26amp%3B",
+      retrievedAt: now,
+      canCorroborateFacts: true,
+    };
+    const legacyItem = ItemSchema.parse({
+      ...fixtureItem("legacy-checkpoint-research", "research"),
+      title: "Checkpoint &#114;esearch title",
+      sourceRefs: [{
+        ...fixtureItem("legacy-checkpoint-source", "research").sourceRefs[0]!,
+        id: "arxiv",
+        name: "Checkpoint &amp; Source",
+        url: legacyRaw.originalUrl,
+      }],
+      normalizedText: "Checkpoint &#101;vidence for assessment.",
+      tags: ["research", "stale&#45;topic"],
+      metadata: {
+        normalizedAuthors: ["&amp;#65;da Example"],
+        institutions: ["Checkpoint &#73;nstitute"],
+        providerTopics: ["&#73;nterpretability"],
+        provenance: [structuralProvenance],
+        attachedCommentary: [{
+          sourceId: "arxiv",
+          role: "blog",
+          title: "Attached &#67;ommentary",
+          url: legacyRaw.originalUrl,
+          retrievedAt: now,
+          accessLevel: "abstract",
+          excerpt: "Attached &#101;vidence excerpt.",
+          relatedPaperIds: [],
+        }],
+        editorialSignals: [{
+          sourceName: "Signal &#83;ource",
+          structuralValue: "keep&#65;",
+        }],
+        namedEntities: ["Stale &#69;ntity"],
+        eventFamilies: ["stale-event-family"],
+        eventInstances: [{ stale: "&#69;vent" }],
+        materialFacts: [{ stale: "&#70;act" }],
+        scopedMaterialFacts: [{ stale: "&#83;coped fact" }],
+        contentFingerprint: "content:stale-legacy-value",
+        evidenceFingerprint: "evidence:stale-legacy-value",
+        configuredTopics: ["stale-topic"],
+        primaryTopic: "stale-topic",
+        workflow: {
+          version: 1,
+          rawResearch: legacyRaw,
+          topicalFit: 0.9,
+        },
+      },
+    });
+    const rawLegacyNews: RawNewsCandidate = {
+      ...rawNewsCandidate("legacy-news-signals", "world"),
+      title: "Federal Reserve raises interest rates to 5%",
+      abstract:
+        "Federal Reserve raises interest rates to 5% after the meeting.",
+      namedEntities: [],
+      eventFamilies: [],
+      materialFacts: [],
+    };
+    const freshNews = normalizeCandidate(rawLegacyNews);
+    const legacyNews = ItemSchema.parse({
+      ...freshNews,
+      title: "F&#101;deral Reserve raises interest rates to 5%",
+      normalizedText:
+        "F&#101;deral Reserve raises interest rates to 5% after the meeting.",
+      tags: ["world", "stale&#45;section"],
+      metadata: {
+        ...freshNews.metadata,
+        namedEntities: ["Stale &#69;ntity"],
+        eventFamilies: ["stale-event-family"],
+        eventInstances: [{ stale: "&#69;vent" }],
+        materialFacts: [{ stale: "&#70;act" }],
+        scopedMaterialFacts: [{ stale: "&#83;coped fact" }],
+        editorialSignals: [{
+          ...(freshNews.metadata.editorialSignals as
+            Record<string, unknown>[])[0],
+          namedEntities: ["Stale &#69;ntity"],
+          eventFamilies: ["stale-event-family"],
+        }],
+      },
+    });
+    const assessmentProvider = new FakeModelProvider({
+      generatedObjects: [researchAssessment],
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-15",
+      runId: "run-legacy-completed-checkpoint",
+      store,
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: assessmentProvider,
+      },
+      collectCandidates: async () => {
+        throw new Error("completed collect must not run");
+      },
+      researchRepository: {
+        getDiscoveryObservations: async () => [],
+        upsertDiscoveryObservations: async () => undefined,
+        getCachedResearchAssessment: async (
+          _canonicalId,
+          evidenceFingerprint,
+        ) => {
+          observedEvidenceFingerprints.push(evidenceFingerprint);
+          return null;
+        },
+        putCachedResearchAssessment: async () => undefined,
+      },
+    });
+    context.normalize = async () => {
+      throw new Error("completed normalize must not run");
+    };
+    context.score = async () => {
+      throw new Error("STOP_AFTER_ASSESS");
+    };
+    await store.createRun({
+      id: context.runId,
+      editionDate: context.editionDate,
+      status: "retryable",
+      currentStep: "prefilter",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    for (const step of ["collect", "normalize", "enrich", "prefilter"] as const) {
+      await store.saveCheckpoint(context.runId, step, {
+        output: [legacyItem, legacyNews],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 2,
+        estimatedCostUsd: 0,
+      });
+    }
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_ASSESS",
+    );
+
+    const sourcePacket = assessmentProvider.generateRequests[0]?.sourcePacket;
+    expect(sourcePacket).toContain("title: Checkpoint research title");
+    expect(sourcePacket).toContain("source_name: Checkpoint & Source");
+    expect(sourcePacket).toContain("Checkpoint evidence for assessment.");
+    expect(sourcePacket).not.toContain("&#");
+    const assessedArtifact = store.artifacts.get(
+      `${context.runId}:assess`,
+    ) as CheckpointArtifact<readonly Item[]>;
+    const assessed = assessedArtifact.output[0]!;
+    const assessedNews = assessedArtifact.output[1]!;
+    const compact = (assessed.metadata.workflow as {
+      rawResearch: RawResearchCandidate;
+    }).rawResearch;
+    expect(compact.metadata).toEqual({});
+    expect(assessed.metadata.provenance).toEqual([{
+      ...structuralProvenance,
+      sourceName: "Checkpoint & Source",
+    }]);
+    expect(assessed.metadata.normalizedAuthors).toEqual([]);
+    expect(assessed.metadata.contentFingerprint).toBeUndefined();
+    expect(assessed.metadata.evidenceFingerprint).toBeUndefined();
+    expect(observedEvidenceFingerprints).toEqual([
+      researchFingerprints(assessed).evidenceFingerprint,
+    ]);
+    expect(observedEvidenceFingerprints).not.toContain(
+      "evidence:stale-legacy-value",
+    );
+    expect(assessed.metadata.namedEntities).toEqual([]);
+    expect(assessed.metadata.eventFamilies).toEqual([]);
+    expect(assessed.metadata.eventInstances).toEqual([]);
+    expect(assessed.metadata.materialFacts).toEqual([]);
+    expect(assessed.metadata.scopedMaterialFacts).toEqual([]);
+    expect(assessed.tags).toEqual(freshLegacyResearch.tags);
+    expect(assessed.metadata.configuredTopics).toContain(
+      "alignment-interpretability",
+    );
+    expect(assessed.primaryTopic).toBe("alignment-interpretability");
+    expect(assessed.metadata.attachedCommentary).toEqual([
+      expect.objectContaining({
+        title: "Attached Commentary",
+        excerpt: "Attached evidence excerpt.",
+      }),
+    ]);
+    expect(JSON.stringify(assessed.metadata.editorialSignals)).not.toContain(
+      "&#",
+    );
+    expect(JSON.stringify(sourcePacketForItem(assessed))).toContain(
+      "Attached Commentary",
+    );
+    expect(JSON.stringify(sourcePacketForItem(assessed))).toContain(
+      "Attached evidence excerpt.",
+    );
+    for (const field of [
+      "namedEntities",
+      "eventFamilies",
+      "eventInstances",
+      "materialFacts",
+      "scopedMaterialFacts",
+      "editorialSignals",
+    ] as const) {
+      expect(assessedNews.metadata[field]).toEqual(freshNews.metadata[field]);
+    }
+    expect(assessedNews).toMatchObject({
+      title: freshNews.title,
+      normalizedText: freshNews.normalizedText,
+      primaryTopic: freshNews.primaryTopic,
+      tags: freshNews.tags,
+    });
+    expect(clusterNews([assessedNews], {})).toEqual(
+      clusterNews([freshNews], {}),
+    );
+    expect(JSON.stringify(assessedNews)).not.toContain("Stale &#");
+    expect(triageResearch([assessed], {
+      maximum: 1,
+      maximumPerFamily: 1,
+      maximumPerPublisherDomain: 1,
+      configuredTopics: CONFIGURED_RESEARCH_TOPIC_IDS,
+      now,
+    }).items).toHaveLength(1);
+    const staleIdentity = (id: string): Item => ItemSchema.parse({
+      ...assessed,
+      id,
+      canonicalUrl: `https://${id}.example/research`,
+      sourceRefs: assessed.sourceRefs.map((source) => ({
+        ...source,
+        id,
+        url: `https://${id}.example/source`,
+      })),
+      metadata: {
+        ...assessed.metadata,
+        externalIds: [],
+      },
+    });
+    expect(consolidateResearchCandidates([
+      staleIdentity("legacy-no-author-a"),
+      staleIdentity("legacy-no-author-b"),
+    ]).papers).toHaveLength(2);
+    expect(JSON.stringify(
+      (store.artifacts.get(`${context.runId}:normalize`) as
+        CheckpointArtifact<readonly Item[]>).output,
+    )).toContain("arbitraryRawDisplay");
+  });
+
+  it.each([
+    ["title", "&lt;br&gt;"],
+    ["sourceName", "&lt;br&gt;"],
+    ["title", "&#65308;br&#65310;"],
+    ["sourceName", "&#65308;br&#65310;"],
+  ] as const)(
+    "drops only an encoded-markup-empty Item %s value %s from a legacy normalize checkpoint",
+    async (invalidField, invalidValue) => {
+      const store = new FixtureStore();
+      const invalidFixture = fixtureItem(
+        `legacy-normalize-empty-${invalidField}`,
+        "world",
+      );
+      const invalid = ItemSchema.parse({
+        ...invalidFixture,
+        ...(invalidField === "title" ? { title: invalidValue } : {}),
+        sourceRefs: invalidFixture.sourceRefs.map((source) => ({
+          ...source,
+          ...(invalidField === "sourceName" ? { name: invalidValue } : {}),
+        })),
+      });
+      const valid = fixtureItem("legacy-normalize-valid-title", "world");
+      const restoredInputs: Item[][] = [];
+      const context = createProductionPipelineContext({
+        editionDate: "2033-01-16",
+        runId: "run-legacy-normalize-empty-title",
+        store,
+        now: () => now,
+        providers: {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+        collectCandidates: async () => {
+          throw new Error("completed collect must not run");
+        },
+      });
+      context.normalize = async () => {
+        throw new Error("completed normalize must not run");
+      };
+      context.enrich = async (items) => {
+        restoredInputs.push([...items]);
+        throw new Error("STOP_AFTER_LEGACY_NORMALIZE_RESTORE");
+      };
+      await store.createRun({
+        id: context.runId,
+        editionDate: context.editionDate,
+        status: "retryable",
+        currentStep: "normalize",
+        retryable: true,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+      await store.saveCheckpoint(context.runId, "collect", {
+        output: [],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 0,
+        estimatedCostUsd: 0,
+      });
+      await store.saveCheckpoint(context.runId, "normalize", {
+        output: [invalid, valid],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 2,
+        estimatedCostUsd: 0,
+      });
+
+      await expect(runEditorialPipeline(context)).rejects.toThrow(
+        "STOP_AFTER_LEGACY_NORMALIZE_RESTORE",
+      );
+      expect(restoredInputs).toHaveLength(1);
+      expect(restoredInputs[0]?.map(({ id }) => id)).toEqual([valid.id]);
+    },
+  );
+
+  it("normalizes a completed collect Item only once before normalization", async () => {
+    const store = new FixtureStore();
+    const legacyRaw = rawResearchCandidate(
+      "2607.single-boundary",
+      "Research &amp;amp;#8217; result",
+    );
+    const legacyItem = ItemSchema.parse({
+      ...fixtureItem("single-boundary-research", "research"),
+      title: "Research &amp;amp;#8217; result",
+      sourceRefs: [{
+        ...fixtureItem("single-boundary-source", "research").sourceRefs[0]!,
+        id: "arxiv",
+        name: "Source &amp;amp;#8217; Name",
+        url: legacyRaw.originalUrl,
+      }],
+      normalizedText: "Evidence &amp;amp;#8217; remains bounded.",
+      metadata: {
+        authors: ["Author &amp;amp;#8217; Name"],
+        institutions: ["Institute &amp;amp;#8217; Name"],
+        providerTopics: ["Topic &amp;amp;#8217; Name"],
+        workflow: { version: 1, rawResearch: legacyRaw },
+      },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-17",
+      runId: "run-single-provider-text-boundary",
+      store,
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => {
+        throw new Error("completed collect must not run");
+      },
+    });
+    context.enrich = async () => {
+      throw new Error("STOP_AFTER_NORMALIZE");
+    };
+    await store.createRun({
+      id: context.runId,
+      editionDate: context.editionDate,
+      status: "retryable",
+      currentStep: "collect",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await store.saveCheckpoint(context.runId, "collect", {
+      output: [legacyItem],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 1,
+      estimatedCostUsd: 0,
+    });
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_NORMALIZE",
+    );
+
+    const normalizedArtifact = store.artifacts.get(
+      `${context.runId}:normalize`,
+    ) as CheckpointArtifact<readonly Item[]>;
+    const normalized = normalizedArtifact.output[0]!;
+    expect(normalized.title).toBe("Research &#8217; result");
+    expect(normalized.sourceRefs[0]!.name).toBe("Source &#8217; Name");
+    expect(normalized.normalizedText).toBe(
+      "Evidence &#8217; remains bounded.",
+    );
+    expect((normalized.metadata.workflow as {
+      rawResearch: RawResearchCandidate;
+    }).rawResearch.title).toBe("Research &#8217; result");
+  });
+
+  it("normalizes nested development Items restored from a completed shortlist", async () => {
+    const store = new FixtureStore();
+    const summaryProvider = new GroundedProductionProvider();
+    summaryProvider.failNextSummary = false;
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-18",
+      runId: "run-legacy-news-development",
+      store,
+      now: () => now,
+      providers: {
+        summary: summaryProvider,
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [
+        rawNewsCandidate("legacy-development", "world"),
+      ],
+    });
+    const collected = await context.collect();
+    const [normalized] = await context.normalize(collected);
+    const normalizedWorkflow = normalized!.metadata.workflow as
+      Record<string, unknown>;
+    const enriched = ItemSchema.parse({
+      ...normalized!,
+      metadata: {
+        ...normalized!.metadata,
+        workflow: {
+          ...normalizedWorkflow,
+          embedding: [1, 0],
+          personalRelevance: 0.8,
+        },
+      },
+    });
+    const [scored] = await context.score([enriched]);
+    const [clustered] = await context.cluster([scored!]);
+    const clusteredWorkflow = structuredClone(
+      clustered!.metadata.workflow as Record<string, unknown>,
+    ) as Record<string, unknown> & {
+      development: {
+        title: string;
+        items: Item[];
+        representativeItem: Item;
+      };
+    };
+    const nested = clusteredWorkflow.development.items[0]!;
+    const {
+      providerTextNormalizationVersion: _nestedWorkflowVersion,
+      ...legacyNestedWorkflow
+    } = nested.metadata.workflow as Record<string, unknown>;
+    const {
+      workflow: _nestedWorkflow,
+      ...nestedMetadata
+    } = nested.metadata;
+    const encodedNested = ItemSchema.parse({
+      ...nested,
+      title: "Nested &#114;eport",
+      sourceRefs: nested.sourceRefs.map((source) => ({
+        ...source,
+        name: "Nested &amp; Source",
+      })),
+      normalizedText: "Nested &#101;vidence for synthesis.",
+      metadata: {
+        ...nestedMetadata,
+        providerTextNormalizationVersion: 1,
+        workflow: legacyNestedWorkflow,
+      },
+    });
+    clusteredWorkflow.development = {
+      ...clusteredWorkflow.development,
+      title: "Nested &#114;eport",
+      items: [encodedNested],
+      representativeItem: encodedNested,
+    };
+    const {
+      providerTextNormalizationVersion: _clusterWorkflowVersion,
+      ...legacyClusteredWorkflow
+    } = clusteredWorkflow;
+    const legacyShortlisted = ItemSchema.parse({
+      ...clustered!,
+      metadata: {
+        ...clustered!.metadata,
+        providerTextNormalizationVersion: 1,
+        section: "world",
+        workflow: {
+          ...legacyClusteredWorkflow,
+          section: "world",
+          selectionReasons: ["Fixture selection."],
+        },
+      },
+    });
+    context.validate = async () => {
+      throw new Error("STOP_AFTER_SYNTHESIS");
+    };
+    await store.createRun({
+      id: context.runId,
+      editionDate: context.editionDate,
+      status: "retryable",
+      currentStep: "shortlist",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const outputs = new Map<string, unknown>([
+      ["collect", collected],
+      ["normalize", [normalized]],
+      ["enrich", [enriched]],
+      ["prefilter", [enriched]],
+      ["assess", [enriched]],
+      ["score", [scored]],
+      ["cluster", [legacyShortlisted]],
+      ["shortlist", [legacyShortlisted]],
+    ]);
+    for (const [step, output] of outputs) {
+      await store.saveCheckpoint(context.runId, step, {
+        output,
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 1,
+        estimatedCostUsd: 0,
+      });
+    }
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_SYNTHESIS",
+    );
+
+    const packet = summaryProvider.generateRequests[0]?.sourcePacket;
+    expect(packet).toContain("title: Nested report");
+    expect(packet).toContain("source_name: Nested & Source");
+    expect(packet).toContain("Nested evidence for synthesis.");
+    expect(packet).not.toContain("&#");
+  });
+
+  it("ignores a fresh Item's spoofed workflow normalization marker", async () => {
+    const store = new FixtureStore();
+    const legacyRaw = rawResearchCandidate(
+      "2607.spoofed-marker",
+      "Fresh &amp;amp;#8217; research",
+    );
+    const spoofed = ItemSchema.parse({
+      ...fixtureItem("spoofed-marker-research", "research"),
+      title: "Fresh &amp;amp;#8217; research",
+      sourceRefs: [{
+        ...fixtureItem("spoofed-marker-source", "research").sourceRefs[0]!,
+        id: "arxiv",
+        name: "Fresh &amp;amp;#8217; Source",
+        url: legacyRaw.originalUrl,
+      }],
+      normalizedText: "Fresh &amp;amp;#8217; evidence.",
+      metadata: {
+        workflow: {
+          version: 1,
+          providerTextNormalizationVersion: 1,
+          rawResearch: legacyRaw,
+        },
+      },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-19",
+      runId: "run-spoofed-item-marker",
+      store,
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [spoofed],
+    });
+    context.enrich = async () => {
+      throw new Error("STOP_AFTER_NORMALIZE");
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_NORMALIZE",
+    );
+
+    const artifact = store.artifacts.get(
+      `${context.runId}:normalize`,
+    ) as CheckpointArtifact<readonly Item[]>;
+    const normalized = artifact.output[0]!;
+    expect(normalized.title).toBe("Fresh &#8217; research");
+    expect(normalized.sourceRefs[0]!.name).toBe("Fresh &#8217; Source");
+    expect(normalized.normalizedText).toBe("Fresh &#8217; evidence.");
+  });
+
+  it("trusts a current synthesis envelope without changing workflow-less nested Items", async () => {
+    const store = new FixtureStore();
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-20",
+      runId: "run-current-synthesis-envelope",
+      store,
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [
+        rawNewsCandidate("current-envelope-development", "world"),
+      ],
+    });
+    const collected = await context.collect();
+    const [normalized] = await context.normalize(collected);
+    const enriched = ItemSchema.parse({
+      ...normalized!,
+      metadata: {
+        ...normalized!.metadata,
+        workflow: {
+          ...(normalized!.metadata.workflow as Record<string, unknown>),
+          embedding: [1, 0],
+          personalRelevance: 0.8,
+        },
+      },
+    });
+    const [scored] = await context.score([enriched]);
+    const [clustered] = await context.cluster([scored!]);
+    const workflow = structuredClone(
+      clustered!.metadata.workflow as Record<string, unknown>,
+    ) as Record<string, unknown> & {
+      development: {
+        items: Item[];
+        representativeItem: Item;
+      };
+    };
+    const nested = workflow.development.items[0]!;
+    const encodedWorkflowlessNested = ItemSchema.parse({
+      ...nested,
+      title: "Current &#8217; nested report",
+      sourceRefs: nested.sourceRefs.map((source) => ({
+        ...source,
+        name: "Current &#8217; nested source",
+      })),
+      normalizedText: "Current &#8217; nested evidence.",
+      metadata: Object.fromEntries(
+        Object.entries(nested.metadata).filter(([key]) => key !== "workflow"),
+      ),
+    });
+    workflow.development = {
+      ...workflow.development,
+      items: [encodedWorkflowlessNested],
+      representativeItem: encodedWorkflowlessNested,
+    };
+    const shortlisted = ItemSchema.parse({
+      ...clustered!,
+      metadata: {
+        ...clustered!.metadata,
+        section: "world",
+        workflow: {
+          ...workflow,
+          section: "world",
+          selectionReasons: ["Fixture selection."],
+        },
+      },
+    });
+    const observed: Item[] = [];
+    context.validate = async (entries) => {
+      const restoredWorkflow = entries[0]!.item.metadata.workflow as {
+        development: { items: Item[] };
+      };
+      observed.push(structuredClone(restoredWorkflow.development.items[0]!));
+      throw new Error("STOP_AFTER_SYNTHESIS_RESTORE");
+    };
+    await store.createRun({
+      id: context.runId,
+      editionDate: context.editionDate,
+      status: "retryable",
+      currentStep: "synthesize",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const stageOutputs = new Map<string, unknown>([
+      ["collect", collected],
+      ["normalize", [normalized]],
+      ["enrich", [enriched]],
+      ["prefilter", [enriched]],
+      ["assess", [enriched]],
+      ["score", [scored]],
+      ["cluster", [shortlisted]],
+      ["shortlist", [shortlisted]],
+    ]);
+    for (const [step, output] of stageOutputs) {
+      await store.saveCheckpoint(context.runId, step, {
+        output,
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 1,
+        estimatedCostUsd: 0,
+      });
+    }
+    await store.saveCheckpoint(context.runId, "synthesize", {
+      output: [{ item: shortlisted, summary: fixtureSummary(shortlisted) }],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 1,
+      estimatedCostUsd: 0,
+      providerTextNormalizationVersion: 1,
+    });
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_SYNTHESIS_RESTORE",
+    );
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_SYNTHESIS_RESTORE",
+    );
+
+    expect(observed).toHaveLength(2);
+    expect(observed[0]!.title).toBe("Current &#8217; nested report");
+    expect(observed[0]!.sourceRefs[0]!.name).toBe(
+      "Current &#8217; nested source",
+    );
+    expect(observed[0]!.normalizedText).toBe(
+      "Current &#8217; nested evidence.",
+    );
+    expect(observed[0]!.metadata.workflow).toBeUndefined();
+    expect(observed[1]).toEqual(observed[0]);
+  });
+
+  it("promotes a legacy checkpoint graph to a stable current envelope", async () => {
+    const store = new FixtureStore();
+    const legacy = ItemSchema.parse({
+      ...fixtureItem("legacy-envelope-item", "world"),
+      title: "Legacy &amp;amp;#8217; item",
+      sourceRefs: fixtureItem("legacy-envelope-source", "world").sourceRefs.map(
+        (source) => ({ ...source, name: "Legacy &amp;amp;#8217; Source" }),
+      ),
+      normalizedText: "Legacy &amp;amp;#8217; evidence.",
+      metadata: {
+        authors: ["Legacy &#65;uthor"],
+        normalizedAuthors: ["stale-author"],
+      },
+    });
+    const observed: Item[] = [];
+    const context = fixturePipelineContext({
+      editionDate: "2033-01-21",
+      runId: "run-legacy-envelope-promotion",
+    });
+    context.store = store;
+    context.enrich = async (items) => items;
+    context.prefilter = async (items) => {
+      observed.push(structuredClone(items[0]!));
+      throw new Error("STOP_AFTER_ENRICH_RESTORE");
+    };
+    await store.createRun({
+      id: context.runId,
+      editionDate: context.editionDate,
+      status: "retryable",
+      currentStep: "normalize",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+    });
+    await store.saveCheckpoint(context.runId, "collect", {
+      output: [],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 0,
+      estimatedCostUsd: 0,
+    });
+    await store.saveCheckpoint(context.runId, "normalize", {
+      output: [legacy],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 1,
+      estimatedCostUsd: 0,
+    });
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_ENRICH_RESTORE",
+    );
+    const legacyArtifact = store.artifacts.get(
+      `${context.runId}:normalize`,
+    ) as CheckpointArtifact<readonly Item[]>;
+    const currentArtifact = store.artifacts.get(
+      `${context.runId}:enrich`,
+    ) as CheckpointArtifact<readonly Item[]> & {
+      providerTextNormalizationVersion?: number;
+    };
+    expect(legacyArtifact.output[0]!.title).toBe(
+      "Legacy &amp;amp;#8217; item",
+    );
+    expect(currentArtifact.providerTextNormalizationVersion).toBe(1);
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_ENRICH_RESTORE",
+    );
+
+    expect(observed).toHaveLength(2);
+    expect(observed[0]!.title).toBe("Legacy &#8217; item");
+    expect(observed[0]!.metadata.workflow).toBeUndefined();
+    expect(observed[0]!.metadata.authors).toEqual(["Legacy Author"]);
+    expect(observed[0]!.metadata.normalizedAuthors).toEqual([
+      "legacy author",
+    ]);
+    expect(observed[1]).toEqual(observed[0]);
+  });
+
+  it("marks prepared collect and normalized item checkpoints separately", async () => {
+    const store = new FixtureStore();
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-22",
+      runId: "run-checkpoint-envelope-labels",
+      store,
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [
+        rawResearchCandidate(
+          "2607.envelope-labels",
+          "Raw interpretability &amp;amp;#8217; research",
+        ),
+      ],
+    });
+    context.enrich = async () => {
+      throw new Error("STOP_AFTER_NORMALIZE");
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_NORMALIZE",
+    );
+
+    const collectArtifact = store.artifacts.get(
+      `${context.runId}:collect`,
+    ) as CheckpointArtifact<unknown> & {
+      providerTextNormalizationVersion?: number;
+      providerTextPreparationVersion?: number;
+    };
+    const normalizeArtifact = store.artifacts.get(
+      `${context.runId}:normalize`,
+    ) as CheckpointArtifact<unknown> & {
+      providerTextNormalizationVersion?: number;
+    };
+    expect(collectArtifact.providerTextNormalizationVersion).toBeUndefined();
+    expect(collectArtifact.providerTextPreparationVersion).toBe(
+      PROVIDER_TEXT_PREPARATION_VERSION,
+    );
+    expect(JSON.stringify(collectArtifact.output)).toContain(
+      "Raw interpretability &#8217; research",
+    );
+    expect(normalizeArtifact.providerTextNormalizationVersion).toBe(1);
+    expect((normalizeArtifact.output as Item[])[0]?.title).toBe(
+      "Raw interpretability &#8217; research",
+    );
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_NORMALIZE",
+    );
+    expect((normalizeArtifact.output as Item[])[0]?.title).toBe(
+      "Raw interpretability &#8217; research",
+    );
+  });
+
+  it("promotes legacy shortlist presentation before a failed synthesize and restores it byte-stably", async () => {
+    const runId = "run-legacy-shortlist-presentation";
+    const editionDate = "2034-06-01";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "running",
+      currentStep: "shortlist",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    await seedD1CheckpointsBefore(store, runId, "shortlist");
+    const legacyShortlist = presentationResearchItem();
+    await insertLegacyD1Checkpoint(runId, "shortlist", [ItemSchema.parse({
+      ...legacyShortlist,
+      sourceRefs: legacyShortlist.sourceRefs.map((source) => ({
+        ...source,
+        name: "S".repeat(500),
+      })),
+    })]);
+    const observed: Item[][] = [];
+    const context: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store,
+      synthesize: async (items) => {
+        observed.push(structuredClone([...items]));
+        throw new Error("STOP_AFTER_SHORTLIST_PRESENTATION");
+      },
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_SHORTLIST_PRESENTATION",
+    );
+
+    const promoted = await store.readArtifact(runId, "shortlist") as
+      CheckpointArtifact<Item[]> & {
+        providerTextPresentationVersion?: number;
+      };
+    const promotedWorkflow = promoted.output[0]?.metadata.workflow as {
+      selectionReasons?: string[];
+    };
+    expect(promoted.providerTextPresentationVersion).toBe(1);
+    expect(promotedWorkflow.selectionReasons).toEqual([
+      "Reason &#8217; display",
+    ]);
+    expect(promoted.output[0]?.sourceRefs[0]?.name).toBe("S".repeat(200));
+    expect(promoted.output[0]?.sourceRefs[0]).toMatchObject({
+      id: "presentation-source",
+      url: "https://example.com/presentation?cursor=a%26amp%3Bb",
+      retrievedAt: now,
+      role: "primary",
+    });
+    const stablePromotion = structuredClone(promoted);
+    const rowCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') = 'shortlist'`,
+    ).bind(runId).first<{ count: number }>();
+    expect(rowCount).toEqual({ count: 2 });
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_SHORTLIST_PRESENTATION",
+    );
+    expect(observed).toHaveLength(2);
+    expect(observed[1]).toEqual(observed[0]);
+    await expect(store.readArtifact(runId, "shortlist")).resolves.toEqual(
+      stablePromotion,
+    );
+  });
+
+  it("migrates genuine legacy synthesize selection reasons once before promotion and retry", async () => {
+    const runId = "run-legacy-synthesize-presentation";
+    const editionDate = "2034-06-02";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    await seedD1CheckpointsBefore(store, runId, "synthesize");
+    const item = presentationResearchItem();
+    await insertLegacyD1Checkpoint(runId, "synthesize", [{
+      item,
+      summary: legacyPresentationSummary(),
+    }]);
+    const observed: Array<Array<{
+      item: Item;
+      summary: StructuredSummary;
+    }>> = [];
+    const context: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store,
+      validate: async (entries) => {
+        observed.push(structuredClone([...entries]));
+        throw new Error("STOP_AFTER_SYNTHESIZE_PRESENTATION");
+      },
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_SYNTHESIZE_PRESENTATION",
+    );
+
+    const promoted = await store.readArtifact(runId, "synthesize") as
+      CheckpointArtifact<Array<{ item: Item; summary: StructuredSummary }>> & {
+        providerTextPresentationVersion?: number;
+      };
+    expect(promoted.providerTextPresentationVersion).toBe(1);
+    expect(promoted.providerTextNormalizationVersion).toBe(1);
+    expect((promoted.output[0]?.item.metadata.workflow as {
+      selectionReasons?: string[];
+    }).selectionReasons).toEqual(["Reason &#8217; display"]);
+    expect(promoted.output[0]?.item.sourceRefs).toEqual(item.sourceRefs);
+    expect(promoted.output[0]?.item).toMatchObject({
+      id: item.id,
+      canonicalUrl: item.canonicalUrl,
+      publishedAt: item.publishedAt,
+      accessLevel: item.accessLevel,
+      createdAt: item.createdAt,
+      expiresAt: item.expiresAt,
+    });
+    expect(promoted.output[0]?.summary).toMatchObject({
+      title: "Presentation &#8217; title",
+      oneSentence:
+        "Presentation &#8217; claim evidence supports the result.",
+      claims: [{
+        text: "Presentation &#8217; claim evidence supports the result.",
+        sourceIds: ["presentation-source"],
+        evidenceExcerpt:
+          "Presentation &#8217; claim evidence supports the result.",
+      }],
+      accessLevel: "abstract",
+    });
+    const stablePromotion = structuredClone(promoted);
+    const firstRowCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') = 'synthesize'`,
+    ).bind(runId).first<{ count: number }>();
+    expect(firstRowCount).toEqual({ count: 2 });
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_SYNTHESIZE_PRESENTATION",
+    );
+    expect(observed).toHaveLength(2);
+    expect(observed[1]).toEqual(observed[0]);
+    expect((observed[1]?.[0]?.item.metadata.workflow as {
+      selectionReasons?: string[];
+    }).selectionReasons).toEqual(["Reason &#8217; display"]);
+    await expect(store.readArtifact(runId, "synthesize")).resolves.toEqual(
+      stablePromotion,
+    );
+    const retryRowCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') = 'synthesize'`,
+    ).bind(runId).first<{ count: number }>();
+    expect(retryRowCount).toEqual({ count: 2 });
+  });
+
+  it("migrates genuine legacy invalid validate selection reasons without changing validation semantics", async () => {
+    const runId = "run-legacy-validate-presentation";
+    const editionDate = "2034-06-03";
+    const store = createD1PipelineStore(env.DB);
+    const item = presentationResearchItem();
+    await seedD1Items([item]);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "running",
+      currentStep: "validate",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    await seedD1CheckpointsBefore(store, runId, "validate", {
+      normalize: [item],
+    });
+    await insertLegacyD1Checkpoint(runId, "validate", [{
+      item,
+      summary: legacyPresentationSummary("unknown-source"),
+      valid: true,
+    }]);
+    store.persistEdition = async () => {
+      throw new Error("STOP_AFTER_VALIDATE_PRESENTATION");
+    };
+    const context: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store,
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_VALIDATE_PRESENTATION",
+    );
+
+    const promoted = await store.readArtifact(runId, "validate") as
+      CheckpointArtifact<Array<{
+        item: Item;
+        summary: StructuredSummary;
+        valid: boolean;
+        validationErrors?: string[];
+      }>> & { providerTextPresentationVersion?: number };
+    expect(promoted.providerTextPresentationVersion).toBe(1);
+    expect(promoted.providerTextNormalizationVersion).toBe(1);
+    expect(promoted.output[0]).toMatchObject({
+      item: {
+        id: item.id,
+        canonicalUrl: item.canonicalUrl,
+        publishedAt: item.publishedAt,
+        accessLevel: item.accessLevel,
+        sourceRefs: item.sourceRefs,
+        metadata: {
+          workflow: {
+            selectionReasons: ["Reason &#8217; display"],
+          },
+        },
+      },
+      summary: {
+        title: "Presentation &#8217; title",
+        claims: [{
+          sourceIds: ["unknown-source"],
+          evidenceExcerpt:
+            "Presentation &#8217; claim evidence supports the result.",
+        }],
+        accessLevel: "abstract",
+      },
+      valid: false,
+      validationErrors: expect.arrayContaining([
+        "UNKNOWN_ITEM_SOURCE:unknown-source",
+        "CLAIM_EVIDENCE_NOT_EXACT",
+      ]),
+    });
+    const stablePromotion = structuredClone(promoted);
+    const firstRowCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') = 'validate'`,
+    ).bind(runId).first<{ count: number }>();
+    expect(firstRowCount).toEqual({ count: 2 });
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "STOP_AFTER_VALIDATE_PRESENTATION",
+    );
+    await expect(store.readArtifact(runId, "validate")).resolves.toEqual(
+      stablePromotion,
+    );
+    const retryRowCount = await env.DB.prepare(
+      `SELECT COUNT(*) AS count FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') = 'validate'`,
+    ).bind(runId).first<{ count: number }>();
+    expect(retryRowCount).toEqual({ count: 2 });
+  });
+
+  it("publishes genuine legacy validate selection reasons once across compose and retry", async () => {
+    const runId = "run-legacy-validate-selection-reason-publish";
+    const editionDate = "2034-06-04";
+    const store = createD1PipelineStore(env.DB);
+    const target = presentationResearchItem();
+    const companions = standardFixtureItems().filter(({ id }) =>
+      id !== "research"
+    );
+    const items = [target, ...companions];
+    const summaryFor = (item: Item): StructuredSummary =>
+      item.id === target.id
+        ? legacyPresentationSummary()
+        : {
+            title: item.title,
+            oneSentence: item.normalizedText,
+            whyItMatters: "This fixture matters for complete coverage.",
+            uncertainty: "The fixture retains bounded uncertainty.",
+            claims: [{
+              text: item.normalizedText,
+              sourceIds: [item.sourceRefs[0]!.id],
+              evidenceExcerpt: item.normalizedText,
+            }],
+            accessLevel: item.accessLevel,
+          };
+    await seedD1Items(items);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "running",
+      currentStep: "validate",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    await seedD1CheckpointsBefore(store, runId, "validate", {
+      normalize: items,
+    });
+    await insertLegacyD1Checkpoint(runId, "validate", items.map((item) => ({
+      item,
+      summary: summaryFor(item),
+      valid: true,
+    })));
+    const persistEdition = store.persistEdition.bind(store);
+    const observedEntries: EditionEntry[][] = [];
+    let persistAttempts = 0;
+    store.persistEdition = async (edition, entries, status) => {
+      observedEntries.push(structuredClone([...entries]));
+      persistAttempts += 1;
+      if (persistAttempts === 1) {
+        throw new Error("TRANSIENT_PUBLISH_AFTER_VALIDATE_PRESENTATION");
+      }
+      return persistEdition(edition, entries, status);
+    };
+    const context: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store,
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "TRANSIENT_PUBLISH_AFTER_VALIDATE_PRESENTATION",
+    );
+
+    const promotedValidate = await store.readArtifact(runId, "validate") as
+      CheckpointArtifact<Array<{
+        item: Item;
+        summary: StructuredSummary;
+        valid: boolean;
+        validationErrors?: string[];
+      }>>;
+    const composed = await store.readArtifact(runId, "compose") as
+      CheckpointArtifact<CompositionResult>;
+    const promotedTarget = promotedValidate.output.find(({ item }) =>
+      item.id === target.id
+    );
+    const composedTarget = composed.output.entries.find(({ itemId }) =>
+      itemId === target.id
+    );
+    expect(promotedValidate).toMatchObject({
+      providerTextNormalizationVersion: 1,
+      providerTextPresentationVersion: 1,
+    });
+    expect(promotedTarget).toMatchObject({
+      valid: true,
+      item: {
+        id: target.id,
+        canonicalUrl: target.canonicalUrl,
+        publishedAt: target.publishedAt,
+        accessLevel: target.accessLevel,
+        sourceRefs: target.sourceRefs,
+        metadata: {
+          workflow: {
+            selectionReasons: ["Reason &#8217; display"],
+          },
+        },
+      },
+    });
+    expect(composed.providerTextCompositionVersion).toBe(
+      PROVIDER_TEXT_COMPOSITION_VERSION,
+    );
+    expect(composedTarget).toMatchObject({
+      itemId: target.id,
+      selectionReasons: ["Reason &#8217; display"],
+      sourceRefs: target.sourceRefs,
+    });
+    expect(observedEntries[0]?.find(({ itemId }) => itemId === target.id))
+      .toEqual(composedTarget);
+    const stableValidate = structuredClone(promotedValidate);
+    const stableCompose = structuredClone(composed);
+    const firstRows = await env.DB.prepare(
+      `SELECT json_extract(event_json, '$.step') AS step, COUNT(*) AS count
+       FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') IN ('validate', 'compose', 'publish')
+       GROUP BY json_extract(event_json, '$.step')`,
+    ).bind(runId).all<{ step: string; count: number }>();
+    expect(Object.fromEntries(firstRows.results.map(({ step, count }) =>
+      [step, count]
+    ))).toEqual({ validate: 2, compose: 1 });
+
+    await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+      runId,
+      status: "published",
+      missingSections: [],
+    });
+
+    expect(observedEntries).toHaveLength(2);
+    expect(observedEntries[1]).toEqual(observedEntries[0]);
+    await expect(store.readArtifact(runId, "validate")).resolves.toEqual(
+      stableValidate,
+    );
+    await expect(store.readArtifact(runId, "compose")).resolves.toEqual(
+      stableCompose,
+    );
+    const published = await store.getLatestEdition();
+    expect(published?.entries.find(({ itemId }) => itemId === target.id))
+      .toMatchObject({
+        itemId: target.id,
+        section: composedTarget?.section,
+        position: composedTarget?.position,
+        summary: composedTarget?.summary,
+        selectionReasons: ["Reason &#8217; display"],
+        sourceRefs: target.sourceRefs,
+      });
+    const retryRows = await env.DB.prepare(
+      `SELECT json_extract(event_json, '$.step') AS step, COUNT(*) AS count
+       FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') IN ('validate', 'compose', 'publish')
+       GROUP BY json_extract(event_json, '$.step')`,
+    ).bind(runId).all<{ step: string; count: number }>();
+    expect(Object.fromEntries(retryRows.results.map(({ step, count }) =>
+      [step, count]
+    ))).toEqual({ validate: 2, compose: 1, publish: 1 });
+  });
+
+  it("promotes a legacy D1 compose before a failed publish and restores it byte-stably", async () => {
+    const runId = "run-legacy-compose-promotion";
+    const editionDate = "2034-05-02";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "retryable",
+      currentStep: "compose",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: "TRANSIENT_PUBLISH_FAILURE",
+    });
+    for (const step of PIPELINE_STEPS.slice(0, PIPELINE_STEPS.indexOf("compose"))) {
+      await store.saveCheckpoint(runId, step, {
+        output: [],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 0,
+        estimatedCostUsd: 0,
+      });
+    }
+    const legacy = {
+      ...compositionCheckpointFixture(runId, editionDate),
+      status: "published" as const,
+    };
+    await env.DB.prepare(
+      `INSERT INTO audit_events (
+        id, run_id, event_type, event_json, created_at
+      ) VALUES (?, ?, ?, ?, ?)`,
+    ).bind(
+      "genuine-legacy-unchunked-compose",
+      runId,
+      "workflow_checkpoint",
+      JSON.stringify({
+        step: "compose",
+        artifact: {
+          output: legacy,
+          attempts: 1,
+          durationMs: 0,
+          itemCount: 1,
+          estimatedCostUsd: 0,
+        },
+      }),
+      now,
+    ).run();
+    const persistEdition = store.persistEdition.bind(store);
+    store.persistEdition = async () => {
+      throw new Error("TRANSIENT_PUBLISH_FAILURE");
+    };
+    const firstContext: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store,
+    };
+
+    await expect(runEditorialPipeline(firstContext)).rejects.toThrow(
+      "TRANSIENT_PUBLISH_FAILURE",
+    );
+
+    const promoted = await store.readArtifact(runId, "compose") as
+      CheckpointArtifact<CompositionResult>;
+    expect(promoted.providerTextCompositionVersion).toBe(
+      PROVIDER_TEXT_COMPOSITION_VERSION,
+    );
+    expect(promoted.output.entries[0]).toMatchObject({
+      summary: { title: "Title &#8217; display" },
+      sourceRefs: [{
+        name: "Source &#83;yndicate",
+        url: "https://example.com/report?cursor=a%26amp%3Bb",
+      }],
+    });
+    const composeRows = await env.DB.prepare(
+      `SELECT event_json FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+         AND json_extract(event_json, '$.step') = 'compose'`,
+    ).bind(runId).all<{ event_json: string }>();
+    expect(composeRows.results).toHaveLength(2);
+    expect(composeRows.results.map(({ event_json: eventJson }) =>
+      (JSON.parse(eventJson) as {
+        artifact?: { providerTextCompositionVersion?: unknown };
+      }).artifact?.providerTextCompositionVersion
+    )).toEqual(expect.arrayContaining([
+      undefined,
+      PROVIDER_TEXT_COMPOSITION_VERSION,
+    ]));
+    expect(await new D1BriefingRepository(env.DB).getEditionByDate(
+      editionDate,
+    )).toBeNull();
+
+    store.persistEdition = persistEdition;
+    const restoredContext: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store: createD1PipelineStore(env.DB),
+    };
+    await expect(runEditorialPipeline(restoredContext)).resolves.toEqual({
+      runId,
+      status: "published",
+      missingSections: [],
+    });
+
+    const publishedArtifact = await restoredContext.store.readArtifact(
+      runId,
+      "publish",
+    ) as CheckpointArtifact<CompositionResult>;
+    expect(publishedArtifact.providerTextCompositionVersion).toBe(
+      PROVIDER_TEXT_COMPOSITION_VERSION,
+    );
+    expect(publishedArtifact.output).toEqual(promoted.output);
+    const published = await new D1BriefingRepository(env.DB).getEditionByDate(
+      editionDate,
+    );
+    expect(published?.entries[0]).toMatchObject({
+      summary: { title: "Title &#8217; display" },
+      sourceRefs: [{
+        name: "Source &#83;yndicate",
+        url: "https://example.com/report?cursor=a%26amp%3Bb",
+      }],
+    });
+    const stableCompose = structuredClone(promoted);
+    const stablePublish = structuredClone(publishedArtifact);
+    await expect(runEditorialPipeline(restoredContext)).resolves.toMatchObject({
+      status: "published",
+    });
+    await expect(restoredContext.store.readArtifact(runId, "compose"))
+      .resolves.toEqual(stableCompose);
+    await expect(restoredContext.store.readArtifact(runId, "publish"))
+      .resolves.toEqual(stablePublish);
+  });
+
+  it("round trips current compose and publish provider-text envelopes through D1", async () => {
+    const runId = "run-current-compose-envelope";
+    const editionDate = "2034-05-03";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "running",
+      currentStep: "compose",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const artifact: CheckpointArtifact<CompositionResult> = {
+      output: compositionCheckpointFixture(runId, editionDate),
+      attempts: 1,
+      durationMs: 7,
+      itemCount: 1,
+      estimatedCostUsd: 0.01,
+      providerTextCompositionVersion: PROVIDER_TEXT_COMPOSITION_VERSION,
+    };
+
+    await store.saveCheckpoint(runId, "compose", artifact);
+    await store.saveCheckpoint(runId, "publish", artifact);
+
+    await expect(store.readArtifact(runId, "compose")).resolves.toEqual(
+      artifact,
+    );
+    await expect(store.readArtifact(runId, "publish")).resolves.toEqual(
+      artifact,
+    );
+    await expect(store.saveCheckpoint(runId, "normalize", {
+      output: [],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 0,
+      estimatedCostUsd: 0,
+      providerTextCompositionVersion: PROVIDER_TEXT_COMPOSITION_VERSION,
+    })).rejects.toThrow(
+      "Only compose and publish checkpoint artifacts can be marked provider-text composed.",
+    );
+  });
+
+  it("does not promote or publish a legacy D1 compose with an invalid required source name", async () => {
+    const runId = "run-invalid-legacy-compose-source";
+    const editionDate = "2034-05-04";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate,
+      status: "retryable",
+      currentStep: "compose",
+      retryable: true,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    for (const step of PIPELINE_STEPS.slice(0, PIPELINE_STEPS.indexOf("compose"))) {
+      await store.saveCheckpoint(runId, step, {
+        output: [],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 0,
+        estimatedCostUsd: 0,
+      });
+    }
+    await store.saveCheckpoint(runId, "compose", {
+      output: compositionCheckpointFixture(runId, editionDate, "&lt;br&gt;"),
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 1,
+      estimatedCostUsd: 0,
+    });
+    const context: PipelineContext = {
+      ...fixturePipelineContext({ editionDate, runId }),
+      store,
+    };
+
+    await expect(runEditorialPipeline(context)).rejects.toThrow(
+      "INVALID_REQUIRED_PROVIDER_DISPLAY_TEXT:sourceName",
+    );
+
+    const retainedLegacy = await store.readArtifact(runId, "compose");
+    expect(retainedLegacy?.providerTextCompositionVersion).toBeUndefined();
+    expect(await new D1BriefingRepository(env.DB).getEditionByDate(
+      editionDate,
+    )).toBeNull();
+    expect(await store.readArtifact(runId, "publish")).toBeNull();
   });
 
   it("rejects a corrupt durable composition checkpoint before publication", async () => {
@@ -1504,6 +3966,313 @@ describe("manual editorial run", () => {
     );
   });
 
+  it("persists compact normalized research display text and assesses only normalized evidence", async () => {
+    const assessmentProvider = new FakeModelProvider({
+      generatedObjects: [researchAssessment],
+    });
+    const originalUrl =
+      "https://research.example.com/paper?cursor=a%26amp%3Bb";
+    const candidate: RawResearchCandidate = {
+      ...rawResearchCandidate("2607.encoded", "Mechanistic &#105;nterpretability &amp; oversight"),
+      sourceName: "arXiv &amp; Labs",
+      originalUrl,
+      externalId: "Corpus:record-1",
+      externalIds: ["Corpus:record-1", "Corpus:related-2"],
+      authors: ["Ada &#69;xample"],
+      institutions: ["&#83;tanford"],
+      abstract:
+        "Mechanistic &#105;nterpretability improves oversight &amp; evaluation.",
+      relatedPaperIds: ["Corpus:related&#65;"],
+      preferredInstitutionMatches: ["&#83;tanford"],
+      topics: ["&#73;nterpretability"],
+      metadata: {
+        venue: "Journal &amp; Review",
+        topics: ["&#73;nterpretability", "AI &amp; Society"],
+        arbitraryProviderDisplay: "Do not persist &#82;aw provider metadata",
+      },
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-12",
+      runId: "run-normalized-research-display-text",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: assessmentProvider,
+      },
+      collectCandidates: async () => [candidate],
+    });
+
+    const [item] = await context.normalize(await context.collect());
+    expect(item).toBeDefined();
+    expect(item).toMatchObject({
+      title: "Mechanistic interpretability & oversight",
+      sourceRefs: [{ name: "arXiv & Labs", url: originalUrl }],
+      metadata: {
+        authors: ["Ada Example"],
+        institutions: ["Stanford"],
+        providerTopics: ["Interpretability"],
+        preferredInstitutionMatches: ["Stanford"],
+        venue: "Journal & Review",
+        topics: ["AI & Society", "Interpretability"],
+        provenance: [{ sourceName: "arXiv & Labs" }],
+      },
+    });
+    await new D1BriefingRepository(env.DB).upsertItems([item!]);
+    const row = await env.DB.prepare(
+      "SELECT normalized_json FROM items WHERE id = ?",
+    ).bind(item!.id).first<{ normalized_json: string }>();
+    const persistedItem = ItemSchema.parse(JSON.parse(row!.normalized_json));
+    const rawResearch = (persistedItem.metadata.workflow as {
+      rawResearch: RawResearchCandidate;
+    }).rawResearch;
+    expect(rawResearch).toMatchObject({
+      kind: "paper",
+      title: "Mechanistic interpretability & oversight",
+      sourceId: "arxiv",
+      sourceName: "arXiv & Labs",
+      sourceRole: "primary",
+      originalUrl,
+      externalId: "Corpus:record-1",
+      externalIds: ["Corpus:record-1", "Corpus:related-2"],
+      publishedAt: now,
+      retrievedAt: now,
+      accessLevel: "abstract",
+      authors: ["Ada Example"],
+      institutions: ["Stanford"],
+      abstract: null,
+      content: null,
+      relatedPaperIds: ["Corpus:related&#65;"],
+      preferredInstitutionMatches: ["Stanford"],
+      citationCount: 4,
+      influentialCitationCount: 1,
+      topics: ["Interpretability"],
+      metadata: {},
+    });
+    expect(JSON.stringify(rawResearch)).not.toContain(
+      "arbitraryProviderDisplay",
+    );
+
+    await context.assess([persistedItem]);
+    const sourcePacket = assessmentProvider.generateRequests[0]?.sourcePacket;
+    expect(sourcePacket).toContain(
+      "title: Mechanistic interpretability & oversight",
+    );
+    expect(sourcePacket).toContain("source_name: arXiv & Labs");
+    expect(sourcePacket).toContain(
+      "Mechanistic interpretability improves oversight & evaluation.",
+    );
+    expect(sourcePacket).not.toContain("&#");
+  });
+
+  it("bounds normalized research display fields after NFKC expansion", async () => {
+    const expanding = "ﬃ".repeat(200);
+    const candidate: RawResearchCandidate = {
+      ...rawResearchCandidate("2607.expanding", expanding),
+      sourceName: expanding,
+      authors: [expanding, "&nbsp;"],
+      institutions: [expanding, "&nbsp;"],
+      preferredInstitutionMatches: [expanding],
+      topics: [expanding],
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-13",
+      runId: "run-bounded-research-display-text",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [candidate],
+    });
+
+    const [item] = await context.normalize(await context.collect());
+    const rawResearch = (item!.metadata.workflow as {
+      rawResearch: RawResearchCandidate;
+    }).rawResearch;
+
+    expect(item!.title).toHaveLength(500);
+    expect(item!.sourceRefs[0]!.name).toHaveLength(200);
+    expect(item!.metadata.authors).toEqual(["ffi".repeat(166) + "ff"]);
+    expect(item!.metadata.institutions).toEqual(["ffi".repeat(166) + "ff"]);
+    expect(rawResearch.title).toHaveLength(500);
+    expect(rawResearch.sourceName).toHaveLength(200);
+    expect(rawResearch.authors[0]).toHaveLength(500);
+    expect(rawResearch.institutions[0]).toHaveLength(500);
+    expect(rawResearch.preferredInstitutionMatches[0]).toHaveLength(500);
+    expect(rawResearch.topics[0]).toHaveLength(500);
+  });
+
+  it("recompacts legacy Item workflow research before persistence and assessment", async () => {
+    const legacyRaw: RawResearchCandidate = {
+      ...rawResearchCandidate(
+        "2607.legacy",
+        "Legacy &#114;esearch title",
+      ),
+      sourceName: "Legacy &amp; Source",
+      authors: ["Legacy &#65;uthor"],
+      institutions: ["Legacy &#73;nstitute"],
+      preferredInstitutionMatches: ["Legacy &#73;nstitute"],
+      topics: ["&#73;nterpretability"],
+      metadata: { arbitraryRawDisplay: "Legacy &#82;aw metadata" },
+    };
+    const legacyItem = ItemSchema.parse({
+      ...fixtureItem("legacy-research-item", "research"),
+      title: "Stored &#114;esearch title",
+      sourceRefs: [{
+        ...fixtureItem("legacy-source", "research").sourceRefs[0]!,
+        id: "arxiv",
+        name: "Legacy &amp; Source",
+        url: legacyRaw.originalUrl,
+      }],
+      normalizedText: "Stored &#101;vidence for assessment.",
+      metadata: {
+        authors: ["Stored &#65;uthor"],
+        institutions: ["Stored &#73;nstitute"],
+        providerTopics: ["&#73;nterpretability"],
+        venue: "Stored &amp; Venue",
+        topics: ["AI &amp; Society"],
+        provenance: [{
+          sourceId: "legacy&#65;source",
+          sourceName: "Legacy &amp; Source",
+          role: "primary",
+          accessLevel: "abstract",
+          url: "https://example.com/source?id=%26amp%3B",
+          retrievedAt: now,
+          canCorroborateFacts: true,
+        }],
+        workflow: { version: 1, rawResearch: legacyRaw },
+      },
+    });
+    const assessmentProvider = new FakeModelProvider({
+      generatedObjects: [researchAssessment],
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-14",
+      runId: "run-recompact-legacy-item",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: assessmentProvider,
+      },
+      collectCandidates: async () => [legacyItem],
+    });
+
+    const [item] = await context.normalize(await context.collect());
+    const compact = (item!.metadata.workflow as {
+      rawResearch: RawResearchCandidate;
+    }).rawResearch;
+
+    expect(item).toMatchObject({
+      title: "Stored research title",
+      normalizedText: "Stored evidence for assessment.",
+      sourceRefs: [{ name: "Legacy & Source" }],
+      metadata: {
+        authors: ["Stored Author"],
+        institutions: ["Stored Institute"],
+        providerTopics: ["Interpretability"],
+        venue: "Stored & Venue",
+        topics: ["AI & Society"],
+        provenance: [{
+          sourceId: "legacy&#65;source",
+          sourceName: "Legacy & Source",
+          role: "primary",
+          accessLevel: "abstract",
+          url: "https://example.com/source?id=%26amp%3B",
+          retrievedAt: now,
+          canCorroborateFacts: true,
+        }],
+      },
+    });
+    expect(compact).toMatchObject({
+      title: "Stored research title",
+      sourceName: "Legacy & Source",
+      authors: ["Stored Author"],
+      institutions: ["Stored Institute"],
+      preferredInstitutionMatches: ["Legacy Institute"],
+      topics: ["Interpretability"],
+      abstract: null,
+      content: null,
+      metadata: {},
+    });
+
+    const [assessed] = await context.assess([item!]);
+    expect(assessmentProvider.generateRequests[0]?.sourcePacket).toContain(
+      "Stored evidence for assessment.",
+    );
+    expect(assessmentProvider.generateRequests[0]?.sourcePacket).not.toContain(
+      "&#",
+    );
+    const [scored] = await context.score([ItemSchema.parse({
+      ...assessed!,
+      metadata: {
+        ...assessed!.metadata,
+        workflow: {
+          ...(assessed!.metadata.workflow as Record<string, unknown>),
+          topicalFit: 0.8,
+        },
+      },
+    })]);
+    expect((scored!.metadata.workflow as {
+      researchScore: { researchSignal: number };
+    }).researchScore.researchSignal).toBe(0.65);
+  });
+
+  it("bounds oversized legacy research metadata arrays deterministically", async () => {
+    const values = Array.from(
+      { length: 70 },
+      (_, index) => `Entry &amp; ${index.toString().padStart(2, "0")}`,
+    );
+    const legacyRaw = rawResearchCandidate(
+      "2607.oversized-legacy",
+      "Oversized legacy metadata",
+    );
+    const legacyItem = ItemSchema.parse({
+      ...fixtureItem("oversized-legacy-research", "research"),
+      sourceRefs: [{
+        ...fixtureItem("oversized-legacy-source", "research").sourceRefs[0]!,
+        id: "arxiv",
+        url: legacyRaw.originalUrl,
+      }],
+      metadata: {
+        authors: values,
+        institutions: values,
+        providerTopics: values,
+        preferredInstitutionMatches: values,
+        workflow: { version: 1, rawResearch: legacyRaw },
+      },
+    });
+    const context = createProductionPipelineContext({
+      editionDate: "2033-01-16",
+      runId: "run-bound-legacy-research-arrays",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new FakeModelProvider(),
+        assessment: new FakeModelProvider(),
+      },
+      collectCandidates: async () => [legacyItem],
+    });
+
+    const [item] = await context.normalize(await context.collect());
+    const compact = (item!.metadata.workflow as {
+      rawResearch: RawResearchCandidate;
+    }).rawResearch;
+
+    for (const entries of [
+      compact.authors,
+      compact.institutions,
+      compact.topics,
+      compact.preferredInstitutionMatches,
+    ]) {
+      expect(entries).toHaveLength(64);
+      expect(entries[0]).toBe("Entry & 00");
+      expect(entries[63]).toBe("Entry & 63");
+    }
+  });
+
   it("updates real-lane diagnostics through assessment and applies research context scoring", async () => {
     const diagnosticWrites: Array<readonly unknown[]> = [];
     let persistedDiagnostics: DiscoveryDiagnosticsState | undefined;
@@ -1661,12 +4430,18 @@ describe("manual editorial run", () => {
         },
       ],
       [
-        { ...initialDiagnostics[0], deduplicated: 2, triaged: 2 },
-        initialDiagnostics[1],
+        {
+          ...initialDiagnostics[0],
+          deduplicated: 2,
+          triaged: 2,
+          fallbackTriaged: 0,
+        },
+        { ...initialDiagnostics[1], fallbackTriaged: 0 },
         {
           ...initialDiagnostics[2],
           deduplicated: 1,
           triaged: 1,
+          fallbackTriaged: 0,
           rejectionCounts: { identity_merged: 1 },
         },
       ],
@@ -1675,13 +4450,15 @@ describe("manual editorial run", () => {
           ...initialDiagnostics[0],
           deduplicated: 2,
           triaged: 2,
+          fallbackTriaged: 0,
           assessed: 2,
         },
-        initialDiagnostics[1],
+        { ...initialDiagnostics[1], fallbackTriaged: 0 },
         {
           ...initialDiagnostics[2],
           deduplicated: 1,
           triaged: 1,
+          fallbackTriaged: 0,
           assessed: 1,
           rejectionCounts: { identity_merged: 1 },
         },
@@ -2047,6 +4824,7 @@ describe("manual editorial run", () => {
       discovered: 6,
       deduplicated: 4,
       triaged: 3,
+      fallbackTriaged: 0,
       assessed: 3,
       outcome: "success",
       rejectionCounts: {
@@ -2065,6 +4843,7 @@ describe("manual editorial run", () => {
       discovered: 1,
       deduplicated: 1,
       triaged: 1,
+      fallbackTriaged: 0,
       assessed: 1,
       outcome: "success",
       rejectionCounts: { identity_merged: 1 },
@@ -2432,7 +5211,8 @@ describe("manual editorial run", () => {
     }));
 
     await expect(runEditorialPipeline(context)).resolves.toMatchObject({
-      status: "failed",
+      status: "partial",
+      missingSections: ["dmv_or_baltimore"],
     });
     expect(await store.readCheckpoint(context.runId, "cluster")).toBe(true);
     expect(await store.readCheckpoint(context.runId, "shortlist")).toBe(true);
@@ -2489,6 +5269,854 @@ describe("manual editorial run", () => {
     expect(JSON.stringify(clustered)).not.toContain('"embedding"');
     expect(JSON.stringify(shortlisted)).not.toContain('"embedding"');
   });
+
+  it.each(["cluster", "shortlist"] as const)(
+    "rebuilds a stale legacy %s development through exactly one text boundary",
+    async (checkpointStep) => {
+      const sharedDocument =
+        "https://example.com/documents/legacy-development-shared";
+      const encodedTitle =
+        "World agency reviews &amp;amp;#115;oftware safeguards";
+      const encodedEvidence =
+        "Evidence &amp;amp;#69; remains bounded after the review.";
+      const encodedSourceName = "Source &amp;amp;#83;yndicate";
+      const freshNewsItem = (
+        id: string,
+        sourceRole: RawNewsCandidate["sourceRole"],
+      ): Item => normalizeCandidate({
+        ...rawNewsCandidate(id, "world"),
+        sourceRole,
+        sourceName: encodedSourceName,
+        title: encodedTitle,
+        abstract: encodedEvidence,
+        namedEntities: [],
+        eventFamilies: [],
+        materialFacts: [],
+        primaryDocumentUrl: sharedDocument,
+        primaryDocumentUrls: [sharedDocument],
+        sectionEligibility: ["world", "technology"],
+        metadata: {
+          primarySection: "world",
+          representativeStructuralSentinel: {
+            owner: id,
+            sourceDocument: sharedDocument,
+          },
+        },
+      });
+      const legacyNewsItem = (
+        id: string,
+        sourceRole: RawNewsCandidate["sourceRole"],
+      ): Item => {
+        const fresh = freshNewsItem(id, sourceRole);
+        return ItemSchema.parse({
+          ...fresh,
+          title: encodedTitle,
+          sourceRefs: fresh.sourceRefs.map((source) => ({
+            ...source,
+            name: encodedSourceName,
+          })),
+          normalizedText: encodedEvidence,
+          metadata: {
+            ...fresh.metadata,
+            normalizedTitle: "stale-encoded-title",
+            editorialSignals: (
+              fresh.metadata.editorialSignals as readonly Record<
+                string,
+                unknown
+              >[]
+            ).map((signal) => ({
+              ...signal,
+              sourceName: encodedSourceName,
+            })),
+            provenance: (
+              fresh.metadata.provenance as readonly Record<string, unknown>[]
+            ).map((entry) => ({
+              ...entry,
+              sourceName: encodedSourceName,
+            })),
+          },
+        });
+      };
+      const freshSurvivorA = freshNewsItem(
+        "legacy-development-a",
+        "reporting",
+      );
+      const freshSurvivorB = freshNewsItem(
+        "legacy-development-b",
+        "reporting",
+      );
+      const survivorA = legacyNewsItem(
+        "legacy-development-a",
+        "reporting",
+      );
+      const survivorB = legacyNewsItem(
+        "legacy-development-b",
+        "reporting",
+      );
+      const invalidRepresentative = ItemSchema.parse({
+        ...freshNewsItem("legacy-development-invalid", "primary"),
+        sourceRefs: freshNewsItem(
+          "legacy-development-invalid",
+          "primary",
+        ).sourceRefs.map((source) => ({
+          ...source,
+          name: "&#65308;br&#65310;",
+        })),
+        tags: ["stale&#45;section"],
+      });
+      const invalidTitleItem = ItemSchema.parse({
+        ...freshNewsItem("legacy-development-empty-title", "reporting"),
+        title: "&#65308;br&#65310;",
+        tags: ["stale&#45;section"],
+      });
+      const freshDevelopment = clusterNews(
+        [freshSurvivorA, freshSurvivorB],
+        {},
+      )[0]!;
+      const legacyDevelopment = clusterNews(
+        [
+          invalidRepresentative,
+          invalidTitleItem,
+          survivorA,
+          survivorB,
+        ],
+        {},
+      )[0]!;
+      const scoreInputs = {
+        publicImportance: 0.8,
+        personalRelevance: 0.8,
+        sourceQuality: 0.8,
+        recency: 0.8,
+        geography: 0.2,
+        novelty: 0.7,
+      };
+      expect(legacyDevelopment.representativeItem.id).toBe(
+        invalidRepresentative.id,
+      );
+      const staleDevelopment = {
+        ...legacyDevelopment,
+        title: "Stale &#68;evelopment title",
+        namedEntities: ["Stale &#69;ntity"],
+        eventFamilies: ["stale&#45;event-family"],
+        materialFacts: [{
+          kind: "status" as const,
+          key: "stale&#45;status",
+          value: "stale&#45;value",
+        }],
+        primarySection: "technology" as const,
+        eventInstance: {
+          subject: "Stale &#83;ubject",
+          domain: "governance-event" as const,
+          object: "Stale &#79;bject",
+        },
+        developmentKey: "development-stale&#45;key",
+        repeatable: true,
+        materialFactsFingerprint: "facts-stale&#45;fingerprint",
+        editorialSignals: legacyDevelopment.editorialSignals.map((signal) => ({
+          ...signal,
+          namedEntities: ["Stale &#69;ntity"],
+          eventFamilies: ["stale&#45;event-family"],
+        })),
+      };
+      const legacyAggregate = ItemSchema.parse({
+        ...invalidRepresentative,
+        id: legacyDevelopment.id,
+        title: legacyDevelopment.title,
+        sourceRefs: legacyDevelopment.sourceRefs,
+        normalizedText: legacyDevelopment.items
+          .map((item) => item.normalizedText)
+          .join(" "),
+        primaryTopic: "technology",
+        tags: ["technology", "stale&#45;section"],
+        metadata: {
+          ...invalidRepresentative.metadata,
+          primarySection: "technology",
+          sectionEligibility: ["technology"],
+          section: "technology",
+          tags: ["stale&#45;aggregate-tag"],
+          contentFingerprint: "content:stale-aggregate-only",
+          evidenceFingerprint: "evidence:stale-aggregate-only",
+          attachedCommentary: [{
+            sourceId: "stale-commentary",
+            sourceName: "Stale &amp;amp;#83;ource",
+            displaySourceName: "Stale &amp;amp;#68;isplay",
+            url: "https://example.com/stale-commentary",
+            title: "Stale &amp;amp;#84;itle",
+            excerpt: "Stale &amp;amp;#69;vidence",
+            retrievedAt: now,
+          }],
+          aggregateOnlyDisplaySentinel:
+            "Stale &amp;amp;#68;isplay metadata",
+          aggregateOnlyStructuralSentinel: {
+            legacyRootId: legacyDevelopment.id,
+          },
+          workflow: {
+            version: 1,
+            embedding: [0.25],
+            personalRelevance: 0.8,
+            development: staleDevelopment,
+            developmentScore: scoreNewsDevelopment(
+              legacyDevelopment,
+              scoreInputs,
+            ),
+            ...(checkpointStep === "shortlist"
+              ? {
+                  section: "world" as const,
+                  selectionReasons: ["Fixture selection."],
+                }
+              : {}),
+          },
+        },
+      });
+      const store = new FixtureStore();
+      const context = createProductionPipelineContext({
+        editionDate:
+          checkpointStep === "cluster" ? "2034-04-01" : "2034-04-02",
+        runId: `run-legacy-${checkpointStep}-development-refresh`,
+        store,
+        now: () => now,
+        providers: {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+        collectCandidates: async () => {
+          throw new Error("completed collect must not run");
+        },
+      });
+      const restored: Item[][] = [];
+      context.shortlist = async (items) => {
+        restored.push([...items]);
+        throw new Error("STOP_AFTER_LEGACY_CLUSTER_RESTORE");
+      };
+      context.synthesize = async (items) => {
+        restored.push([...items]);
+        throw new Error("STOP_AFTER_LEGACY_SHORTLIST_RESTORE");
+      };
+      await store.createRun({
+        id: context.runId,
+        editionDate: context.editionDate,
+        status: "running",
+        currentStep: checkpointStep,
+        retryable: false,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+      });
+      const targetIndex = PIPELINE_STEPS.indexOf(checkpointStep);
+      for (const step of PIPELINE_STEPS.slice(0, targetIndex + 1)) {
+        await store.saveCheckpoint(context.runId, step, {
+          output: step === checkpointStep ? [legacyAggregate] : [],
+          attempts: 1,
+          durationMs: 0,
+          itemCount: step === checkpointStep ? 1 : 0,
+          estimatedCostUsd: 0,
+        });
+      }
+
+      await expect(runEditorialPipeline(context)).rejects.toThrow(
+        checkpointStep === "cluster"
+          ? "STOP_AFTER_LEGACY_CLUSTER_RESTORE"
+          : "STOP_AFTER_LEGACY_SHORTLIST_RESTORE",
+      );
+
+      expect(restored).toHaveLength(1);
+      const refreshedAggregate = restored[0]?.[0];
+      expect(refreshedAggregate).toBeDefined();
+      const refreshedWorkflow = refreshedAggregate!.metadata.workflow as {
+        development: typeof freshDevelopment;
+        developmentScore: ReturnType<typeof scoreNewsDevelopment>;
+        embedding?: readonly number[];
+        personalRelevance?: number;
+        section?: string;
+        selectionReasons?: readonly string[];
+      };
+      const refreshedDevelopment = refreshedWorkflow.development;
+      expect(refreshedDevelopment).toEqual(freshDevelopment);
+      expect(refreshedWorkflow.developmentScore).toEqual(
+        scoreNewsDevelopment(freshDevelopment, scoreInputs),
+      );
+      expect(refreshedAggregate).toMatchObject({
+        id: freshDevelopment.id,
+        title: "World agency reviews &#115;oftware safeguards",
+        primaryTopic: freshDevelopment.primarySection,
+        tags: freshDevelopment.representativeItem.tags,
+      });
+      expect(refreshedAggregate!.title).toBe(refreshedDevelopment.title);
+      expect(refreshedAggregate!.title).toBe(
+        refreshedDevelopment.representativeItem.title,
+      );
+      expect(refreshedAggregate!.normalizedText).toBe(
+        refreshedDevelopment.items
+          .map((nestedItem) => nestedItem.normalizedText)
+          .join(" "),
+      );
+      expect(refreshedAggregate!.normalizedText).toContain(
+        "Evidence &#69; remains bounded",
+      );
+      expect(refreshedAggregate!.sourceRefs).toEqual(
+        refreshedDevelopment.sourceRefs,
+      );
+      expect(refreshedAggregate!.sourceRefs[0]!.name).toBe(
+        "Source &#83;yndicate",
+      );
+      expect(refreshedAggregate!.metadata).toMatchObject({
+        primarySection: "world",
+        sectionEligibility: ["technology", "world"],
+        representativeStructuralSentinel:
+          freshDevelopment.representativeItem.metadata
+            .representativeStructuralSentinel,
+      });
+      expect(refreshedAggregate!.metadata.tags).toBeUndefined();
+      expect(
+        refreshedAggregate!.metadata.contentFingerprint,
+      ).toBeUndefined();
+      expect(
+        refreshedAggregate!.metadata.evidenceFingerprint,
+      ).toBeUndefined();
+      expect(
+        refreshedAggregate!.metadata.attachedCommentary,
+      ).toBeUndefined();
+      expect(
+        refreshedAggregate!.metadata.aggregateOnlyDisplaySentinel,
+      ).toBeUndefined();
+      expect(
+        refreshedAggregate!.metadata.aggregateOnlyStructuralSentinel,
+      ).toBeUndefined();
+      expect(refreshedWorkflow.section).toBe(
+        checkpointStep === "shortlist" ? "world" : undefined,
+      );
+      expect(refreshedAggregate!.metadata.section).toBe(
+        checkpointStep === "shortlist" ? "world" : undefined,
+      );
+      expect(refreshedWorkflow.embedding).toBeUndefined();
+      expect(refreshedWorkflow.personalRelevance).toBe(0.8);
+      expect(refreshedWorkflow.selectionReasons).toEqual(
+        checkpointStep === "shortlist"
+          ? ["Fixture selection."]
+          : undefined,
+      );
+      expect(JSON.stringify(refreshedAggregate)).toContain("&#");
+      expect(JSON.stringify(refreshedAggregate)).not.toContain("software");
+      expect(JSON.stringify(refreshedAggregate)).not.toContain(
+        "stale-aggregate-only",
+      );
+
+      const onceRestored = structuredClone(refreshedAggregate!);
+      await store.saveCheckpoint(context.runId, checkpointStep, {
+        output: [onceRestored],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 1,
+        estimatedCostUsd: 0,
+        providerTextNormalizationVersion:
+          PROVIDER_TEXT_NORMALIZATION_VERSION,
+      });
+      await expect(runEditorialPipeline(context)).rejects.toThrow(
+        checkpointStep === "cluster"
+          ? "STOP_AFTER_LEGACY_CLUSTER_RESTORE"
+          : "STOP_AFTER_LEGACY_SHORTLIST_RESTORE",
+      );
+      expect(restored).toHaveLength(2);
+      expect(restored[1]![0]).toEqual(onceRestored);
+    },
+  );
+
+  it("rejects a normalized envelope on a D1 collect checkpoint", async () => {
+    const runId = "run-d1-reject-normalized-collect";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-03-01",
+      status: "running",
+      currentStep: "collect",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+
+    await expect(store.saveCheckpoint(runId, "collect", {
+      output: [rawResearchCandidate(
+        "2608.invalid-collect-envelope",
+        "Raw collect checkpoint",
+      )],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 1,
+      estimatedCostUsd: 0,
+      providerTextNormalizationVersion:
+        PROVIDER_TEXT_NORMALIZATION_VERSION,
+    })).rejects.toThrow(
+      "Collect checkpoint artifacts cannot be marked provider-text normalized.",
+    );
+    expect(await store.readArtifact(runId, "collect")).toBeNull();
+  });
+
+  it.each(["compose", "publish"] as const)(
+    "rejects a normalized envelope on a D1 %s checkpoint at write and read boundaries",
+    async (step) => {
+      const runId = `run-d1-reject-normalized-${step}`;
+      const editionDate = step === "compose" ? "2034-03-04" : "2034-03-05";
+      const store = createD1PipelineStore(env.DB);
+      await store.createRun({
+        id: runId,
+        editionDate,
+        status: "running",
+        currentStep: step,
+        retryable: false,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+        failureCode: null,
+      });
+      const artifact: CheckpointArtifact<CompositionResult> = {
+        output: compositionCheckpointFixture(runId, editionDate),
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 1,
+        estimatedCostUsd: 0,
+        providerTextNormalizationVersion:
+          PROVIDER_TEXT_NORMALIZATION_VERSION,
+      };
+
+      await expect(store.saveCheckpoint(runId, step, artifact)).rejects.toThrow(
+        "Compose and publish checkpoint artifacts cannot be marked provider-text normalized.",
+      );
+      await env.DB.prepare(
+        `INSERT INTO audit_events (
+          id, run_id, event_type, event_json, created_at
+        ) VALUES (?, ?, 'workflow_checkpoint', ?, ?)`,
+      ).bind(
+        `invalid-normalized-${step}`,
+        runId,
+        JSON.stringify({ step, artifact }),
+        now,
+      ).run();
+      await expect(store.readArtifact(runId, step)).rejects.toThrow(
+        `INVALID_CHECKPOINT_ARTIFACT:${step}`,
+      );
+    },
+  );
+
+  it("rejects D1 checkpoint chunks with inconsistent normalization envelopes", async () => {
+    const runId = "run-d1-mixed-normalization-chunks";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-03-02",
+      status: "running",
+      currentStep: "normalize",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const checkpointId = "mixed-normalization-envelope";
+    const items = [
+      fixtureItem("mixed-envelope-a", "world"),
+      fixtureItem("mixed-envelope-b", "technology"),
+    ];
+    const events = items.map((item, chunkIndex) => JSON.stringify({
+      step: "normalize",
+      checkpointId,
+      chunkIndex,
+      chunkCount: 2,
+      artifact: {
+        output: [item],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 2,
+        estimatedCostUsd: 0,
+        ...(chunkIndex === 0
+          ? {}
+          : {
+              providerTextNormalizationVersion:
+                PROVIDER_TEXT_NORMALIZATION_VERSION,
+            }),
+      },
+    }));
+    await env.DB.batch(events.map((eventJson, chunkIndex) =>
+      env.DB.prepare(
+        `INSERT INTO audit_events (
+          id, run_id, event_type, event_json, created_at
+        ) VALUES (?, ?, 'workflow_checkpoint', ?, ?)`,
+      ).bind(
+        `${checkpointId}:${chunkIndex}`,
+        runId,
+        eventJson,
+        now,
+      )
+    ));
+
+    await expect(store.readArtifact(runId, "normalize")).rejects.toThrow(
+      "INVALID_CHECKPOINT_CHUNKS:normalize",
+    );
+  });
+
+  it.each(PRESENTATION_CHECKPOINT_STAGES)(
+    "rejects a presentation-only %s artifact at the public D1 writer without persisting it",
+    async (step) => {
+      // Removing the central cross-marker invariant must let this malformed
+      // state become a durable checkpoint through the public writer.
+      const runId = `run-d1-write-presentation-only-${step}`;
+      const store = createD1PipelineStore(env.DB);
+      await store.createRun({
+        id: runId,
+        editionDate: "2034-03-09",
+        status: "running",
+        currentStep: step,
+        retryable: false,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+        failureCode: null,
+      });
+      const output = presentationOnlyCheckpointOutput(step);
+
+      await expect(store.saveCheckpoint(runId, step, {
+        output,
+        attempts: 1,
+        durationMs: 0,
+        itemCount: Array.isArray(output) ? output.length : 1,
+        estimatedCostUsd: 0,
+        providerTextPresentationVersion:
+          PROVIDER_TEXT_PRESENTATION_VERSION,
+      })).rejects.toThrow(
+        "Provider-text presented checkpoint artifacts must also be marked provider-text normalized.",
+      );
+
+      const rows = await env.DB.prepare(
+        `SELECT COUNT(*) AS count FROM audit_events
+         WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+           AND json_extract(event_json, '$.step') = ?`,
+      ).bind(runId, step).first<{ count: number }>();
+      expect(rows).toEqual({ count: 0 });
+    },
+  );
+
+  it.each(PRESENTATION_CHECKPOINT_STAGES)(
+    "rejects a directly inserted presentation-only %s artifact at the public D1 reader",
+    async (step) => {
+      // A restore-only guard would miss the public artifact boundary and make
+      // this externally written malformed row appear trustworthy to callers.
+      const runId = `run-d1-read-presentation-only-${step}`;
+      const store = createD1PipelineStore(env.DB);
+      await store.createRun({
+        id: runId,
+        editionDate: "2034-03-10",
+        status: "running",
+        currentStep: step,
+        retryable: false,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+        failureCode: null,
+      });
+      await insertPresentationOnlyD1Checkpoint(runId, step);
+
+      await expect(store.readArtifact(runId, step)).rejects.toMatchObject({
+        message: `INVALID_CHECKPOINT_ARTIFACT:${step}`,
+        cause: {
+          message:
+            "Provider-text presented checkpoint artifacts must also be marked provider-text normalized.",
+        },
+      });
+    },
+  );
+
+  it.each(PRESENTATION_CHECKPOINT_STAGES)(
+    "does not promote or advance a presentation-only %s artifact during pipeline restore",
+    async (step) => {
+      // If reconciliation catches or tolerates this state, it can append both
+      // markers and bless presentation fields that were never migrated.
+      const runId = `run-d1-no-promotion-presentation-only-${step}`;
+      const store = createD1PipelineStore(env.DB);
+      await store.createRun({
+        id: runId,
+        editionDate: "2034-03-11",
+        status: "running",
+        currentStep: step,
+        retryable: false,
+        attemptCount: 1,
+        estimatedCostUsd: 0,
+        createdAt: now,
+        updatedAt: now,
+        failureCode: null,
+      });
+      await seedD1CheckpointsBefore(store, runId, step);
+      if (step === "validate") {
+        await seedD1Items([
+          presentationResearchItem("Reason &amp;amp;#8217; display"),
+        ]);
+      }
+      await insertPresentationOnlyD1Checkpoint(runId, step);
+      let downstreamCalls = 0;
+      const context: PipelineContext = {
+        ...fixturePipelineContext({
+          editionDate: "2034-03-11",
+          runId,
+        }),
+        store,
+      };
+      if (step === "shortlist") {
+        context.synthesize = async () => {
+          downstreamCalls += 1;
+          throw new Error("UNEXPECTED_SYNTHESIZE_AFTER_INVALID_SHORTLIST");
+        };
+      } else if (step === "synthesize") {
+        context.validate = async () => {
+          downstreamCalls += 1;
+          throw new Error("UNEXPECTED_VALIDATE_AFTER_INVALID_SYNTHESIZE");
+        };
+      } else {
+        store.persistEdition = async () => {
+          downstreamCalls += 1;
+          throw new Error("UNEXPECTED_COMPOSE_AFTER_INVALID_VALIDATE");
+        };
+      }
+
+      await expect(runEditorialPipeline(context)).rejects.toThrow(
+        `INVALID_CHECKPOINT_ARTIFACT:${step}`,
+      );
+
+      const rows = await env.DB.prepare(
+        `SELECT
+           COUNT(*) AS count,
+           SUM(CASE WHEN
+             json_extract(event_json, '$.artifact.providerTextNormalizationVersion') = 1
+             AND json_extract(event_json, '$.artifact.providerTextPresentationVersion') = 1
+           THEN 1 ELSE 0 END) AS promoted
+         FROM audit_events
+         WHERE run_id = ? AND event_type = 'workflow_checkpoint'
+           AND json_extract(event_json, '$.step') = ?`,
+      ).bind(runId, step).first<{ count: number; promoted: number }>();
+      expect(rows).toEqual({ count: 1, promoted: 0 });
+      expect(downstreamCalls).toBe(0);
+      await expect(store.getRun(runId)).resolves.toMatchObject({
+        currentStep: step,
+        status: "retryable",
+        failureCode: `INVALID_CHECKPOINT_ARTIFACT:${step}`,
+      });
+    },
+  );
+
+  it("rejects a presentation envelope outside shortlist through validate", async () => {
+    const runId = "run-d1-reject-presentation-normalize";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-03-06",
+      status: "running",
+      currentStep: "normalize",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+
+    await expect(store.saveCheckpoint(runId, "normalize", {
+      output: [fixtureItem("invalid-presentation-stage", "world")],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 1,
+      estimatedCostUsd: 0,
+      providerTextNormalizationVersion:
+        PROVIDER_TEXT_NORMALIZATION_VERSION,
+      providerTextPresentationVersion:
+        PROVIDER_TEXT_PRESENTATION_VERSION,
+    })).rejects.toThrow(
+      "Only shortlist, synthesize, and validate checkpoint artifacts can be marked provider-text presented.",
+    );
+    await expect(store.saveCheckpoint(runId, "normalize", {
+      output: [fixtureItem("invalid-presentation-only-stage", "world")],
+      attempts: 1,
+      durationMs: 0,
+      itemCount: 1,
+      estimatedCostUsd: 0,
+      providerTextPresentationVersion:
+        PROVIDER_TEXT_PRESENTATION_VERSION,
+    })).rejects.toThrow(
+      "Only shortlist, synthesize, and validate checkpoint artifacts can be marked provider-text presented.",
+    );
+  });
+
+  it("rejects D1 checkpoint chunks with inconsistent presentation envelopes", async () => {
+    const runId = "run-d1-mixed-presentation-chunks";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-03-07",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const checkpointId = "mixed-presentation-envelope";
+    const events = ["a", "b"].map((suffix, chunkIndex) => JSON.stringify({
+      step: "synthesize",
+      checkpointId,
+      chunkIndex,
+      chunkCount: 2,
+      artifact: {
+        output: [{
+          item: {
+            ...presentationResearchItem("Prepared system reason."),
+            id: `mixed-presentation-${suffix}`,
+          },
+          summary: legacyPresentationSummary(),
+        }],
+        attempts: 1,
+        durationMs: 0,
+        itemCount: 2,
+        estimatedCostUsd: 0,
+        providerTextNormalizationVersion:
+          PROVIDER_TEXT_NORMALIZATION_VERSION,
+        ...(chunkIndex === 0
+          ? {}
+          : {
+              providerTextPresentationVersion:
+                PROVIDER_TEXT_PRESENTATION_VERSION,
+            }),
+      },
+    }));
+    await env.DB.batch(events.map((eventJson, chunkIndex) =>
+      env.DB.prepare(
+        `INSERT INTO audit_events (
+          id, run_id, event_type, event_json, created_at
+        ) VALUES (?, ?, 'workflow_checkpoint', ?, ?)`,
+      ).bind(`${checkpointId}:${chunkIndex}`, runId, eventJson, now)
+    ));
+
+    await expect(store.readArtifact(runId, "synthesize")).rejects.toThrow(
+      "INVALID_CHECKPOINT_CHUNKS:synthesize",
+    );
+  });
+
+  it("round trips a current presentation envelope through D1 checkpoint chunks", async () => {
+    const runId = "run-d1-current-presentation-chunks";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-03-08",
+      status: "running",
+      currentStep: "synthesize",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const output = Array.from({ length: 2 }, (_, index) => ({
+      item: ItemSchema.parse({
+        ...presentationResearchItem("Current &#8217; reason."),
+        id: `current-presentation-${index}`,
+        metadata: {
+          ...presentationResearchItem().metadata,
+          chunkPadding: "é".repeat(600_000),
+        },
+      }),
+      summary: legacyPresentationSummary(),
+    }));
+    const artifact: CheckpointArtifact<typeof output> = {
+      output,
+      attempts: 1,
+      durationMs: 25,
+      itemCount: output.length,
+      estimatedCostUsd: 0.25,
+      providerTextNormalizationVersion:
+        PROVIDER_TEXT_NORMALIZATION_VERSION,
+      providerTextPresentationVersion:
+        PROVIDER_TEXT_PRESENTATION_VERSION,
+    };
+
+    await store.saveCheckpoint(runId, "synthesize", artifact);
+
+    const rows = await env.DB.prepare(
+      `SELECT event_json
+       FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'`,
+    ).bind(runId).all<{ event_json: string }>();
+    expect(rows.results.length).toBeGreaterThan(1);
+    expect(rows.results.every(({ event_json: eventJson }) => {
+      const stored = (JSON.parse(eventJson) as {
+        artifact?: {
+          providerTextNormalizationVersion?: unknown;
+          providerTextPresentationVersion?: unknown;
+        };
+      }).artifact;
+      return stored?.providerTextNormalizationVersion ===
+          PROVIDER_TEXT_NORMALIZATION_VERSION &&
+        stored.providerTextPresentationVersion ===
+          PROVIDER_TEXT_PRESENTATION_VERSION;
+    })).toBe(true);
+    await expect(store.readArtifact(runId, "synthesize")).resolves.toEqual(
+      artifact,
+    );
+  }, 30_000);
+
+  it("round trips a current normalization envelope through D1 checkpoint chunks", async () => {
+    const runId = "run-d1-current-normalization-chunks";
+    const store = createD1PipelineStore(env.DB);
+    await store.createRun({
+      id: runId,
+      editionDate: "2034-03-03",
+      status: "running",
+      currentStep: "normalize",
+      retryable: false,
+      attemptCount: 1,
+      estimatedCostUsd: 0,
+      createdAt: now,
+      updatedAt: now,
+      failureCode: null,
+    });
+    const items = Array.from({ length: 500 }, (_, index) => ({
+      ...fixtureItem(`current-envelope-chunk-${index}`, "world"),
+      normalizedText:
+        `CURRENT_ENVELOPE_${String(index).padStart(3, "0")} ` +
+        "é".repeat(3_000),
+    }));
+    const artifact: CheckpointArtifact<readonly Item[]> = {
+      output: items,
+      attempts: 1,
+      durationMs: 25,
+      itemCount: items.length,
+      estimatedCostUsd: 0.25,
+      providerTextNormalizationVersion:
+        PROVIDER_TEXT_NORMALIZATION_VERSION,
+    };
+
+    await store.saveCheckpoint(runId, "normalize", artifact);
+
+    const rows = await env.DB.prepare(
+      `SELECT event_json
+       FROM audit_events
+       WHERE run_id = ? AND event_type = 'workflow_checkpoint'`,
+    ).bind(runId).all<{ event_json: string }>();
+    expect(rows.results.length).toBeGreaterThan(1);
+    expect(rows.results.every(({ event_json: eventJson }) =>
+      (JSON.parse(eventJson) as {
+        artifact?: { providerTextNormalizationVersion?: unknown };
+      }).artifact?.providerTextNormalizationVersion === 1
+    )).toBe(true);
+    await expect(store.readArtifact(runId, "normalize")).resolves.toEqual(
+      artifact,
+    );
+  }, 30_000);
 
   it("keeps every 500-item worst-case D1 checkpoint below the encoded row limit", async () => {
     const families = [
@@ -3343,6 +6971,238 @@ describe("manual editorial run", () => {
     }
   });
 
+  it("assesses a bounded configured-topic fallback when the normal research queue is sparse", async () => {
+    const laneId = "openalex:sparse-fallback";
+    const candidate = (
+      id: string,
+      marker: "NORMAL_FIT" | "NEAR_FIT" | "BELOW_FLOOR",
+      topicalEvidence = "Mechanistic interpretability for model oversight",
+    ): RawResearchCandidate => ({
+      ...rawResearchCandidate(id, `${marker} ${topicalEvidence}`),
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      originalUrl: `https://openalex.org/works/${id}`,
+      externalId: `openalex:${id}`,
+      externalIds: [`openalex:${id}`],
+      abstract:
+        `${marker}. ${topicalEvidence}. The paper reports a concrete method.`,
+      topics: topicalEvidence === "Unrelated materials theorem"
+        ? []
+        : ["Interpretability"],
+      metadata: {
+        discoveryFamily: "bibliographic",
+        discoveryLaneIds: [laneId],
+      },
+    });
+    const candidates = [
+      candidate("W-normal", "NORMAL_FIT"),
+      ...Array.from({ length: 5 }, (_, index) =>
+        candidate(`W-near-${index}`, "NEAR_FIT")
+      ),
+      candidate("W-topicless", "NEAR_FIT", "Unrelated materials theorem"),
+      ...Array.from({ length: 3 }, (_, index) =>
+        candidate(`W-below-${index}`, "BELOW_FLOOR")
+      ),
+    ];
+    let persistedDiagnostics: DiscoveryDiagnosticsState["diagnostics"] = [];
+    const researchRepository = {
+      getDiscoveryObservations: async () => [],
+      upsertDiscoveryObservations: async () => undefined,
+      getCachedResearchAssessment: async () => null,
+      putCachedResearchAssessment: async () => undefined,
+      recordDiscoveryDiagnostics: async (
+        _runId: string,
+        diagnostics: DiscoveryDiagnosticsState["diagnostics"],
+      ) => {
+        persistedDiagnostics = structuredClone(diagnostics);
+      },
+    };
+    const initialDiagnostic = {
+      laneId,
+      sourceId: "openalex",
+      discoveryFamily: "bibliographic" as const,
+      discovered: candidates.length,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "success" as const,
+      rejectionCounts: {},
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2033-03-14",
+      runId: "sparse-research-fallback",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new SparseResearchEmbeddingProvider(),
+        assessment: new FakeModelProvider({
+          generatedObjects: Array.from(
+            { length: 6 },
+            () => researchAssessment,
+          ),
+        }),
+      },
+      collectCandidates: async () => candidates,
+      loadDiscoveryDiagnostics: () => [initialDiagnostic],
+      researchRepository,
+    });
+
+    const normalized = await context.normalize(await context.collect());
+    const enriched = await context.enrich(normalized);
+    const prefiltered = await context.prefilter(enriched);
+    const assessed = await context.assess(prefiltered);
+
+    expect(prefiltered).toHaveLength(6);
+    expect(prefiltered[0]?.normalizedText).toContain("NORMAL_FIT");
+    expect(prefiltered.slice(1).every(({ normalizedText }) =>
+      normalizedText.includes("NEAR_FIT")
+    )).toBe(true);
+    expect(assessed).toHaveLength(6);
+    expect(persistedDiagnostics[0]).toEqual({
+      ...initialDiagnostic,
+      deduplicated: 10,
+      triaged: 6,
+      fallbackTriaged: 5,
+      assessed: 6,
+      rejectionCounts: { topic_mismatch: 4 },
+    });
+    const persistedJson = JSON.stringify(persistedDiagnostics);
+    for (const forbidden of [
+      "NORMAL_FIT",
+      "NEAR_FIT",
+      "BELOW_FLOOR",
+      ...candidates.flatMap(({ title, abstract }) =>
+        abstract === null ? [title] : [title, abstract]
+      ),
+      JSON.stringify([0.8, Math.sqrt(1 - 0.8 * 0.8)]),
+      JSON.stringify([0.4, Math.sqrt(1 - 0.4 * 0.4)]),
+      JSON.stringify([0.3, Math.sqrt(1 - 0.3 * 0.3)]),
+      JSON.stringify([1, 0]),
+    ]) {
+      expect(persistedJson).not.toContain(forbidden);
+    }
+    expect(persistedJson).not.toContain("embedding");
+  });
+
+  it("preserves fallback priority under degraded budget and makes no hard-stop assessment calls", async () => {
+    const candidate = (
+      id: string,
+      marker: "NORMAL_FIT" | "NEAR_FIT",
+      topicalEvidence: string,
+    ): RawResearchCandidate => ({
+      ...rawResearchCandidate(id, `${marker} ${topicalEvidence}`),
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      originalUrl: `https://openalex.org/works/${id}`,
+      externalId: `openalex:${id}`,
+      externalIds: [`openalex:${id}`],
+      abstract:
+        `${marker}. ${topicalEvidence}. The paper reports a concrete method.`,
+      topics: ["Interpretability"],
+      metadata: { discoveryFamily: "bibliographic" },
+    });
+    const candidates = [
+      candidate(
+        "W-normal-0",
+        "NORMAL_FIT",
+        "Mechanistic interpretability for model oversight",
+      ),
+      candidate(
+        "W-normal-1",
+        "NORMAL_FIT",
+        "Mechanistic interpretability for model oversight",
+      ),
+      candidate(
+        "W-core-0",
+        "NEAR_FIT",
+        "Capability elicitation reveals hidden model abilities",
+      ),
+      candidate(
+        "W-core-1",
+        "NEAR_FIT",
+        "Capability elicitation reveals hidden model abilities",
+      ),
+      candidate(
+        "W-adjacent-0",
+        "NEAR_FIT",
+        "A broad framework for AI safety and governance",
+      ),
+      candidate(
+        "W-adjacent-1",
+        "NEAR_FIT",
+        "A broad framework for AI safety and governance",
+      ),
+    ];
+    const degradedAssessment = new FakeModelProvider({
+      generatedObjects: Array.from({ length: 4 }, () => researchAssessment),
+    });
+    const degraded = createProductionPipelineContext({
+      editionDate: "2033-03-15",
+      runId: "degraded-fallback-priority",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new SparseResearchEmbeddingProvider(),
+        assessment: degradedAssessment,
+      },
+      collectCandidates: async () => candidates,
+      budgetPolicy: {
+        state: "degraded",
+        radarSummaryTokens: 120,
+        featuredSummaryTokens: 900,
+      },
+    });
+
+    const normalized = await degraded.normalize(await degraded.collect());
+    const enriched = await degraded.enrich(normalized);
+    const prefiltered = await degraded.prefilter(enriched);
+    const assessed = await degraded.assess(prefiltered);
+
+    expect(prefiltered).toHaveLength(6);
+    expect(assessed).toHaveLength(4);
+    expect(degradedAssessment.generateRequests.map(({ sourcePacket }) =>
+      packetValue(sourcePacket, "title")
+    )).toEqual([
+      "NORMAL_FIT Mechanistic interpretability for model oversight",
+      "NORMAL_FIT Mechanistic interpretability for model oversight",
+      "NEAR_FIT Capability elicitation reveals hidden model abilities",
+      "NEAR_FIT Capability elicitation reveals hidden model abilities",
+    ]);
+    expect(degradedAssessment.generateRequests.every(({ sourcePacket }) =>
+      !sourcePacket.includes("A broad framework for AI safety and governance")
+    )).toBe(true);
+
+    const hardStopAssessment = new FakeModelProvider({
+      generatedObjects: Array.from({ length: 6 }, () => researchAssessment),
+    });
+    const hardStop = createProductionPipelineContext({
+      editionDate: "2033-03-16",
+      runId: "hard-stop-fallback-priority",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new SparseResearchEmbeddingProvider(),
+        assessment: hardStopAssessment,
+      },
+      collectCandidates: async () => candidates,
+      budgetPolicy: {
+        state: "hard_stop",
+        radarSummaryTokens: 0,
+        featuredSummaryTokens: 900,
+      },
+    });
+
+    const hardStopNormalized = await hardStop.normalize(
+      await hardStop.collect(),
+    );
+    const hardStopEnriched = await hardStop.enrich(hardStopNormalized);
+    const hardStopPrefiltered = await hardStop.prefilter(hardStopEnriched);
+    const hardStopAssessed = await hardStop.assess(hardStopPrefiltered);
+
+    expect(hardStopAssessed).toHaveLength(0);
+    expect(hardStopAssessment.generateRequests).toHaveLength(0);
+  });
+
   it("keeps two-window research selection stable when the same run retries", async () => {
     const repository = new D1BriefingRepository(env.DB);
     const fourDaysOld = "2026-07-26T09:00:00.000Z";
@@ -4015,6 +7875,59 @@ describe("manual editorial run", () => {
       .toEqual(reversed.map(({ id }) => id));
   });
 
+  it("admits nonlocal news below a local-heavy cutoff", async () => {
+    // This fails if the production shortlist reads only the capped global
+    // morning brief before it reserves one nonlocal and one local candidate.
+    const candidates = [
+      rawResearchCandidate(
+        "2607.32001",
+        "Interpretability study Alpha for coverage",
+        0,
+      ),
+      rawResearchCandidate(
+        "2607.32002",
+        "Interpretability study Beta for coverage",
+        0,
+      ),
+      rawResearchCandidate(
+        "2607.32003",
+        "Interpretability study Gamma for coverage",
+        0,
+      ),
+      ...Array.from({ length: 5 }, (_, index) => rawNewsCandidate(
+        `coverage-local-${index + 1}`,
+        index < 2 ? "dmv" : "baltimore",
+      )),
+      rawNewsCandidate("coverage-world", "world"),
+    ];
+    const assessments = Array.from(
+      { length: 3 },
+      () => qualifiedResearchAssessment,
+    );
+
+    const shortlisted = await productionShortlist(
+      candidates,
+      assessments,
+      "local-heavy-coverage-forward",
+    );
+    const reversed = await productionShortlist(
+      [...candidates].reverse(),
+      assessments,
+      "local-heavy-coverage-reverse",
+    );
+
+    expect(shortlisted).toHaveLength(8);
+    expect(shortlisted.slice(0, 3).map(({ metadata }) => metadata.section))
+      .toEqual(["research", "research", "research"]);
+    expect(shortlisted.map(({ metadata }) => metadata.section))
+      .toContain("world");
+    expect(shortlisted.map(({ metadata }) => metadata.section))
+      .toContain("baltimore");
+    expect(new Set(shortlisted.map(({ id }) => id)).size).toBe(8);
+    expect(shortlisted.map(({ id }) => id))
+      .toEqual(reversed.map(({ id }) => id));
+  });
+
   it.each([
     { qualified: 0, expectedResearch: 0 },
     { qualified: 1, expectedResearch: 1 },
@@ -4049,6 +7962,121 @@ describe("manual editorial run", () => {
 
     expect(shortlisted.filter(isResearchFixture)).toHaveLength(expectedResearch);
     expect(shortlisted.length).toBeLessThanOrEqual(8);
+  });
+
+  it("persists a dual DOI and arXiv observation over its historical arXiv item", async () => {
+    const repository = new D1BriefingRepository(env.DB);
+    const arxivRaw: RawResearchCandidate = {
+      kind: "paper",
+      sourceId: "arxiv",
+      sourceName: "arXiv",
+      sourceRole: "primary",
+      title: "Stable identity paper",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "arXiv:2608.03626",
+      externalIds: ["arXiv:2608.03626"],
+      publishedAt: "2026-08-08T12:00:00.000Z",
+      retrievedAt: "2026-08-10T09:00:00.000Z",
+      accessLevel: "abstract",
+      authors: [],
+      institutions: [],
+      abstract: "Stable identity evidence.",
+      content: null,
+      relatedPaperIds: [],
+      preferredInstitutionMatches: [],
+      citationCount: null,
+      influentialCitationCount: null,
+      topics: [],
+      metadata: { discoveryFamily: "arxiv" },
+    };
+    const stored = normalizeCandidate(arxivRaw);
+    await repository.upsertItems([stored]);
+
+    const restored = normalizeCandidate({
+      ...arxivRaw,
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      sourceRole: "analysis",
+      externalId: "DOI:10.1000/stable-identity-paper",
+      externalIds: [
+        "DOI:10.1000/stable-identity-paper",
+        "OpenAlex:W7197052950",
+        "arXiv:2608.03626",
+      ],
+      metadata: { discoveryFamily: "bibliographic" },
+    });
+
+    expect(restored.id).toBe(stored.id);
+    await expect(repository.upsertItems([restored])).resolves.toBeUndefined();
+    const rows = await env.DB.prepare(
+      "SELECT id, normalized_json FROM items WHERE canonical_url = ?",
+    ).bind("https://arxiv.org/abs/2608.03626").all<{
+      id: string;
+      normalized_json: string;
+    }>();
+    expect(rows.results).toHaveLength(1);
+    expect(rows.results[0]?.id).toBe(stored.id);
+    expect(JSON.parse(rows.results[0]!.normalized_json).metadata.externalIds)
+      .toEqual(expect.arrayContaining([
+        "arXiv:2608.03626",
+        "DOI:10.1000/stable-identity-paper",
+        "OpenAlex:W7197052950",
+      ]));
+  });
+
+  it("persists a restored OpenAlex checkpoint candidate over its existing arXiv item", async () => {
+    const repository = new D1BriefingRepository(env.DB);
+    const arxivRaw: RawResearchCandidate = {
+      kind: "paper",
+      sourceId: "arxiv",
+      sourceName: "arXiv",
+      sourceRole: "primary",
+      title: "Stable identity paper",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "arXiv:2608.03626",
+      externalIds: ["arXiv:2608.03626"],
+      publishedAt: "2026-08-08T12:00:00.000Z",
+      retrievedAt: "2026-08-10T09:00:00.000Z",
+      accessLevel: "abstract",
+      authors: [],
+      institutions: [],
+      abstract: "Stable identity evidence.",
+      content: null,
+      relatedPaperIds: [],
+      preferredInstitutionMatches: [],
+      citationCount: null,
+      influentialCitationCount: null,
+      topics: [],
+      metadata: { discoveryFamily: "arxiv" },
+    };
+    const stored = normalizeCandidate(arxivRaw);
+    await repository.upsertItems([stored]);
+
+    const restored = normalizeCandidate({
+      ...arxivRaw,
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      sourceRole: "analysis",
+      externalId: "OpenAlex:W7197052950",
+      externalIds: ["OpenAlex:W7197052950"],
+      metadata: { discoveryFamily: "bibliographic" },
+    });
+
+    expect(restored.id).toBe(stored.id);
+    await expect(repository.upsertItems([restored])).resolves.toBeUndefined();
+    const rows = await env.DB.prepare(
+      "SELECT id, normalized_json FROM items WHERE canonical_url = ?",
+    ).bind("https://arxiv.org/abs/2608.03626").all<{
+      id: string;
+      normalized_json: string;
+    }>();
+    expect(rows.results).toHaveLength(1);
+    expect(rows.results[0]?.id).toBe(stored.id);
+    expect(JSON.parse(rows.results[0]!.normalized_json).metadata.externalIds)
+      .toEqual(expect.arrayContaining([
+        "arXiv:2608.03626",
+        "OpenAlex:W7197052950",
+      ]));
   });
 
   it("persists normalized production items before clustered-news publication and does not re-persist them on resume", async () => {
@@ -4128,6 +8156,174 @@ describe("manual editorial run", () => {
         "SELECT COUNT(*) AS count FROM items WHERE id LIKE 'cluster-%'",
       ).first<{ count: number }>(),
     ).toEqual({ count: 0 });
+  });
+
+  it("preserves the ResearchCollector prepared contract through D1 production assembly and restore", async () => {
+    await env.DB.prepare(
+      `UPDATE sources
+       SET enabled = CASE
+         WHEN id IN ('arxiv', 'semantic-scholar') THEN 1
+         ELSE 0
+       END`,
+    ).run();
+    const publishedAt = new Date(Date.now() - 60 * 60 * 1_000)
+      .toISOString();
+    const arxivFeed = `<?xml version="1.0"?>
+      <feed xmlns="http://www.w3.org/2005/Atom">
+        <entry>
+          <id>https://arxiv.org/abs/2608.01919v1</id>
+          <updated>${publishedAt}</updated>
+          <published>${publishedAt}</published>
+          <title>Production &amp;amp;amp;#8217; identity study</title>
+          <summary>A concrete interpretability method reports stable results.</summary>
+          <author><name>Researcher Example</name></author>
+          <link href="https://arxiv.org/abs/2608.01919v1" rel="alternate" type="text/html" />
+          <category term="cs.AI" />
+        </entry>
+      </feed>`;
+    const sourceUrl = "https://arxiv.org/abs/2608.01919v1";
+    const schedulerRuntime = logicalProviderSchedulerRuntime();
+    const semanticScholarStarts: number[] = [];
+    const sourceFetch = vi.fn(
+      async (input: string | URL | Request): Promise<Response> => {
+        const url = String(input);
+        if (url.startsWith("https://export.arxiv.org/api/query")) {
+          return new Response(arxivFeed, {
+            headers: { "content-type": "application/atom+xml" },
+          });
+        }
+        if (url.startsWith(
+          "https://api.semanticscholar.org/graph/v1/paper/batch",
+        )) {
+          semanticScholarStarts.push(schedulerRuntime.now());
+          return Response.json([{
+            paperId: "S2-2608-01919",
+            externalIds: { ArXiv: "2608.01919" },
+            title: "Semantic Scholar display title is not authoritative",
+            citationCount: 3,
+            influentialCitationCount: 1,
+            authors: [{
+              authorId: "researcher-example",
+              name: "Researcher Example",
+              affiliations: [
+                "&amp;#83;tanford",
+                "Institute &amp;amp;#8217; Lab",
+              ],
+            }],
+            fieldsOfStudy: ["Computer Science"],
+          }]);
+        }
+        if (url.startsWith(
+          "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+        )) {
+          semanticScholarStarts.push(schedulerRuntime.now());
+          return Response.json({ total: 0, data: [] });
+        }
+        if (url.startsWith(
+          "https://api.semanticscholar.org/recommendations/v1/papers",
+        )) {
+          semanticScholarStarts.push(schedulerRuntime.now());
+          return Response.json({ recommendedPapers: [] });
+        }
+        throw new Error(`Unexpected prepared-contract URL: ${url}`);
+      },
+    );
+    vi.stubGlobal("fetch", sourceFetch);
+    try {
+      const runId = "run-production-research-prepared-contract";
+      const editionDate = "2034-05-01";
+      const store = createD1PipelineStore(env.DB);
+      const firstContext = createD1ProductionPipelineContext(
+        store,
+        editionDate,
+        runId,
+        {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+        { schedulerRuntime },
+      );
+      firstContext.enrich = async () => {
+        throw new Error("STOP_AFTER_PRODUCTION_NORMALIZE");
+      };
+
+      await expect(runEditorialPipeline(firstContext)).rejects.toThrow(
+        "STOP_AFTER_PRODUCTION_NORMALIZE",
+      );
+      expect(semanticScholarStarts).toEqual([
+        0,
+        1_000,
+        2_000,
+        3_000,
+        4_000,
+        5_000,
+        6_000,
+      ]);
+      expect(schedulerRuntime.now()).toBe(6_000);
+
+      const collectArtifact = await store.readArtifact(runId, "collect") as
+        CheckpointArtifact<RawResearchCandidate[]>;
+      const normalizeArtifact = await store.readArtifact(runId, "normalize") as
+        CheckpointArtifact<Item[]>;
+      const collected = collectArtifact.output[0]!;
+      const normalized = normalizeArtifact.output[0]!;
+      expect(collectArtifact.providerTextPreparationVersion).toBe(
+        PROVIDER_TEXT_PREPARATION_VERSION,
+      );
+      expect(collected).toMatchObject({
+        title: "Production &#8217; identity study",
+        originalUrl: sourceUrl,
+        externalId: "arXiv:2608.01919",
+        institutions: ["Stanford", "Institute &#8217; Lab"],
+        preferredInstitutionMatches: ["Stanford"],
+      });
+      expect(normalized).toMatchObject({
+        title: "Production &#8217; identity study",
+        canonicalUrl: "https://arxiv.org/abs/2608.01919",
+        metadata: {
+          institutions: ["Institute &#8217; Lab", "Stanford"],
+          preferredInstitutionMatches: ["Stanford"],
+        },
+      });
+      const rawResearch = (normalized.metadata.workflow as {
+        rawResearch: RawResearchCandidate;
+      }).rawResearch;
+      expect(rawResearch).toMatchObject({
+        title: "Production &#8217; identity study",
+        originalUrl: sourceUrl,
+        externalId: "arXiv:2608.01919",
+        preferredInstitutionMatches: ["Stanford"],
+      });
+      const stableCollect = structuredClone(collectArtifact);
+      const stableNormalize = structuredClone(normalizeArtifact);
+      const fetchCallsAfterFirstRun = sourceFetch.mock.calls.length;
+
+      const restoredContext = createD1ProductionPipelineContext(
+        createD1PipelineStore(env.DB),
+        editionDate,
+        runId,
+        {
+          summary: new FakeModelProvider(),
+          assessment: new FakeModelProvider(),
+        },
+      );
+      restoredContext.enrich = async () => {
+        throw new Error("STOP_AFTER_PRODUCTION_NORMALIZE");
+      };
+      await expect(runEditorialPipeline(restoredContext)).rejects.toThrow(
+        "STOP_AFTER_PRODUCTION_NORMALIZE",
+      );
+
+      expect(sourceFetch).toHaveBeenCalledTimes(fetchCallsAfterFirstRun);
+      await expect(store.readArtifact(runId, "collect")).resolves.toEqual(
+        stableCollect,
+      );
+      await expect(store.readArtifact(runId, "normalize")).resolves.toEqual(
+        stableNormalize,
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("restores sanitized source failures when a fresh context resumes past collect", async () => {
@@ -4293,6 +8489,7 @@ describe("manual editorial run", () => {
     vi.stubGlobal("fetch", sourceFetch);
     try {
       const firstStore = createD1PipelineStore(env.DB);
+      const schedulerRuntime = logicalProviderSchedulerRuntime();
       const firstContext = createD1ProductionPipelineContext(
         firstStore,
         "2033-02-08",
@@ -4311,12 +8508,16 @@ describe("manual editorial run", () => {
             }],
           }),
         },
-        { openAlexApiKey: "fixture-openalex-key" },
+        {
+          openAlexApiKey: "fixture-openalex-key",
+          schedulerRuntime,
+        },
       );
 
       await expect(runEditorialPipeline(firstContext)).rejects.toThrow(
         "TRANSIENT_SUMMARY_FAILURE",
       );
+      expect(schedulerRuntime.now()).toBe(6_000);
       const fetchCallsAfterCollect = sourceFetch.mock.calls.length;
       expect(await firstStore.readCollectionSourceFailures(
         "run-fail-open-production",

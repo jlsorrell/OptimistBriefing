@@ -11,6 +11,7 @@ import {
   type RawPublicationCandidate,
   type RawResearchCandidate,
 } from "../sources/types";
+import { preparedProviderSignalText } from "../sources/provider-text";
 import { mapResearchTopicIds } from "./research-topics";
 
 const SUBSTANTIVE_RESEARCH = /\b(?:study|studies|method|methodology|experiment|analysis|result|results|finding|findings|proof|theorem)\b/i;
@@ -21,8 +22,17 @@ function unique(values: readonly string[]): string[] {
   return [...new Set(values.filter((value) => value.length > 0))];
 }
 
-function material(candidate: RawPublicationCandidate): string {
-  return [candidate.title, candidate.abstract, candidate.content, candidate.originalUrl, ...candidate.relatedPaperIds]
+type PublicationSignalText = {
+  title: string | null;
+  abstract: string | null;
+  content: string | null;
+};
+
+function material(
+  candidate: RawPublicationCandidate,
+  signals: PublicationSignalText,
+): string {
+  return [signals.title, signals.abstract, signals.content, candidate.originalUrl, ...candidate.relatedPaperIds]
     .filter((value): value is string => typeof value === "string")
     .join("\n");
 }
@@ -72,7 +82,10 @@ function routeResearch(
   });
 }
 
-function routeNews(candidate: RawPublicationCandidate): RawNewsCandidate {
+function routeNews(
+  candidate: RawPublicationCandidate,
+  signals: PublicationSignalText,
+): RawNewsCandidate {
   const metadata = {
     ...candidate.metadata,
     discoveryFamily: candidate.discoveryFamily,
@@ -85,9 +98,9 @@ function routeNews(candidate: RawPublicationCandidate): RawNewsCandidate {
     canCorroborateFacts: false,
     ...deriveNewsSignals({
       kind: "article",
-      title: candidate.title,
-      abstract: candidate.abstract,
-      content: candidate.content,
+      title: signals.title ?? "",
+      abstract: signals.abstract,
+      content: signals.content,
       originalUrl: candidate.originalUrl,
       sectionEligibility: candidate.sectionEligibility,
       metadata,
@@ -100,28 +113,40 @@ export function routePublication(
   input: RawPublicationCandidate,
 ): RawResearchCandidate | RawNewsCandidate | null {
   const candidate = RawPublicationCandidateSchema.parse(input);
-  const searchable = material(candidate);
-  const topics = mapResearchTopicIds([candidate.title, candidate.abstract ?? "", candidate.content ?? ""]);
+  const signals = {
+    title: preparedProviderSignalText(candidate.title),
+    abstract: preparedProviderSignalText(candidate.abstract),
+    content: preparedProviderSignalText(candidate.content),
+  };
+  if (signals.title === null && signals.abstract === null && signals.content === null) {
+    return null;
+  }
+  const searchable = material(candidate, signals);
+  const topics = mapResearchTopicIds([
+    signals.title ?? "",
+    signals.abstract ?? "",
+    signals.content ?? "",
+  ]);
   const identifiers = explicitIdentifiers(candidate, searchable);
   const explicitPaperEvidence = identifiers.length > 0 || EXPLICIT_PAPER_LINK.test(searchable);
   const aiPolicyEvidence = hasExplicitAiPolicyEvidence([
-    candidate.title,
-    candidate.abstract,
-    candidate.content,
+    signals.title,
+    signals.abstract,
+    signals.content,
   ]);
   const researchEligible = candidate.sectionEligibility.includes("research") || candidate.sectionEligibility.includes("research_radar");
   if (researchEligible && topics.length > 0 && (explicitPaperEvidence || SUBSTANTIVE_RESEARCH.test(searchable))) {
     return routeResearch(candidate, topics, identifiers, explicitPaperEvidence);
   }
   if (candidate.sectionEligibility.includes("ai_policy") && aiPolicyEvidence) {
-    const routed = routeNews(candidate);
+    const routed = routeNews(candidate, signals);
     return routed.metadata.primarySection === "ai_policy" ? routed : null;
   }
   if (candidate.sectionEligibility.includes("technology") && TECHNOLOGY.test(searchable)) {
-    return routeNews(candidate);
+    return routeNews(candidate, signals);
   }
   if (candidate.discoveryFamily === "official-publication" && candidate.sectionEligibility.includes("technology")) {
-    return routeNews(candidate);
+    return routeNews(candidate, signals);
   }
   return null;
 }

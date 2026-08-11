@@ -223,6 +223,48 @@ describe("research discovery source contracts", () => {
       .toEqual({});
   });
 
+  it("accepts bounded fallback triage counts and treats omission as zero", () => {
+    const historical = {
+      laneId: "openalex:topic",
+      sourceId: "openalex",
+      discoveryFamily: "bibliographic" as const,
+      discovered: 10,
+      deduplicated: 8,
+      triaged: 3,
+      assessed: 2,
+      outcome: "success" as const,
+    };
+
+    const parsedHistorical = DiscoveryLaneDiagnosticSchema.parse(historical);
+    expect(parsedHistorical.fallbackTriaged ?? 0).toBe(0);
+    expect("fallbackTriaged" in parsedHistorical).toBe(false);
+    expect(DiscoveryLaneDiagnosticSchema.parse({
+      ...historical,
+      fallbackTriaged: 2,
+    }).fallbackTriaged).toBe(2);
+    expect(DiscoveryLaneDiagnosticSchema.safeParse({
+      ...historical,
+      fallbackTriaged: 4,
+    }).success).toBe(false);
+  });
+
+  it.each([-1, 0.5, 10_001])(
+    "rejects an invalid fallback triage count of %s",
+    (fallbackTriaged) => {
+      expect(DiscoveryLaneDiagnosticSchema.safeParse({
+        laneId: "openalex:topic",
+        sourceId: "openalex",
+        discoveryFamily: "bibliographic",
+        discovered: 10_000,
+        deduplicated: 10_000,
+        triaged: 10_000,
+        assessed: 2,
+        fallbackTriaged,
+        outcome: "success",
+      }).success).toBe(false);
+    },
+  );
+
   it("round-trips only fixed bounded discovery rejection reasons", () => {
     const diagnostic = {
       laneId: "arxiv:oversight-governance",

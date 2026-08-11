@@ -20,11 +20,17 @@ import {
   OpenAlexDiscoveryAdapter,
 } from "../../../src/sources/openalex";
 import { PaperContentRetriever } from "../../../src/sources/paper-content";
+import { createProviderRequestAdmission } from
+  "../../../src/sources/provider-scheduler";
 import {
   createPaperDiscoveryAdapters,
   SEMANTIC_SCHOLAR_SEED_SET_V1,
 } from "../../../src/sources/paper-discovery";
 import { ResearchCollector } from "../../../src/sources/research-collector";
+import {
+  isPreparedRawCandidate,
+  rebrandPreparedResearchCandidateAfterSchemaClone,
+} from "../../../src/editorial/normalize";
 import { RssAdapter } from "../../../src/sources/rss";
 import { SemanticScholarAdapter } from "../../../src/sources/semantic-scholar";
 import type {
@@ -33,6 +39,7 @@ import type {
   RawItem,
   ResearchSourceRecord,
 } from "../../../src/sources/types";
+import { RawResearchCandidateSchema } from "../../../src/sources/types";
 
 const fixturePath = (name: string) =>
   fileURLToPath(new URL(`../../fixtures/${name}`, import.meta.url));
@@ -43,6 +50,16 @@ const fixedWindow = (): CollectionWindow => ({
   from: "2026-07-28T00:00:00.000Z",
   to: "2026-07-29T12:00:00.000Z",
 });
+
+function logicalSchedulerRuntime() {
+  let current = 0;
+  return {
+    now: () => current,
+    sleep: vi.fn(async (milliseconds: number) => {
+      current += milliseconds;
+    }),
+  };
+}
 
 const source = (
   value: Partial<ResearchSourceRecord> &
@@ -190,6 +207,485 @@ async function collectorWithFixtures() {
 }
 
 describe("ResearchCollector", () => {
+  it("serializes Semantic Scholar lanes without owning request pacing", async () => {
+    const clock = logicalSchedulerRuntime();
+    const starts: number[] = [];
+    let active = 0;
+    let maximumActive = 0;
+    let releaseAll: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseAll = resolve;
+    });
+    const collector = new ResearchCollector({
+      discoveryAdapters: Array.from({ length: 3 }, (_, index) => ({
+        sourceId: "semantic-scholar",
+        laneId: `semantic-scholar:test:${index}`,
+        discoveryFamily: "bibliographic" as const,
+        collect: async () => {
+          starts.push(clock.now());
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          await gate;
+          active -= 1;
+          return [];
+        },
+      })),
+      enrichers: [],
+      preferredInstitutions: [],
+      schedulerRuntime: clock,
+    });
+
+    const pending = collector.collect(fixedWindow());
+    await vi.waitFor(() => expect(active).toBeGreaterThan(0));
+    const startsWhileFirstLaneIsHeld = [...starts];
+    const maximumActiveWhileFirstLaneIsHeld = maximumActive;
+    releaseAll?.();
+    await pending;
+
+    expect(startsWhileFirstLaneIsHeld).toEqual([0]);
+    expect(maximumActiveWhileFirstLaneIsHeld).toBe(1);
+    expect(starts).toEqual([0, 0, 0]);
+    expect(maximumActive).toBe(1);
+  });
+
+  it("keeps a Semantic Scholar Retry-After retry inside its scheduled lane", async () => {
+    const baseTime = Date.parse("2026-07-29T08:30:00.000Z");
+    let currentTime = 0;
+    const schedulerSleep = vi.fn(async (milliseconds: number) => {
+      currentTime += milliseconds;
+    });
+    const httpSleep = vi.fn(async (milliseconds: number) => {
+      currentTime += milliseconds;
+    });
+    let activeLanes = 0;
+    let maximumActiveLanes = 0;
+    const completedLanes: string[] = [];
+    const requestEvents: Array<{
+      laneId: string;
+      activeLanes: number;
+      time: number;
+    }> = [];
+    const privateThrottleBody = "private Semantic Scholar throttle body";
+    const laneUrls = new Map([
+      [
+        "semantic-scholar:01-retry",
+        "https://api.semanticscholar.org/graph/v1/paper/retry-lane?token=private-retry-token",
+      ],
+      [
+        "semantic-scholar:02-healthy",
+        "https://api.semanticscholar.org/graph/v1/paper/healthy-lane?token=private-healthy-token",
+      ],
+    ]);
+    let retryLaneAttempts = 0;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const laneId = url.includes("retry-lane")
+        ? "semantic-scholar:01-retry"
+        : "semantic-scholar:02-healthy";
+      requestEvents.push({ laneId, activeLanes, time: currentTime });
+      if (laneId === "semantic-scholar:01-retry") {
+        retryLaneAttempts += 1;
+        if (retryLaneAttempts === 1) {
+          return new Response(privateThrottleBody, {
+            status: 429,
+            headers: { "retry-after": "2" },
+          });
+        }
+      }
+      return new Response("ok");
+    });
+    const http = new SourceHttpClient({
+      fetch,
+      sleep: httpSleep,
+      now: () => new Date(baseTime + currentTime),
+      maxRetries: 1,
+      requestAdmission: createProviderRequestAdmission(new Map([
+        ["semantic-scholar", {
+          maxConcurrency: 1,
+          minimumStartIntervalMs: 1_000,
+        }],
+      ]), {
+        now: () => currentTime,
+        sleep: schedulerSleep,
+      }),
+    });
+    const adapters = [...laneUrls].map(([laneId, url]) => ({
+      sourceId: "semantic-scholar",
+      laneId,
+      discoveryFamily: "bibliographic" as const,
+      collect: async () => {
+        activeLanes += 1;
+        maximumActiveLanes = Math.max(maximumActiveLanes, activeLanes);
+        try {
+          await http.get(semanticScholarSource, url);
+          completedLanes.push(laneId);
+          return [];
+        } finally {
+          activeLanes -= 1;
+        }
+      },
+    }));
+    const collector = new ResearchCollector({
+      discoveryAdapters: adapters,
+      enrichers: [],
+      preferredInstitutions: [],
+      schedulerRuntime: {
+        now: () => currentTime,
+        sleep: schedulerSleep,
+      },
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(requestEvents).toEqual([
+      {
+        laneId: "semantic-scholar:01-retry",
+        activeLanes: 1,
+        time: 0,
+      },
+      {
+        laneId: "semantic-scholar:01-retry",
+        activeLanes: 1,
+        time: 2_000,
+      },
+      {
+        laneId: "semantic-scholar:02-healthy",
+        activeLanes: 1,
+        time: 3_000,
+      },
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(httpSleep).toHaveBeenCalledTimes(1);
+    expect(httpSleep).toHaveBeenCalledWith(2_000);
+    expect(schedulerSleep).toHaveBeenCalledOnce();
+    expect(schedulerSleep).toHaveBeenCalledWith(1_000);
+    expect(maximumActiveLanes).toBe(1);
+    expect(completedLanes).toEqual([
+      "semantic-scholar:01-retry",
+      "semantic-scholar:02-healthy",
+    ]);
+    expect(result.discoveryDiagnostics).toEqual([
+      {
+        laneId: "semantic-scholar:01-retry",
+        sourceId: "semantic-scholar",
+        discoveryFamily: "bibliographic",
+        discovered: 0,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        rejectionCounts: {},
+        outcome: "success",
+      },
+      {
+        laneId: "semantic-scholar:02-healthy",
+        sourceId: "semantic-scholar",
+        discoveryFamily: "bibliographic",
+        discovered: 0,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        rejectionCounts: {},
+        outcome: "success",
+      },
+    ]);
+    const serializedDiagnostics = JSON.stringify(result.discoveryDiagnostics);
+    expect(serializedDiagnostics).not.toContain(privateThrottleBody);
+    for (const url of laneUrls.values()) {
+      expect(serializedDiagnostics).not.toContain(url);
+    }
+  });
+
+  it("runs each provider group concurrently", async () => {
+    let releaseSemanticScholar: (() => void) | undefined;
+    let semanticScholarSettled = false;
+    let arxivStartedBeforeSemanticScholarSettled = false;
+    const semanticScholarGate = new Promise<void>((resolve) => {
+      releaseSemanticScholar = resolve;
+    });
+    const adapters = [
+      {
+        sourceId: "semantic-scholar",
+        laneId: "a-semantic-scholar:blocked",
+        discoveryFamily: "bibliographic",
+        collect: async () => {
+          await semanticScholarGate;
+          semanticScholarSettled = true;
+          return [];
+        },
+      },
+      {
+        sourceId: "arxiv",
+        laneId: "z-arxiv:healthy",
+        discoveryFamily: "arxiv",
+        collect: async () => {
+          arxivStartedBeforeSemanticScholarSettled = !semanticScholarSettled;
+          return [];
+        },
+      },
+    ] satisfies readonly DiscoverySourceAdapter[];
+    const collector = new ResearchCollector({
+      discoveryAdapters: adapters,
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const pending = collector.collect(fixedWindow());
+    try {
+      await vi.waitFor(() => {
+        expect(arxivStartedBeforeSemanticScholarSettled).toBe(true);
+      });
+    } finally {
+      releaseSemanticScholar?.();
+      await pending;
+    }
+  });
+
+  it("limits OpenAlex discovery concurrency to two lanes", async () => {
+    let active = 0;
+    let maximumActive = 0;
+    let releaseAll: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseAll = resolve;
+    });
+    const collector = new ResearchCollector({
+      discoveryAdapters: Array.from({ length: 4 }, (_, index) => ({
+        sourceId: "openalex",
+        laneId: `openalex:test:${index}`,
+        discoveryFamily: "bibliographic" as const,
+        collect: async () => {
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          await gate;
+          active -= 1;
+          return [];
+        },
+      })),
+      enrichers: [],
+      preferredInstitutions: [],
+    });
+
+    const pending = collector.collect(fixedWindow());
+    await vi.waitFor(() => expect(active).toBeGreaterThan(0));
+    releaseAll?.();
+    await pending;
+
+    expect(maximumActive).toBe(2);
+  });
+
+  it("settles later lanes and another provider after a throttled lane fails", async () => {
+    const clock = logicalSchedulerRuntime();
+    const settled: string[] = [];
+    const adapters = [
+      {
+        sourceId: "semantic-scholar",
+        laneId: "semantic-scholar:01-failed",
+        discoveryFamily: "bibliographic",
+        collect: async () => {
+          throw new Error("private provider body and https://secret.example");
+        },
+      },
+      {
+        sourceId: "semantic-scholar",
+        laneId: "semantic-scholar:02-healthy",
+        discoveryFamily: "bibliographic",
+        collect: async () => {
+          settled.push("semantic-scholar:02-healthy");
+          return [];
+        },
+      },
+      {
+        sourceId: "arxiv",
+        laneId: "arxiv:healthy",
+        discoveryFamily: "arxiv",
+        collect: async () => {
+          settled.push("arxiv:healthy");
+          return [];
+        },
+      },
+    ] satisfies readonly DiscoverySourceAdapter[];
+    const collector = new ResearchCollector({
+      discoveryAdapters: adapters,
+      enrichers: [],
+      preferredInstitutions: [],
+      schedulerRuntime: clock,
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(settled.sort()).toEqual([
+      "arxiv:healthy",
+      "semantic-scholar:02-healthy",
+    ]);
+    expect([...result.succeededSourceIds].sort()).toEqual([
+      "arxiv",
+      "semantic-scholar",
+    ]);
+    expect(result.failures).toEqual([
+      { sourceId: "semantic-scholar", kind: "unknown" },
+    ]);
+    expect(result.discoveryDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        laneId: "semantic-scholar:01-failed",
+        outcome: "unknown",
+      }),
+      expect.objectContaining({
+        laneId: "semantic-scholar:02-healthy",
+        outcome: "success",
+      }),
+      expect.objectContaining({
+        laneId: "arxiv:healthy",
+        outcome: "success",
+      }),
+    ]));
+    expect(JSON.stringify(result)).not.toContain("secret.example");
+    expect(clock.now()).toBe(0);
+  });
+
+  it.each(["constructor", "__proto__"])(
+    "uses the default policy and preserves fail-open settlement for unknown provider %s",
+    async (sourceId) => {
+      const settled: string[] = [];
+      const adapters = [
+        {
+          sourceId,
+          laneId: `${sourceId}:01-failed`,
+          discoveryFamily: "bibliographic",
+          collect: async () => {
+            throw new Error("private inherited-policy failure detail");
+          },
+        },
+        {
+          sourceId,
+          laneId: `${sourceId}:02-healthy`,
+          discoveryFamily: "bibliographic",
+          collect: async () => {
+            settled.push(`${sourceId}:02-healthy`);
+            return [];
+          },
+        },
+      ] satisfies readonly DiscoverySourceAdapter[];
+      const collector = new ResearchCollector({
+        discoveryAdapters: adapters,
+        enrichers: [],
+        preferredInstitutions: [],
+      });
+
+      const result = await collector.collect(fixedWindow());
+
+      expect(settled).toEqual([`${sourceId}:02-healthy`]);
+      expect(result.succeededSourceIds).toEqual([sourceId]);
+      expect(result.failures).toEqual([
+        {
+          sourceId: sourceId === "__proto__" ? "unknown-source" : sourceId,
+          kind: "unknown",
+        },
+      ]);
+      expect(result.discoveryDiagnostics).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          laneId: `${sourceId}:01-failed`,
+          outcome: "unknown",
+        }),
+        expect.objectContaining({
+          laneId: `${sourceId}:02-healthy`,
+          outcome: "success",
+        }),
+      ]));
+      expect(JSON.stringify(result)).not.toContain(
+        "private inherited-policy failure detail",
+      );
+    },
+  );
+
+  it.each(["title", "sourceName"] as const)(
+    "drops an entity-only research %s without losing its valid sibling",
+    async (invalidField) => {
+      const collector = new ResearchCollector({
+        discoveryAdapters: [{
+          sourceId: "arxiv",
+          collect: async () => [
+            { ...rawPaper(), [invalidField]: "&#32;" },
+            {
+              ...rawPaper(),
+              externalId: "arXiv:2607.00002",
+              externalIds: ["arXiv:2607.00002"],
+              originalUrl: "https://arxiv.org/abs/2607.00002",
+              title: "A valid sibling research result",
+            },
+          ],
+        }],
+        enrichers: [],
+        preferredInstitutions: [],
+      });
+
+      const result = await collector.collect(fixedWindow());
+
+      expect(result.failures).toEqual([]);
+      expect(result.candidates).toHaveLength(1);
+      expect(result.candidates[0]?.title).toBe(
+        "A valid sibling research result",
+      );
+      expect(result.discoveryDiagnostics?.[0]?.rejectionCounts).toEqual({
+        quality_rejected: 1,
+      });
+    },
+  );
+
+  it("decodes institutions before preferred-institution matching", async () => {
+    const candidate = {
+      ...rawPaper(),
+      institutions: ["&#83;tanford"],
+    };
+    const collector = new ResearchCollector({
+      discoveryAdapters: [{
+        sourceId: "arxiv",
+        collect: async () => [candidate],
+      }],
+      enrichers: [],
+      preferredInstitutions: ["Stanford"],
+    });
+
+    const result = await collector.collect(fixedWindow());
+
+    expect(result.candidates[0]?.institutions).toEqual(["Stanford"]);
+    expect(result.candidates[0]?.preferredInstitutionMatches).toEqual([
+      "Stanford",
+    ]);
+  });
+
+  it("rebrands only a schema-cloned prepared research candidate without decoding it again", async () => {
+    const collector = new ResearchCollector({
+      discoveryAdapters: [{
+        sourceId: "arxiv",
+        collect: async () => [{
+          ...rawPaper(),
+          title: "Research &amp;amp;#8217; identity",
+          institutions: [
+            "&amp;#83;tanford",
+            "Institute &amp;amp;#8217; Lab",
+          ],
+        }],
+      }],
+      enrichers: [],
+      preferredInstitutions: ["Stanford"],
+    });
+    const result = await collector.collect(fixedWindow());
+    const prepared = result.candidates[0]!;
+    const schemaClone = RawResearchCandidateSchema.parse(prepared);
+
+    expect(isPreparedRawCandidate(prepared)).toBe(true);
+    expect(isPreparedRawCandidate(schemaClone)).toBe(false);
+    const rebranded = rebrandPreparedResearchCandidateAfterSchemaClone(
+      schemaClone,
+    );
+    expect(rebranded).toEqual(expect.objectContaining({
+      title: "Research &#8217; identity",
+      institutions: ["Stanford", "Institute &#8217; Lab"],
+      preferredInstitutionMatches: ["Stanford"],
+    }));
+    expect(isPreparedRawCandidate(rebranded)).toBe(true);
+    expect(isPreparedRawCandidate(schemaClone)).toBe(false);
+  });
+
   it("runs three targeted arXiv lanes and merges repeated paper identities", async () => {
     const fixture = await loadFixture("arxiv-response.xml");
     const requestQueries: string[] = [];
@@ -663,6 +1159,7 @@ describe("bibliographic discovery", () => {
       ).filter(({ laneId }) => laneId.startsWith("semantic-scholar:search:")),
       enrichers: [],
       preferredInstitutions: [],
+      schedulerRuntime: logicalSchedulerRuntime(),
     });
 
     const result = await collector.collect(fixedWindow());
@@ -705,6 +1202,7 @@ describe("bibliographic discovery", () => {
       ),
       enrichers: [],
       preferredInstitutions: [],
+      schedulerRuntime: logicalSchedulerRuntime(),
     });
 
     const result = await collector.collect(fixedWindow());
@@ -1002,6 +1500,107 @@ describe("bibliographic discovery", () => {
     )).toBe(true);
   });
 
+  it("recovers an omitted OpenAlex arXiv identity from its landing page", async () => {
+    const work = {
+      id: "https://openalex.org/W7197052950",
+      doi: null,
+      title: "Recovered OpenAlex identity",
+      publication_date: "2026-07-29",
+      updated_date: "2026-07-29T08:00:00.000Z",
+      cited_by_count: 1,
+      ids: { openalex: "https://openalex.org/W7197052950" },
+      authorships: [],
+      topics: [],
+      abstract_inverted_index: null,
+      primary_location: {
+        landing_page_url: "https://arxiv.org/abs/2608.03626v2",
+        source: { display_name: "arXiv" },
+      },
+    };
+    const adapter = new OpenAlexDiscoveryAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({ results: [work] })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      openAlexSource,
+      { laneId: "openalex:text:identity", mode: "text", query: "alignment" },
+      { apiKey: "fixture-openalex-key" },
+    );
+
+    const result = await adapter.collect(fixedWindow());
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      originalUrl: "https://arxiv.org/abs/2608.03626v2",
+      externalId: "arXiv:2608.03626",
+      externalIds: ["OpenAlex:W7197052950", "arXiv:2608.03626"],
+    });
+  });
+
+  it.each([
+    {
+      caseName: "keeps a non-arXiv landing page OpenAlex-only",
+      ids: { openalex: "https://openalex.org/W-NON-ARXIV" },
+      landingPageUrl: "https://publisher.example/papers/non-arxiv",
+      expectedExternalId: "OpenAlex:W-NON-ARXIV",
+      expectedExternalIds: ["OpenAlex:W-NON-ARXIV"],
+    },
+    {
+      caseName: "prefers the explicit arXiv identity over a conflicting landing page",
+      ids: {
+        openalex: "https://openalex.org/W-EXPLICIT",
+        arxiv: "https://arxiv.org/abs/2608.00001v3",
+      },
+      landingPageUrl: "https://arxiv.org/abs/2608.99999",
+      expectedExternalId: "arXiv:2608.00001",
+      expectedExternalIds: ["OpenAlex:W-EXPLICIT", "arXiv:2608.00001"],
+    },
+    {
+      caseName: "falls back when the explicit OpenAlex arXiv URL is invalid",
+      ids: {
+        openalex: "https://openalex.org/W-INVALID-EXPLICIT",
+        arxiv: "https://publisher.example/not-an-arxiv-identifier",
+      },
+      landingPageUrl: "https://arxiv.org/abs/2608.00002v4",
+      expectedExternalId: "arXiv:2608.00002",
+      expectedExternalIds: [
+        "OpenAlex:W-INVALID-EXPLICIT",
+        "arXiv:2608.00002",
+      ],
+    },
+  ])("$caseName", async ({ ids, landingPageUrl, expectedExternalId, expectedExternalIds }) => {
+    const work = {
+      id: ids.openalex,
+      doi: null,
+      title: "OpenAlex identity inverse",
+      publication_date: "2026-07-29",
+      updated_date: "2026-07-29T08:00:00.000Z",
+      cited_by_count: 0,
+      ids,
+      authorships: [],
+      topics: [],
+      abstract_inverted_index: null,
+      primary_location: {
+        landing_page_url: landingPageUrl,
+        source: { display_name: "Fixture publisher" },
+      },
+    };
+    const adapter = new OpenAlexDiscoveryAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => Response.json({ results: [work] })),
+        now: () => new Date("2026-07-29T08:30:00.000Z"),
+      }),
+      openAlexSource,
+      { laneId: "openalex:text:identity-inverse", mode: "text", query: "alignment" },
+      { apiKey: "fixture-openalex-key" },
+    );
+
+    const result = await adapter.collect(fixedWindow());
+
+    expect(result[0]?.externalId).toBe(expectedExternalId);
+    expect(result[0]?.externalIds).toEqual(expectedExternalIds);
+  });
+
   it("bounds large OpenAlex provider arrays without rejecting the lane", async () => {
     const payload = JSON.parse(await loadFixture("openalex-discovery.json"));
     payload.results[0].authorships = Array.from({ length: 65 }, (_, index) => ({
@@ -1054,6 +1653,7 @@ describe("bibliographic discovery", () => {
       ],
       enrichers: [],
       preferredInstitutions: [],
+      schedulerRuntime: logicalSchedulerRuntime(),
     });
 
     const result = await collector.collect(fixedWindow());
@@ -1289,6 +1889,155 @@ describe("RssAdapter", () => {
 });
 
 describe("SourceHttpClient", () => {
+  it("paces every Semantic Scholar retry attempt after fallback backoff", async () => {
+    const baseTime = Date.parse("2026-07-29T08:30:00.000Z");
+    const clock = logicalSchedulerRuntime();
+    const starts: number[] = [];
+    const fetch = vi.fn(async () => {
+      starts.push(clock.now());
+      return starts.length === 1
+        ? new Response(null, { status: 503 })
+        : new Response("ok");
+    });
+    const http = new SourceHttpClient({
+      fetch,
+      maxRetries: 1,
+      sleep: clock.sleep,
+      now: () => new Date(baseTime + clock.now()),
+      requestAdmission: createProviderRequestAdmission(new Map([
+        ["semantic-scholar", {
+          maxConcurrency: 1,
+          minimumStartIntervalMs: 1_000,
+        }],
+      ]), clock),
+    });
+
+    const response = await http.get(
+      semanticScholarSource,
+      "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+    );
+
+    expect(response.body).toBe("ok");
+    expect(starts).toEqual([0, 1_000]);
+    expect(clock.sleep.mock.calls.map(([milliseconds]) => milliseconds))
+      .toEqual([500, 500]);
+  });
+
+  it("paces every allowed Semantic Scholar redirect hop", async () => {
+    const clock = logicalSchedulerRuntime();
+    const starts: number[] = [];
+    const fetch = vi.fn(async () => {
+      starts.push(clock.now());
+      return starts.length === 1
+        ? new Response(null, {
+            status: 302,
+            headers: {
+              location:
+                "https://api.semanticscholar.org/graph/v1/paper/search/bulk?cursor=next",
+            },
+          })
+        : new Response("ok");
+    });
+    const http = new SourceHttpClient({
+      fetch,
+      requestAdmission: createProviderRequestAdmission(new Map([
+        ["semantic-scholar", {
+          maxConcurrency: 1,
+          minimumStartIntervalMs: 1_000,
+        }],
+      ]), clock),
+    });
+
+    const response = await http.get(
+      semanticScholarSource,
+      "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+    );
+
+    expect(response.body).toBe("ok");
+    expect(starts).toEqual([0, 1_000]);
+  });
+
+  it("holds Semantic Scholar admission until a successful body is consumed", async () => {
+    const clock = logicalSchedulerRuntime();
+    const starts: number[] = [];
+    let finishFirstBody: (() => void) | undefined;
+    const firstBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        finishFirstBody = () => {
+          controller.enqueue(new TextEncoder().encode("first"));
+          controller.close();
+        };
+      },
+    });
+    const fetch = vi.fn(async () => {
+      starts.push(clock.now());
+      return starts.length === 1
+        ? new Response(firstBody)
+        : new Response("second");
+    });
+    const http = new SourceHttpClient({
+      fetch,
+      requestAdmission: createProviderRequestAdmission(new Map([
+        ["semantic-scholar", {
+          maxConcurrency: 1,
+          minimumStartIntervalMs: 1_000,
+        }],
+      ]), clock),
+    });
+
+    const first = http.get(
+      semanticScholarSource,
+      "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=first",
+    );
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    const second = http.get(
+      semanticScholarSource,
+      "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=second",
+    );
+    await Promise.resolve();
+    expect(fetch).toHaveBeenCalledTimes(1);
+
+    finishFirstBody?.();
+
+    expect((await first).body).toBe("first");
+    expect((await second).body).toBe("second");
+    expect(starts).toEqual([0, 1_000]);
+  });
+
+  it("starts the network timeout after queued provider admission", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi.fn(async () => new Response("admitted"));
+      const admission = createProviderRequestAdmission(new Map([
+        ["semantic-scholar", {
+          maxConcurrency: 1,
+          minimumStartIntervalMs: 0,
+        }],
+      ]));
+      const http = new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        timeoutMs: 10,
+        requestAdmission: admission,
+      });
+
+      const held = await admission.acquire("semantic-scholar");
+      const request = http.get(
+        semanticScholarSource,
+        "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=queued",
+      );
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetch).not.toHaveBeenCalled();
+      held.release();
+
+      expect((await request).body).toBe("admitted");
+      expect(fetch).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it.each([
     "http://public.example.org/feed",
     "https://reader:secret@public.example.org/feed",
@@ -1327,6 +2076,102 @@ describe("SourceHttpClient", () => {
     });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch.mock.calls[0]?.[1]?.redirect).toBe("manual");
+  });
+
+  it("cancels an unsafe redirect body without overriding policy failure", async () => {
+    const privateDetail = "private unsafe redirect cancellation detail";
+    const cancel = vi.fn(async () => {
+      throw new Error(privateDetail);
+    });
+    const fetch = vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({ cancel }),
+      {
+        status: 302,
+        headers: { location: "https://169.254.169.254/latest/meta-data" },
+      },
+    ));
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    let observed: unknown;
+
+    try {
+      await new SourceHttpClient({
+        fetch,
+        sleep,
+        maxRetries: 2,
+      }).get(arxivSource, "https://example.org/start");
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toMatchObject({
+      name: "SourceFetchError",
+      sourceId: "arxiv",
+      status: null,
+      retryable: false,
+      failureKind: "policy",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
+    expect(String(observed)).not.toContain(privateDetail);
+    expect(JSON.stringify(observed)).not.toContain(privateDetail);
+  });
+
+  it("bounds unsafe redirect cancellation before releasing admission", async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn(() => new Promise<void>(() => undefined));
+      const fetch = vi.fn(async () =>
+        fetch.mock.calls.length === 1
+          ? new Response(new ReadableStream<Uint8Array>({ cancel }), {
+            status: 302,
+            headers: {
+              location: "https://169.254.169.254/latest/meta-data",
+            },
+          })
+          : new Response("second")
+      );
+      const http = new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        timeoutMs: 10,
+        requestAdmission: createProviderRequestAdmission(new Map([
+          ["semantic-scholar", {
+            maxConcurrency: 1,
+            minimumStartIntervalMs: 0,
+          }],
+        ])),
+      });
+      let firstFailure: unknown;
+      const first = http.get(
+        semanticScholarSource,
+        "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=first",
+      ).catch((error: unknown) => {
+        firstFailure = error;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const second = http.get(
+        semanticScholarSource,
+        "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=second",
+      );
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(10);
+
+      await first;
+      expect(firstFailure).toMatchObject({
+        name: "SourceFetchError",
+        status: null,
+        retryable: false,
+        failureKind: "policy",
+      });
+      expect((await second).body).toBe("second");
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(cancel).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not forward caller-supplied credentials across origins", async () => {
@@ -1386,7 +2231,7 @@ describe("SourceHttpClient", () => {
 
   it("honors a request-local zero-retry limit", async () => {
     const fetch = vi.fn(async () => new Response(null, { status: 429 }));
-    const sleep = vi.fn(async () => undefined);
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
     await expect(new SourceHttpClient({ fetch, sleep, maxRetries: 2 }).get(
       openAlexSource,
       "https://api.openalex.org/works",
@@ -1459,6 +2304,351 @@ describe("SourceHttpClient", () => {
     expect(sleep).toHaveBeenCalledWith(2_000);
   });
 
+  it("uses bounded fallback retries for transient fetch failures", async () => {
+    const privateFailure = new Error("private fetch transport detail");
+    const fetch = vi.fn()
+      .mockRejectedValueOnce(privateFailure)
+      .mockRejectedValueOnce(privateFailure)
+      .mockResolvedValueOnce(new Response("ok"));
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    const http = new SourceHttpClient({ fetch, sleep, maxRetries: 2 });
+
+    const response = await http.get(
+      arxivSource,
+      "https://export.arxiv.org/api/query",
+    );
+
+    expect(response.body).toBe("ok");
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(sleep.mock.calls.map(([milliseconds]) => milliseconds)).toEqual([
+      500,
+      1_000,
+    ]);
+  });
+
+  it("retries a transient body read failure without retaining partial state", async () => {
+    const baseTime = Date.parse("2026-07-29T08:30:00.000Z");
+    const clock = logicalSchedulerRuntime();
+    const starts: number[] = [];
+    const failingBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error(new Error("private body transport detail"));
+      },
+    });
+    const fetch = vi.fn(async () => {
+      starts.push(clock.now());
+      return starts.length === 1
+        ? new Response(failingBody, { headers: { etag: '"partial"' } })
+        : new Response("ok", { headers: { etag: '"complete"' } });
+    });
+    const http = new SourceHttpClient({
+      fetch,
+      sleep: clock.sleep,
+      now: () => new Date(baseTime + clock.now()),
+      maxRetries: 1,
+      requestAdmission: createProviderRequestAdmission(new Map([
+        ["semantic-scholar", {
+          maxConcurrency: 1,
+          minimumStartIntervalMs: 1_000,
+        }],
+      ]), clock),
+    });
+
+    const response = await http.get(
+      semanticScholarSource,
+      "https://api.semanticscholar.org/graph/v1/paper/search/bulk",
+    );
+
+    expect(response.body).toBe("ok");
+    expect(response.etag).toBe('"complete"');
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(starts).toEqual([0, 1_000]);
+    expect(clock.sleep.mock.calls.map(([milliseconds]) => milliseconds))
+      .toEqual([500, 500]);
+  });
+
+  it("bounds and sanitizes response cancellation failures on retryable statuses", async () => {
+    const privateDetail = "private response cancellation detail";
+    const cancel = vi.fn(async () => {
+      throw new Error(privateDetail);
+    });
+    const fetch = vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({ cancel }),
+      { status: 503 },
+    ));
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    let observed: unknown;
+
+    try {
+      await new SourceHttpClient({
+        fetch,
+        sleep,
+        maxRetries: 1,
+      }).get(arxivSource, "https://export.arxiv.org/api/query");
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toMatchObject({
+      name: "SourceFetchError",
+      sourceId: "arxiv",
+      status: 503,
+      retryable: true,
+      failureKind: "transport",
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(500);
+    expect(String(observed)).not.toContain(privateDetail);
+    expect(JSON.stringify(observed)).not.toContain(privateDetail);
+  });
+
+  it("retries a failed 304 body cancellation within the request cap", async () => {
+    const cancel = vi.fn(async () => {
+      throw new Error("private not-modified cancellation detail");
+    });
+    const notModified = new Response(null, { status: 304 });
+    Object.defineProperty(notModified, "body", {
+      configurable: true,
+      value: { cancel },
+    });
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(notModified)
+      .mockResolvedValueOnce(new Response("ok"));
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+
+    const response = await new SourceHttpClient({
+      fetch,
+      sleep,
+      maxRetries: 1,
+    }).get(arxivSource, "https://export.arxiv.org/api/query");
+
+    expect(response.body).toBe("ok");
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(sleep).toHaveBeenCalledWith(500);
+  });
+
+  it("does not let cancellation failures make authentication retryable", async () => {
+    const privateDetail = "private authentication cancellation detail";
+    const cancel = vi.fn(async () => {
+      throw new Error(privateDetail);
+    });
+    const fetch = vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({ cancel }),
+      { status: 401 },
+    ));
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    let observed: unknown;
+
+    try {
+      await new SourceHttpClient({
+        fetch,
+        sleep,
+        maxRetries: 2,
+      }).get(arxivSource, "https://export.arxiv.org/api/query");
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toMatchObject({
+      name: "SourceFetchError",
+      status: 401,
+      retryable: false,
+      failureKind: "transport",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
+    expect(String(observed)).not.toContain(privateDetail);
+    expect(JSON.stringify(observed)).not.toContain(privateDetail);
+  });
+
+  it("bounds response cancellation and releases queued provider admission", async () => {
+    vi.useFakeTimers();
+    try {
+      const cancel = vi.fn(() => new Promise<void>(() => undefined));
+      const fetch = vi.fn(async () =>
+        fetch.mock.calls.length === 1
+          ? new Response(new ReadableStream<Uint8Array>({ cancel }), {
+            status: 503,
+          })
+          : new Response("second")
+      );
+      const http = new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        timeoutMs: 10,
+        requestAdmission: createProviderRequestAdmission(new Map([
+          ["semantic-scholar", {
+            maxConcurrency: 1,
+            minimumStartIntervalMs: 0,
+          }],
+        ])),
+      });
+      let firstFailure: unknown;
+      const first = http.get(
+        semanticScholarSource,
+        "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=first",
+      ).catch((error: unknown) => {
+        firstFailure = error;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      const second = http.get(
+        semanticScholarSource,
+        "https://api.semanticscholar.org/graph/v1/paper/search/bulk?request=second",
+      );
+
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(fetch).toHaveBeenCalledTimes(2);
+      await first;
+      expect(firstFailure).toMatchObject({
+        name: "SourceFetchError",
+        status: 503,
+        retryable: true,
+      });
+      expect((await second).body).toBe("second");
+      expect(cancel).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([429, 502, 503, 504])(
+    "retries only the approved transient HTTP status %i",
+    async (status) => {
+      const fetch = vi.fn()
+        .mockResolvedValueOnce(new Response(null, { status }))
+        .mockResolvedValueOnce(new Response("ok"));
+      const sleep = vi.fn(async (_milliseconds: number) => undefined);
+
+      const response = await new SourceHttpClient({
+        fetch,
+        sleep,
+        maxRetries: 1,
+      }).get(arxivSource, "https://export.arxiv.org/api/query");
+
+      expect(response.body).toBe("ok");
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(sleep).toHaveBeenCalledOnce();
+    },
+  );
+
+  it.each([400, 401, 403, 404, 501])(
+    "does not retry non-transient HTTP status %i",
+    async (status) => {
+      const fetch = vi.fn(async () => new Response(null, { status }));
+      const sleep = vi.fn(async (_milliseconds: number) => undefined);
+
+      await expect(new SourceHttpClient({
+        fetch,
+        sleep,
+        maxRetries: 2,
+      }).get(
+        arxivSource,
+        "https://export.arxiv.org/api/query",
+      )).rejects.toMatchObject({ status, retryable: false });
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(sleep).not.toHaveBeenCalled();
+    },
+  );
+
+  it("caps Retry-After and fallback delays at their existing bounds", async () => {
+    const retryAfterFetch = vi.fn()
+      .mockResolvedValueOnce(new Response(null, {
+        status: 429,
+        headers: { "retry-after": "999" },
+      }))
+      .mockResolvedValueOnce(new Response("ok"));
+    const retryAfterSleep = vi.fn(async (_milliseconds: number) => undefined);
+    await new SourceHttpClient({
+      fetch: retryAfterFetch,
+      sleep: retryAfterSleep,
+      maxRetries: 1,
+    }).get(arxivSource, "https://export.arxiv.org/api/query");
+    expect(retryAfterSleep).toHaveBeenCalledWith(60_000);
+
+    const fallbackFetch = vi.fn(async () => new Response(null, {
+      status: 503,
+    }));
+    const fallbackSleep = vi.fn(async (_milliseconds: number) => undefined);
+    await expect(new SourceHttpClient({
+      fetch: fallbackFetch,
+      sleep: fallbackSleep,
+      maxRetries: 5,
+    }).get(
+      arxivSource,
+      "https://export.arxiv.org/api/query",
+    )).rejects.toMatchObject({ status: 503, retryable: true });
+    expect(fallbackSleep.mock.calls.map(([milliseconds]) => milliseconds))
+      .toEqual([500, 1_000, 2_000, 4_000, 8_000]);
+  });
+
+  it("honors zero retries for transient fetch and body failures", async () => {
+    const fetchFailure = vi.fn(async () => {
+      throw new Error("private fetch detail");
+    });
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    await expect(new SourceHttpClient({
+      fetch: fetchFailure,
+      sleep,
+      maxRetries: 0,
+    }).get(
+      arxivSource,
+      "https://export.arxiv.org/api/query",
+    )).rejects.toMatchObject({ retryable: true, failureKind: "transport" });
+
+    const bodyFailure = vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.error(new Error("private body detail"));
+        },
+      }),
+    ));
+    await expect(new SourceHttpClient({
+      fetch: bodyFailure,
+      sleep,
+      maxRetries: 0,
+    }).get(
+      arxivSource,
+      "https://export.arxiv.org/api/query",
+    )).rejects.toMatchObject({ retryable: true, failureKind: "transport" });
+
+    expect(fetchFailure).toHaveBeenCalledOnce();
+    expect(bodyFailure).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
+  it("sanitizes a transient fetch failure after exhausting its retry cap", async () => {
+    const privateDetail = "private fetch transport and https://secret.example";
+    const fetch = vi.fn(async () => {
+      throw new Error(privateDetail);
+    });
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    let observed: unknown;
+    try {
+      await new SourceHttpClient({
+        fetch,
+        sleep,
+        maxRetries: 1,
+      }).get(arxivSource, "https://export.arxiv.org/api/query");
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toMatchObject({
+      name: "SourceFetchError",
+      retryable: true,
+      failureKind: "transport",
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(sleep).toHaveBeenCalledWith(500);
+    expect(String(observed)).not.toContain(privateDetail);
+    expect(JSON.stringify(observed)).not.toContain(privateDetail);
+  });
+
   it("rejects oversized responses before retaining their body", async () => {
     const fetch = vi.fn(async () =>
       new Response("not read", {
@@ -1479,6 +2669,47 @@ describe("SourceHttpClient", () => {
     });
   });
 
+  it("keeps an oversized response nonretryable when reader cancellation fails", async () => {
+    const privateDetail = "private oversized cancellation detail";
+    const cancel = vi.fn(async () => {
+      throw new Error(privateDetail);
+    });
+    const fetch = vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3, 4]));
+        },
+        cancel,
+      }),
+    ));
+    const sleep = vi.fn(async (_milliseconds: number) => undefined);
+    let observed: unknown;
+
+    try {
+      await new SourceHttpClient({
+        fetch,
+        sleep,
+        maxResponseBytes: 3,
+        maxRetries: 2,
+      }).get(arxivSource, "https://export.arxiv.org/api/query");
+    } catch (error) {
+      observed = error;
+    }
+
+    expect(observed).toMatchObject({
+      name: "SourceFetchError",
+      sourceId: "arxiv",
+      status: 200,
+      retryable: false,
+      failureKind: "transport",
+    });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(sleep).not.toHaveBeenCalled();
+    expect(String(observed)).not.toContain(privateDetail);
+    expect(JSON.stringify(observed)).not.toContain(privateDetail);
+  });
+
   it("aborts a request after the configured 15-second deadline", async () => {
     let capturedSignal: AbortSignal | undefined;
     const fetch = vi.fn(
@@ -1491,7 +2722,7 @@ describe("SourceHttpClient", () => {
         }),
     );
     vi.useFakeTimers();
-    const http = new SourceHttpClient({ fetch });
+    const http = new SourceHttpClient({ fetch, maxRetries: 0 });
     const request = http.get(arxivSource, "https://example.org/hangs");
     const rejection = expect(request).rejects.toMatchObject({
       name: "SourceFetchError",
@@ -1505,6 +2736,97 @@ describe("SourceHttpClient", () => {
     await rejection;
     expect(capturedSignal?.aborted).toBe(true);
     vi.useRealTimers();
+  });
+
+  it("bounds retries for transient request timeouts", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi.fn(
+        (_input: string | URL | Request, init?: RequestInit) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(init.signal?.reason);
+            });
+          }),
+      );
+      const sleep = vi.fn(async (_milliseconds: number) => undefined);
+      const http = new SourceHttpClient({
+        fetch,
+        sleep,
+        timeoutMs: 10,
+        maxRetries: 1,
+      });
+
+      const request = http.get(
+        arxivSource,
+        "https://export.arxiv.org/api/query",
+      );
+      let observed: unknown;
+      const settled = request.catch((error: unknown) => {
+        observed = error;
+      });
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(10);
+
+      await settled;
+      expect(observed).toMatchObject({
+        name: "SourceFetchError",
+        sourceId: "arxiv",
+        status: null,
+        retryable: true,
+        failureKind: "timeout",
+      });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(sleep).toHaveBeenCalledOnce();
+      expect(sleep).toHaveBeenCalledWith(500);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds retries for response bodies that never produce a chunk", async () => {
+    vi.useFakeTimers();
+    try {
+      const fetch = vi.fn(async () => new Response(
+        new ReadableStream<Uint8Array>({
+          pull: () => new Promise<void>(() => undefined),
+        }),
+      ));
+      const sleep = vi.fn(async (_milliseconds: number) => undefined);
+      const http = new SourceHttpClient({
+        fetch,
+        sleep,
+        timeoutMs: 10,
+        maxRetries: 1,
+      });
+      let observed: unknown;
+      const settled = http.get(
+        arxivSource,
+        "https://export.arxiv.org/api/query",
+      ).catch((error: unknown) => {
+        observed = error;
+      });
+
+      await vi.advanceTimersByTimeAsync(10);
+      expect(fetch).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(10);
+
+      await settled;
+      expect(observed).toMatchObject({
+        name: "SourceFetchError",
+        sourceId: "arxiv",
+        status: 200,
+        retryable: true,
+        failureKind: "timeout",
+      });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(sleep).toHaveBeenCalledOnce();
+      expect(sleep).toHaveBeenCalledWith(500);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("sanitizes typed fetch errors and never exposes response bodies", async () => {

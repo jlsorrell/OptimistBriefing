@@ -4,6 +4,10 @@ import { z } from "zod";
 import { SourceHttpClient } from "./http-client";
 import { normalizeArxivIdentifier } from "./identifiers";
 import {
+  boundProviderText,
+  normalizedProviderSignalText,
+} from "./provider-text";
+import {
   assertSafeOutboundUrl,
   type OutboundUrlPolicy,
 } from "./outbound-url";
@@ -13,6 +17,7 @@ import {
 import {
   CollectionWindowSchema,
   MAX_PROVIDER_EVIDENCE_CHARACTERS,
+  MAX_PROVIDER_TITLE_CHARACTERS,
   RawItemSchema,
   ResearchSourceRecordSchema,
   type CollectionBatch,
@@ -151,10 +156,6 @@ function normalizeFeedEntry(
   };
 }
 
-function normalizeWhitespace(value: string): string {
-  return value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-}
-
 export function relatedArxivIds(value: string): string[] {
   const matches = value.matchAll(
     /(?:arxiv:|arxiv\.org\/(?:abs|html|pdf)\/)(\d{4}\.\d{4,5})(?:v\d+)?/gi,
@@ -242,12 +243,19 @@ export class RssAdapter {
                 if (date !== null && Number.isNaN(date.getTime())) return [];
                 const publishedAt = date === null ? null : date.toISOString();
                 const rawDescription = entry.description ?? "";
-                const description = normalizeWhitespace(rawDescription).slice(
-                  0,
-                  MAX_PROVIDER_EVIDENCE_CHARACTERS,
+                const description = boundProviderText(rawDescription, {
+                  stripHtml: true,
+                  maxCharacters: MAX_PROVIDER_EVIDENCE_CHARACTERS,
+                }) ?? "";
+                const title = boundProviderText(entry.title, {
+                  stripHtml: true,
+                  maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+                }) ?? "";
+                const signalTitle = normalizedProviderSignalText(
+                  title,
+                  MAX_PROVIDER_TITLE_CHARACTERS,
                 );
-                const title = normalizeWhitespace(entry.title);
-                if (title.length === 0) return [];
+                if (signalTitle === null) return [];
                 const identifier = entry.identifier ?? originalUrl;
                 const candidate = RawItemSchema.parse({
                   kind: "blog",

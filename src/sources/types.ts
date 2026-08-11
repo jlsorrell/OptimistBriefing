@@ -195,6 +195,7 @@ export const DiscoveryLaneDiagnosticSchema = z
     discovered: z.number().int().nonnegative().max(10_000),
     deduplicated: z.number().int().nonnegative().max(10_000),
     triaged: z.number().int().nonnegative().max(10_000),
+    fallbackTriaged: z.number().int().nonnegative().max(10_000).optional(),
     assessed: z.number().int().nonnegative().max(10_000),
     outcome: z.enum(["success", "fetch", "parse", "policy", "timeout", "unknown"]),
     rejectionCounts: DiscoveryRejectionCountsSchema.default({}),
@@ -214,6 +215,16 @@ export const DiscoveryLaneDiagnosticSchema = z
           path: [field],
         });
       }
+    }
+    if (
+      diagnostic.fallbackTriaged !== undefined &&
+      diagnostic.fallbackTriaged > diagnostic.triaged
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "fallbackTriaged cannot exceed triaged.",
+        path: ["fallbackTriaged"],
+      });
     }
   });
 
@@ -241,6 +252,7 @@ const DISCOVERY_REJECTION_STAGE_OWNERS: Record<
     "unchanged_observation",
     "identity_merged",
     "route_excluded",
+    "quality_rejected",
     "capacity_limited",
   ]),
   prefilter: new Set([

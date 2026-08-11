@@ -58,6 +58,7 @@ export type CollectedCandidate = z.infer<typeof CollectedCandidateSchema>;
 
 export const WorkflowItemPayloadSchema = z.object({
   version: z.literal(1),
+  providerTextNormalizationVersion: z.literal(1).optional(),
   rawResearch: RawResearchCandidateSchema.optional(),
   embedding: z.array(z.number().finite()).min(1).max(4_096).optional(),
   topicalFit: z.number().finite().min(0).max(1).optional(),
@@ -108,12 +109,25 @@ export type PipelineCheckpointExecutor = <T>(
   execute: () => Promise<T>,
 ) => Promise<T>;
 
+export const PROVIDER_TEXT_NORMALIZATION_VERSION = 1 as const;
+export const PROVIDER_TEXT_PREPARATION_VERSION = 1 as const;
+export const PROVIDER_TEXT_COMPOSITION_VERSION = 1 as const;
+export const PROVIDER_TEXT_PRESENTATION_VERSION = 1 as const;
+
 export type CheckpointArtifact<T = unknown> = {
   output: T;
   attempts: number;
   durationMs: number;
   itemCount: number;
   estimatedCostUsd: number;
+  providerTextNormalizationVersion?:
+    typeof PROVIDER_TEXT_NORMALIZATION_VERSION;
+  providerTextPreparationVersion?:
+    typeof PROVIDER_TEXT_PREPARATION_VERSION;
+  providerTextCompositionVersion?:
+    typeof PROVIDER_TEXT_COMPOSITION_VERSION;
+  providerTextPresentationVersion?:
+    typeof PROVIDER_TEXT_PRESENTATION_VERSION;
 };
 
 export type PipelineStore = {

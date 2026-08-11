@@ -4,6 +4,8 @@ import {
 } from "../contracts/editorial";
 import type { ModelProvider } from "../models/provider";
 import { canonicalSummaryRejectionCodes } from "./summary-rejection-code";
+import { normalizeGeneratedSummaryProviderText } from
+  "./summary-provider-text";
 import { buildSummaryRepairGuidance } from "./summary-repair-guidance";
 import {
   serializeSourcePacket,
@@ -238,18 +240,22 @@ export async function summarizeItem(
     sourcePacket,
     maxOutputTokens: options.maxOutputTokens ?? 1_800,
   };
-  const initial = await provider.generateObject(request);
+  const initial = normalizeGeneratedSummaryProviderText(
+    await provider.generateObject(request),
+  );
   const initialValidation = validateSummary(initial, parsedPacket);
   if (initialValidation.ok) {
     return StructuredSummarySchema.parse(initial);
   }
 
-  const repaired = await provider.generateObject({
-    ...request,
-    system: `${GROUNDING_SYSTEM_PROMPT}
+  const repaired = normalizeGeneratedSummaryProviderText(
+    await provider.generateObject({
+      ...request,
+      system: `${GROUNDING_SYSTEM_PROMPT}
 Repair every listed validation error. Do not add unsupported claims.`,
-    sourcePacket: repairPacket(initialValidation.errors, sourcePacket),
-  });
+      sourcePacket: repairPacket(initialValidation.errors, sourcePacket),
+    }),
+  );
   const repairValidation = validateSummary(repaired, parsedPacket);
   if (repairValidation.ok) {
     return StructuredSummarySchema.parse(repaired);

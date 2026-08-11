@@ -227,15 +227,20 @@ export function createPublicationCollectorFromCatalog(options: {
         pageAdapters.push(new PapersWithCodeAdapter(options.http, collectionSource));
         continue;
       }
-      const urlPolicy = CatalogPolicySchema.parse(source.restrictions.urlPolicy) as OutboundUrlPolicy;
+      const feedUrlPolicy = CatalogPolicySchema.parse(
+        source.restrictions.feedUrlPolicy,
+      ) as OutboundUrlPolicy;
+      const articleUrlPolicy = CatalogPolicySchema.parse(
+        source.restrictions.articleUrlPolicy,
+      ) as OutboundUrlPolicy;
       if (source.discoveryMechanism === "rss") {
         const feedUrl = z.string().min(1).parse(source.restrictions.feedUrl);
         rssAdapters.push({
           source,
-          adapter: new RssAdapter(options.http, [{ source: collectionSource, feedUrl, feedUrlPolicy: urlPolicy, articleUrlPolicy: urlPolicy }]),
+          adapter: new RssAdapter(options.http, [{ source: collectionSource, feedUrl, feedUrlPolicy, articleUrlPolicy }]),
         });
       } else if (source.discoveryMechanism === "page") {
-        pageAdapters.push(new PublicationPageAdapter(options.http, collectionSource, z.string().min(1).parse(source.restrictions.pageUrl), urlPolicy, source.restrictions.listing));
+        pageAdapters.push(new PublicationPageAdapter(options.http, collectionSource, z.string().min(1).parse(source.restrictions.pageUrl), feedUrlPolicy, articleUrlPolicy, source.restrictions.listing));
       } else {
         throw new SyntaxError("Unsupported publication discovery mechanism.");
       }

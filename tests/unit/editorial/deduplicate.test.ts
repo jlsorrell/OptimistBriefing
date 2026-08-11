@@ -136,6 +136,20 @@ describe("normalizeCandidate", () => {
 });
 
 describe("deduplicateItems", () => {
+  it("does not false-deduplicate an inert third-layer title entity", () => {
+    const inertEntity = normalized("entity-source", {
+      title: "Agency &amp;amp;#8217; framework",
+      publishedAt: "2026-07-29T12:00:00.000Z",
+    });
+    const plainTitle = normalized("plain-source", {
+      title: "Agency framework",
+      publishedAt: "2026-07-29T12:00:00.000Z",
+    });
+
+    expect(inertEntity.title).toBe("Agency &#8217; framework");
+    expect(deduplicateItems([inertEntity, plainTitle]).items).toHaveLength(2);
+  });
+
   it("merges exact identifiers deterministically and retains provenance", () => {
     const a = normalized("reuters", {
       externalIds: ["DOI:10.1000/shared"],

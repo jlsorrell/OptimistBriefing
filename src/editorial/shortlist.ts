@@ -11,6 +11,7 @@ import {
   type NewsDevelopment,
 } from "./cluster";
 import { NewsScoreSchema, type NewsScore } from "./news-score";
+import { classifyResearchRelevance } from "./research-relevance";
 
 export type SectionBudgets = {
   morningBrief: number;
@@ -51,6 +52,7 @@ export type ShortlistExclusion = {
 
 export type Shortlist = {
   morningBrief: (Item | NewsDevelopment)[];
+  rankedMorningCandidates: (Item | NewsDevelopment)[];
   researchFeatured: Item[];
   researchRadar: Item[];
   world: NewsDevelopment[];
@@ -186,6 +188,30 @@ function diverseResearch(
     selected.set(candidate.item.id, candidate);
   }
   return [...selected.values()].sort(researchScoreOrder);
+}
+
+function featuredResearch(
+  ranked: readonly RankedResearch[],
+  configuredTopics: readonly string[],
+  maximum: number,
+): RankedResearch[] {
+  const core = ranked.filter(
+    ({ item }) => classifyResearchRelevance(item) === "core",
+  );
+  const adjacent = ranked.filter(
+    ({ item }) => classifyResearchRelevance(item) === "adjacent",
+  );
+  const selectedCore = diverseResearch(core, configuredTopics, maximum);
+  const selectedIds = new Set(
+    selectedCore.map(({ item }) => item.id),
+  );
+  const remaining = Math.max(0, maximum - selectedCore.length);
+  const selectedAdjacent = diverseResearch(
+    adjacent.filter(({ item }) => !selectedIds.has(item.id)),
+    configuredTopics,
+    remaining,
+  );
+  return [...selectedCore, ...selectedAdjacent];
 }
 
 type NewsSection =
@@ -356,7 +382,7 @@ export function shortlist(
   const featuredCandidates = research.filter(
     ({ item }) => item.kind === "paper",
   );
-  const featured = diverseResearch(
+  const featured = featuredResearch(
     featuredCandidates,
     preferences.researchTopics,
     budgets.featuredResearch,
@@ -397,7 +423,7 @@ export function shortlist(
     "forecast",
     budgets.forecastSignals,
   );
-  const morningBrief = uniqueMorningBrief(
+  const rankedMorningCandidates = uniqueMorningBrief(
     featured,
     [
       ...world,
@@ -406,10 +432,12 @@ export function shortlist(
       ...local,
       ...forecastSignals,
     ],
-  ).slice(0, budgets.morningBrief);
+  );
+  const morningBrief = rankedMorningCandidates.slice(0, budgets.morningBrief);
 
   return {
     morningBrief,
+    rankedMorningCandidates,
     researchFeatured: featured.map(({ item }) => item),
     researchRadar: radar.map(({ item }) => item),
     world: world.map(({ development }) => development),

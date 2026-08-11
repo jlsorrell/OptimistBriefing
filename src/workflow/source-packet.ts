@@ -1,7 +1,13 @@
 import type { Item } from "../contracts/editorial";
 import type { NewsDevelopment } from "../editorial/cluster";
 import type { SourcePacket } from "../editorial/validate-summary";
+import { InvalidRequiredProviderDisplayTextError } from
+  "../editorial/normalize";
 import { WorkflowItemPayloadSchema } from "./types";
+import {
+  boundProviderSourceName,
+  truncateProviderTextAtCodePointBoundary,
+} from "../sources/provider-text";
 
 type SourceDocument = SourcePacket["sources"][number];
 
@@ -13,6 +19,28 @@ type AttachedCommentaryDocument = {
   accessLevel: SourceDocument["accessLevel"];
   excerpt: string;
 };
+
+const UNSAFE_PACKET_TEXT = /[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u;
+
+function sanitizedPacketText(value: string | undefined, maximum: number): string {
+  if (value === undefined) return "";
+  const scalarSafe = truncateProviderTextAtCodePointBoundary(value, 100_000);
+  if (UNSAFE_PACKET_TEXT.test(scalarSafe)) return "";
+  const normalized = scalarSafe.replace(/\s+/gu, " ").trim();
+  return truncateProviderTextAtCodePointBoundary(normalized, maximum);
+}
+
+function firstPacketText(...values: readonly string[]): string {
+  return values.find((value) => value.length > 0) ?? "";
+}
+
+function packetSourceName(value: string): string {
+  const prepared = boundProviderSourceName(value);
+  if (prepared === null) {
+    throw new InvalidRequiredProviderDisplayTextError("sourceName");
+  }
+  return prepared;
+}
 
 function stringSet(value: unknown): ReadonlySet<string> {
   return new Set(
@@ -62,23 +90,36 @@ function sourceDocumentForItem(item: Item): SourcePacket {
   for (const source of item.sourceRefs) {
     if (sources.has(source.id)) continue;
     const commentary = attachedCommentary.get(source.id);
+    const commentaryExcerpt = sanitizedPacketText(
+      commentary?.excerpt,
+      4_000,
+    );
+    const itemExcerpt = sanitizedPacketText(item.normalizedText, 4_000);
+    const titleExcerpt = sanitizedPacketText(item.title, 4_000);
+    const itemTitle = sanitizedPacketText(item.title, 500);
     sources.set(source.id, {
       sourceId: source.id,
-      sourceName: source.name,
+      sourceName: packetSourceName(source.name),
       evidenceKind: researchItem
         ? primaryResearchSourceIds.has(source.id)
           ? "primary-research"
           : "commentary"
         : "news-evidence",
       role: source.role,
-      title: commentary?.title ?? item.title,
+      title: firstPacketText(
+        sanitizedPacketText(commentary?.title, 500),
+        itemTitle,
+      ),
       url: commentary?.url ?? source.url,
       retrievedAt: commentary?.retrievedAt ?? source.retrievedAt,
       accessLevel: commentary?.accessLevel ?? item.accessLevel,
       excerpts: [{
         number: 1,
-        text: commentary?.excerpt.slice(0, 4_000) ||
-          item.normalizedText.slice(0, 4_000) || item.title,
+        text: firstPacketText(
+          commentaryExcerpt,
+          itemExcerpt,
+          titleExcerpt,
+        ),
       }],
     });
   }
@@ -101,15 +142,17 @@ function sourceDocumentsForDevelopment(
       if ((current?.excerpts.length ?? 0) >= 4) continue;
       const excerpt = {
         number: (current?.excerpts.length ?? 0) + 1,
-        text: developmentItem.normalizedText.slice(0, 4_000) ||
-          developmentItem.title,
+        text: firstPacketText(
+          sanitizedPacketText(developmentItem.normalizedText, 4_000),
+          sanitizedPacketText(developmentItem.title, 4_000),
+        ),
       };
       grouped.set(source.id, {
         sourceId: source.id,
-        sourceName: source.name,
+        sourceName: packetSourceName(source.name),
         evidenceKind: "news-evidence",
         role: source.role,
-        title: developmentItem.title,
+        title: sanitizedPacketText(developmentItem.title, 500),
         url: source.url,
         retrievedAt: source.retrievedAt,
         accessLevel: developmentItem.accessLevel,

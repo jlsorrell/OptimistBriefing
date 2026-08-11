@@ -143,6 +143,46 @@ describe("consolidateResearchCandidates", () => {
       .toHaveLength(2);
   });
 
+  it("does not false-merge an inert third-layer title entity", () => {
+    const inertEntity = normalized("entity-source", {
+      title: "Interpretability &amp;amp;#8217; boundary",
+      authors: ["Ada Example"],
+      originalUrl: "https://entity.example.org/work",
+    });
+    const plainTitle = normalized("plain-source", {
+      title: "Interpretability boundary",
+      authors: ["Ada Example"],
+      originalUrl: "https://plain.example.org/work",
+    });
+
+    expect(inertEntity.title).toBe("Interpretability &#8217; boundary");
+    expect(consolidateResearchCandidates([inertEntity, plainTitle]).papers)
+      .toHaveLength(2);
+  });
+
+  it("does not re-decode prepared authors when a derived key is absent", () => {
+    const withoutDerivedAuthors = (item: Item): Item => {
+      const { normalizedAuthors: _stale, ...metadata } = item.metadata;
+      return { ...item, metadata };
+    };
+    const inertEntity = withoutDerivedAuthors(normalized("entity-author", {
+      title: "Interpretability boundary",
+      authors: ["Ada &amp;amp;#8217; Example"],
+      originalUrl: "https://entity-author.example.org/work",
+    }));
+    const plainAuthor = withoutDerivedAuthors(normalized("plain-author", {
+      title: "Interpretability boundary",
+      authors: ["Ada Example"],
+      originalUrl: "https://plain-author.example.org/work",
+    }));
+
+    expect(inertEntity.metadata.authors).toEqual([
+      "Ada &#8217; Example",
+    ]);
+    expect(consolidateResearchCandidates([inertEntity, plainAuthor]).papers)
+      .toHaveLength(2);
+  });
+
   it("preserves contributing discovery lanes through cross-source identity merges", () => {
     const arxiv = normalized("arxiv", {
       externalIds: ["arXiv:2608.00001"],

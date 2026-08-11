@@ -12,7 +12,10 @@ import {
   editorialSignalKey,
   editorialSignals,
 } from "./editorial-signals";
-import { normalizeAuthorKey, normalizeTitleKey } from "./normalize";
+import {
+  normalizePreparedAuthorKey,
+  normalizePreparedTitleKey,
+} from "./normalize";
 
 export type DeduplicationReason =
   | "external_identifier"
@@ -74,7 +77,7 @@ function intersects(
 
 function words(title: string): ReadonlySet<string> {
   return new Set(
-    normalizeTitleKey(title)
+    normalizePreparedTitleKey(title)
       .split(" ")
       .filter((word) => word.length > 0),
   );
@@ -115,7 +118,7 @@ function normalizedAuthors(item: Item): ReadonlySet<string> {
   const stored = stringArray(item.metadata.normalizedAuthors);
   const authors = stored.length > 0
     ? stored
-    : stringArray(item.metadata.authors).map(normalizeAuthorKey);
+    : stringArray(item.metadata.authors).map(normalizePreparedAuthorKey);
   return new Set(authors.filter((author) => author.length > 0));
 }
 
@@ -144,7 +147,8 @@ function duplicateReason(
     compatibleNearDuplicateKinds(left, right) &&
     compatiblePublicationWindow(left, right) &&
     (left.kind === "paper" && right.kind === "paper"
-      ? normalizeTitleKey(left.title) === normalizeTitleKey(right.title) &&
+      ? normalizePreparedTitleKey(left.title) ===
+          normalizePreparedTitleKey(right.title) &&
         hasAuthorOverlap(left, right)
       : titleSimilarity(left.title, right.title) >= 0.82)
   ) {

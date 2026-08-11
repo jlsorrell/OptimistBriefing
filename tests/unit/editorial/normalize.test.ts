@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeCandidate } from "../../../src/editorial/normalize";
+import {
+  InvalidRequiredProviderDisplayTextError,
+  normalizeCandidate,
+} from "../../../src/editorial/normalize";
 import type { RawResearchCandidate } from "../../../src/sources/types";
 
 function candidate(
@@ -33,6 +36,245 @@ function candidate(
 }
 
 describe("research normalization", () => {
+  it.each(["title", "sourceName"] as const)(
+    "identifies an empty required provider %s",
+    (field) => {
+      let observed: unknown;
+      try {
+        normalizeCandidate(candidate({ [field]: "&#32;" }));
+      } catch (error) {
+        observed = error;
+      }
+
+      expect(observed).toBeInstanceOf(
+        InvalidRequiredProviderDisplayTextError,
+      );
+      expect(
+        (observed as InvalidRequiredProviderDisplayTextError).field,
+      ).toBe(field);
+    },
+  );
+
+  it.each(["title", "sourceName"] as const)(
+    "rejects encoded tag-only required provider %s text",
+    (field) => {
+      let observed: unknown;
+      try {
+        normalizeCandidate(candidate({ [field]: "&lt;br&gt;" }));
+      } catch (error) {
+        observed = error;
+      }
+
+      expect(observed).toBeInstanceOf(
+        InvalidRequiredProviderDisplayTextError,
+      );
+      expect(
+        (observed as InvalidRequiredProviderDisplayTextError).field,
+      ).toBe(field);
+    },
+  );
+
+  it.each(["title", "sourceName"] as const)(
+    "rejects compatibility-created tag-only required provider %s text",
+    (field) => {
+      let observed: unknown;
+      try {
+        normalizeCandidate(candidate({
+          [field]: "&#65308;br&#65310;",
+        }));
+      } catch (error) {
+        observed = error;
+      }
+
+      expect(observed).toBeInstanceOf(
+        InvalidRequiredProviderDisplayTextError,
+      );
+      expect(
+        (observed as InvalidRequiredProviderDisplayTextError).field,
+      ).toBe(field);
+    },
+  );
+
+  it("decodes fullwidth ampersand entity syntax within the two-pass budget", () => {
+    const normalized = normalizeCandidate(candidate({
+      title: "Compatibility ＆#8217; title",
+      sourceName: "Compatibility ＆amp;#8217; source",
+      abstract: "Compatibility ＆#8217; evidence",
+    }));
+
+    expect(normalized.title).toBe("Compatibility ’ title");
+    expect(normalized.sourceRefs[0]?.name).toBe("Compatibility ’ source");
+    expect(normalized.normalizedText).toBe("Compatibility ’ evidence");
+  });
+
+  it("bounds normalized source display names to the packet-safe 200-character contract", () => {
+    // Removing the operational source-name bound must make a normalized Item
+    // incompatible with SourcePacketSchema later in the production pipeline.
+    const originalUrl =
+      "https://example.com/source-name-bound?cursor=a%26amp%3Bb";
+
+    const normalized = normalizeCandidate(candidate({
+      sourceName: "N".repeat(500),
+      originalUrl,
+    }));
+
+    expect(normalized.sourceRefs[0]?.name).toBe("N".repeat(200));
+    expect(normalized.sourceRefs[0]).toMatchObject({
+      id: "arxiv",
+      url: originalUrl,
+      role: "primary",
+      retrievedAt: "2026-08-02T09:00:00.000Z",
+    });
+  });
+
+  it.each(["\u0000", "\u0085", "\u2028"])(
+    "rejects a source display name containing packet-unsafe %s data with the typed candidate error",
+    (unsafe) => {
+      let observed: unknown;
+      try {
+        normalizeCandidate(candidate({
+          sourceName: `Unsafe${unsafe}Source`,
+        }));
+      } catch (error) {
+        observed = error;
+      }
+
+      expect(observed).toBeInstanceOf(
+        InvalidRequiredProviderDisplayTextError,
+      );
+      expect(
+        (observed as InvalidRequiredProviderDisplayTextError).field,
+      ).toBe("sourceName");
+    },
+  );
+
+  it("decodes and strips encoded wrappers from provider display and evidence", () => {
+    const originalUrl =
+      "https://custom.example/research?label=%26lt%3Bbr%26gt%3B";
+    const normalized = normalizeCandidate(candidate({
+      kind: "blog",
+      sourceId: "custom-＆#8217;",
+      title:
+        "&#65308;script&#65310;Useful title&#65308;/script&#65310;",
+      sourceName: "&#65308;em&#65310;Useful source&#65308;/em&#65310;",
+      originalUrl,
+      externalId: "custom:useful-title",
+      externalIds: ["custom:useful-title"],
+      authors: [
+        "&#65308;strong&#65310;Useful author&#65308;/strong&#65310;",
+      ],
+      abstract: "&#65308;p&#65310;Useful evidence&#65308;/p&#65310;",
+      metadata: {
+        discoveryFamily: "custom",
+        venue: "&#65308;em&#65310;Useful venue&#65308;/em&#65310;",
+        structuralId: "structural-＆#8217;",
+      },
+    }));
+
+    expect(normalized.title).toBe("Useful title");
+    expect(normalized.sourceRefs[0]?.name).toBe("Useful source");
+    expect(normalized.sourceRefs[0]?.id).toBe("custom-＆#8217;");
+    expect(normalized.normalizedText).toBe("Useful evidence");
+    expect(normalized.metadata.authors).toEqual(["Useful author"]);
+    expect(normalized.metadata.venue).toBe("Useful venue");
+    expect(normalized.metadata.structuralId).toBe("structural-＆#8217;");
+    expect(normalized.canonicalUrl).toBe(originalUrl);
+    expect(JSON.stringify(normalized)).not.toMatch(
+      /<(?:script|em|strong|p)>/i,
+    );
+  });
+
+  it("decodes provider entities before normalized items are persisted", () => {
+    const normalized = normalizeCandidate(candidate({
+      title: "Inspector finds &#8216;systemic breakdown&#8217;",
+      abstract: "It&amp;#8217;s documented in yesterday&#8217;s report.",
+    }));
+
+    expect(normalized.title).toBe("Inspector finds ‘systemic breakdown’");
+    expect(normalized.normalizedText).toContain(
+      "It’s documented in yesterday’s report.",
+    );
+    expect(JSON.stringify(normalized)).not.toMatch(
+      /&#(?:x[0-9a-f]+|[0-9]+);/i,
+    );
+  });
+
+  it("keeps a third-layer entity inert in the prepared title key", () => {
+    const normalized = normalizeCandidate(candidate({
+      title: "Interpretability &amp;amp;#8217; boundary",
+    }));
+
+    expect(normalized.title).toBe("Interpretability &#8217; boundary");
+    expect(normalized.metadata.normalizedTitle).toBe(
+      "interpretability 8217 boundary",
+    );
+  });
+
+  it("keeps entity-like primary document URLs structural before canonicalization", () => {
+    const normalized = normalizeCandidate(candidate({
+      metadata: {
+        discoveryFamily: "arxiv",
+        primaryDocumentUrls: [
+          "https://agency.example/reports?label=encoded&amp;next=keep",
+        ],
+      },
+    }));
+
+    expect(normalized.metadata.primaryDocumentUrls).toEqual([
+      "https://agency.example/reports?amp%3Bnext=keep&label=encoded",
+    ]);
+  });
+
+  it("does not decode structural section metadata into a classification", () => {
+    const normalized = normalizeCandidate(candidate({
+      metadata: {
+        discoveryFamily: "arxiv",
+        primarySection: "&#114;esearch",
+      },
+    }));
+
+    expect(normalized.primaryTopic).toBe("general");
+    expect(normalized.tags).not.toContain("research");
+    expect(normalized.metadata.primarySection).toBe("&#114;esearch");
+  });
+
+  it("uses decoded provider abstracts to map research topics", () => {
+    const normalized = normalizeCandidate(candidate({
+      abstract: "The report studies &#115;ecure computation.",
+    }));
+
+    expect(normalized.metadata.configuredTopics).toContain(
+      "secure-computation-ml",
+    );
+  });
+
+  it("decodes provider topic arrays before mapping and persistence", () => {
+    const normalized = normalizeCandidate(candidate({
+      topics: ["&#115;ecure computation"],
+    }));
+
+    expect(normalized.metadata.providerTopics).toEqual([
+      "secure computation",
+    ]);
+    expect(normalized.metadata.configuredTopics).toContain(
+      "secure-computation-ml",
+    );
+  });
+
+  it("fails closed for selected blank evidence while falling back for absent evidence", () => {
+    const blankAbstract = normalizeCandidate(candidate({
+      abstract: "   ",
+      content: null,
+    }));
+    const absentEvidence = normalizeCandidate(candidate({
+      abstract: null,
+      content: null,
+    }));
+
+    expect(blankAbstract.normalizedText).toBe("");
+    expect(absentEvidence.normalizedText).toBe("A normalized paper");
+  });
+
   it("stores conservative author keys and primary research source IDs", () => {
     const paper = normalizeCandidate(candidate());
     const commentary = normalizeCandidate(candidate({
@@ -56,5 +298,137 @@ describe("research normalization", () => {
     expect(commentary.metadata.relatedPaperIds).toEqual([
       "arXiv:2608.00001",
     ]);
+  });
+
+  it("restores an OpenAlex-only checkpoint candidate to the arXiv durable item identity", () => {
+    const arxiv = normalizeCandidate(candidate({
+      sourceId: "arxiv",
+      sourceName: "arXiv",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "arXiv:2608.03626",
+      externalIds: ["arXiv:2608.03626"],
+    }));
+    const openAlex = normalizeCandidate(candidate({
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      sourceRole: "analysis",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "OpenAlex:W7197052950",
+      externalIds: ["OpenAlex:W7197052950"],
+      metadata: { discoveryFamily: "bibliographic" },
+    }));
+
+    expect(openAlex.id).toBe(arxiv.id);
+    expect(openAlex.metadata.externalIds).toEqual([
+      "arXiv:2608.03626",
+      "OpenAlex:W7197052950",
+    ].sort((left, right) => left.localeCompare(right)));
+    expect(openAlex.canonicalUrl).toBe("https://arxiv.org/abs/2608.03626");
+
+    const unrelated = normalizeCandidate(candidate({
+      sourceId: "custom-provider",
+      sourceName: "Custom Provider",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "custom:W7197052950",
+      externalIds: ["custom:W7197052950"],
+    }));
+
+    expect(unrelated.id).not.toBe(arxiv.id);
+    expect(unrelated.metadata.externalIds).toEqual(["custom:W7197052950"]);
+  });
+
+  it("keeps an explicit OpenAlex arXiv identity over a conflicting canonical URL", () => {
+    const explicitArxiv = normalizeCandidate(candidate({
+      originalUrl: "https://arxiv.org/abs/2608.99999",
+      externalId: "arXiv:2608.99999",
+      externalIds: ["arXiv:2608.99999"],
+    }));
+    const openAlex = normalizeCandidate(candidate({
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      sourceRole: "analysis",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "OpenAlex:W7197052951",
+      externalIds: ["OpenAlex:W7197052951", "arXiv:2608.99999"],
+      metadata: { discoveryFamily: "bibliographic" },
+    }));
+
+    expect(openAlex.id).toBe(explicitArxiv.id);
+    expect(openAlex.metadata.externalIds).toEqual([
+      "arXiv:2608.99999",
+      "OpenAlex:W7197052951",
+    ].sort((left, right) => left.localeCompare(right)));
+  });
+
+  it("recovers an OpenAlex arXiv URL when the explicit arXiv text is malformed", () => {
+    const arxiv = normalizeCandidate(candidate({
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "arXiv:2608.03626",
+      externalIds: ["arXiv:2608.03626"],
+    }));
+    const openAlex = normalizeCandidate(candidate({
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      sourceRole: "analysis",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "OpenAlex:W7197052953",
+      externalIds: ["OpenAlex:W7197052953", "arXiv:not-valid"],
+      metadata: { discoveryFamily: "bibliographic" },
+    }));
+
+    expect(openAlex.id).toBe(arxiv.id);
+    expect(openAlex.metadata.externalIds).toEqual([
+      "arXiv:2608.03626",
+      "arXiv:not-valid",
+      "OpenAlex:W7197052953",
+    ].sort((left, right) => left.localeCompare(right)));
+  });
+
+  it("keeps the historical arXiv durable identity for dual DOI and arXiv identifiers", () => {
+    const arxiv = normalizeCandidate(candidate({
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "arXiv:2608.03626",
+      externalIds: ["arXiv:2608.03626"],
+    }));
+    const dual = normalizeCandidate(candidate({
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "DOI:10.1000/identity-compatibility",
+      externalIds: [
+        "DOI:10.1000/identity-compatibility",
+        "arXiv:2608.03626",
+      ],
+    }));
+
+    expect(dual.id).toBe(arxiv.id);
+    expect(dual.metadata.externalIds).toEqual([
+      "arXiv:2608.03626",
+      "DOI:10.1000/identity-compatibility",
+    ].sort((left, right) => left.localeCompare(right)));
+  });
+
+  it("does not infer an OpenAlex arXiv identity when a valid DOI is explicit", () => {
+    const doi = normalizeCandidate(candidate({
+      originalUrl: "https://doi.org/10.1000/identity-precedence",
+      externalId: "DOI:10.1000/identity-precedence",
+      externalIds: ["DOI:10.1000/identity-precedence"],
+    }));
+    const openAlex = normalizeCandidate(candidate({
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      sourceRole: "analysis",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "DOI:10.1000/identity-precedence",
+      externalIds: [
+        "DOI:10.1000/identity-precedence",
+        "OpenAlex:W7197052952",
+      ],
+      metadata: { discoveryFamily: "bibliographic" },
+    }));
+
+    expect(openAlex.id).toBe(doi.id);
+    expect(openAlex.metadata.externalIds).toEqual([
+      "DOI:10.1000/identity-precedence",
+      "OpenAlex:W7197052952",
+    ].sort((left, right) => left.localeCompare(right)));
   });
 });

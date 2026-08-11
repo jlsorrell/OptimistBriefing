@@ -3,6 +3,14 @@ import { parseHTML } from "linkedom";
 import { z } from "zod";
 
 import { assertSafeOutboundUrl } from "./outbound-url";
+import {
+  boundProviderText,
+  boundProviderTextDetailed,
+} from "./provider-text";
+import {
+  MAX_PROVIDER_EVIDENCE_CHARACTERS,
+  MAX_PROVIDER_TITLE_CHARACTERS,
+} from "./types";
 
 export const MAX_EXTRACTED_ARTICLE_CHARACTERS = 100_000;
 export const MIN_COMPLETE_ARTICLE_CHARACTERS = 500;
@@ -27,9 +35,11 @@ function metadataOnly(): ExtractedArticle {
   };
 }
 
-function normalized(value: string | null | undefined): string | null {
-  const result = value?.replace(/\s+/g, " ").trim() ?? "";
-  return result.length === 0 ? null : result;
+function normalized(
+  value: string | null | undefined,
+  maximum = MAX_PROVIDER_TITLE_CHARACTERS,
+): string | null {
+  return boundProviderText(value, { maxCharacters: maximum });
 }
 
 function isHtmlContentType(contentType: string | null): boolean {
@@ -54,9 +64,12 @@ export function extractReadableArticle(
   )) {
     element.remove();
   }
-  const fallbackText = normalized(
-    document.querySelector("article, main")?.textContent,
-  );
+  const fallbackSourceText =
+    document.querySelector("article, main")?.textContent;
+  const fallbackNormalization = boundProviderTextDetailed(fallbackSourceText, {
+    maxCharacters: MAX_EXTRACTED_ARTICLE_CHARACTERS,
+  });
+  const fallbackText = fallbackNormalization.value;
   const fallbackTitle = normalized(
     document.querySelector("h1")?.textContent ??
       document.querySelector("title")?.textContent,
@@ -65,26 +78,40 @@ export function extractReadableArticle(
     document
       .querySelector('meta[name="description"]')
       ?.getAttribute("content"),
+    MAX_PROVIDER_EVIDENCE_CHARACTERS,
   );
   const article = new Readability(
     document as unknown as Document,
     { charThreshold: 100 },
   ).parse();
-  const readabilityText = normalized(article?.textContent);
+  const readabilitySourceText = article?.textContent;
+  const readabilityNormalization = boundProviderTextDetailed(
+    readabilitySourceText,
+    { maxCharacters: MAX_EXTRACTED_ARTICLE_CHARACTERS },
+  );
+  const readabilityText = readabilityNormalization.value;
   const fullText = readabilityText ?? fallbackText;
   if (fullText === null) {
     return metadataOnly();
   }
+  const sourceText = readabilityText === null
+    ? fallbackSourceText
+    : readabilitySourceText;
+  const selectedNormalization = readabilityText === null
+    ? fallbackNormalization
+    : readabilityNormalization;
   const wasTruncated =
-    fullText.length > MAX_EXTRACTED_ARTICLE_CHARACTERS;
+    (sourceText?.length ?? 0) > MAX_EXTRACTED_ARTICLE_CHARACTERS ||
+    selectedNormalization.truncated;
 
   return ExtractedArticleSchema.parse({
     title: normalized(article?.title) ?? fallbackTitle,
     byline: normalized(article?.byline),
-    excerpt: normalized(article?.excerpt) ?? fallbackExcerpt,
-    text: wasTruncated
-      ? fullText.slice(0, MAX_EXTRACTED_ARTICLE_CHARACTERS)
-      : fullText,
+    excerpt: normalized(
+      article?.excerpt,
+      MAX_PROVIDER_EVIDENCE_CHARACTERS,
+    ) ?? fallbackExcerpt,
+    text: fullText,
     extractionLevel:
       wasTruncated ||
       readabilityText === null ||

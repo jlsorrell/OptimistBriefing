@@ -11,6 +11,7 @@ import {
 } from "../sources/types";
 import { WorkflowItemPayloadSchema } from "../workflow/types";
 import { canonicalResearchIdentity } from "./research-identity";
+import { classifyResearchRelevance } from "./research-relevance";
 
 export const RESEARCH_DISCOVERY_FAMILIES = [
   "arxiv",
@@ -26,8 +27,16 @@ export type ResearchTriageExclusionReason =
   | "publisher_domain_cap"
   | "queue_capacity";
 
+export type ResearchTriageAdmissionRoute = "normal" | "near_match";
+
+export type ResearchTriageAdmission = {
+  itemId: string;
+  route: ResearchTriageAdmissionRoute;
+};
+
 export type ResearchTriageResult = {
   items: Item[];
+  admissions: ResearchTriageAdmission[];
   exclusions: Array<{
     itemId: string;
     reason: ResearchTriageExclusionReason;
@@ -42,6 +51,8 @@ export type ResearchTriageOptions = {
   configuredTopics: readonly string[];
   now: string;
   minimumTopicalFit?: number;
+  fallbackTarget?: number;
+  fallbackMinimumTopicalFit?: number;
 };
 
 const NonnegativeIntegerSchema = z.number().int().nonnegative().max(1_000);
@@ -322,19 +333,52 @@ export function triageResearch(
   const minimumTopicalFit = TopicalFitSchema.parse(
     options.minimumTopicalFit ?? 0.5,
   );
+  const fallbackTarget = validatedMaximum(
+    options.fallbackTarget ?? 0,
+    "fallbackTarget",
+  );
+  const fallbackMinimumTopicalFit = TopicalFitSchema.parse(
+    options.fallbackMinimumTopicalFit ?? 0.35,
+  );
+  if (
+    fallbackTarget > 0 &&
+    fallbackMinimumTopicalFit >= minimumTopicalFit
+  ) {
+    throw new RangeError(
+      "fallbackMinimumTopicalFit must be below minimumTopicalFit.",
+    );
+  }
   const exclusions: ResearchTriageResult["exclusions"] = [];
-  const qualified = items.map((item) => ItemSchema.parse(item)).filter((item) => {
+  const normal: Item[] = [];
+  const fallback: Item[] = [];
+
+  for (const candidate of items) {
+    const parsed = ItemSchema.safeParse(candidate);
+    if (!parsed.success) continue;
+    const item = parsed.data;
     if (item.normalizedText.trim().length === 0) {
       exclusions.push({ itemId: item.id, reason: "invalid_content" });
-      return false;
+      continue;
     }
     const topicalFit = workflowTopicalFit(item);
-    if (topicalFit === null || topicalFit < minimumTopicalFit) {
-      exclusions.push({ itemId: item.id, reason: "below_topical_fit" });
-      return false;
+    if (topicalFit !== null && topicalFit >= minimumTopicalFit) {
+      normal.push(item);
+      continue;
     }
-    return true;
-  }).sort(compareTriaged);
+    const hasConfiguredTopic = researchTopics(item).some((topic) =>
+      options.configuredTopics.includes(topic)
+    );
+    if (
+      fallbackTarget > 0 &&
+      topicalFit !== null &&
+      topicalFit >= fallbackMinimumTopicalFit &&
+      hasConfiguredTopic
+    ) {
+      fallback.push(item);
+      continue;
+    }
+    exclusions.push({ itemId: item.id, reason: "below_topical_fit" });
+  }
 
   const selected: Item[] = [];
   const selectedIds = new Set<string>();
@@ -355,24 +399,60 @@ export function triageResearch(
     return true;
   };
 
-  for (const topic of options.configuredTopics) {
-    const representative = qualified.find((item) =>
-      !selectedIds.has(item.id) && researchTopics(item).includes(topic) &&
-      canSelect(item)
-    );
-    if (representative !== undefined) select(representative);
-  }
-  for (const family of RESEARCH_DISCOVERY_FAMILIES) {
-    if ((perFamily.get(family) ?? 0) > 0) continue;
-    const representative = qualified.find((item) =>
-      !selectedIds.has(item.id) && discoveryFamily(item) === family &&
-      canSelect(item)
-    );
-    if (representative !== undefined) select(representative);
-  }
-  for (const item of qualified) select(item);
+  const selectDiversified = (
+    candidates: Item[],
+    limit: number,
+    skipCoveredTopics = false,
+  ): void => {
+    for (const topic of options.configuredTopics) {
+      if (
+        skipCoveredTopics &&
+        selected.some((item) => researchTopics(item).includes(topic))
+      ) {
+        continue;
+      }
+      const representative = candidates.find((item) =>
+        !selectedIds.has(item.id) && researchTopics(item).includes(topic) &&
+        canSelect(item)
+      );
+      if (representative !== undefined && selected.length < limit) {
+        select(representative);
+      }
+    }
+    for (const family of RESEARCH_DISCOVERY_FAMILIES) {
+      if ((perFamily.get(family) ?? 0) > 0) continue;
+      const representative = candidates.find((item) =>
+        !selectedIds.has(item.id) && discoveryFamily(item) === family &&
+        canSelect(item)
+      );
+      if (representative !== undefined && selected.length < limit) {
+        select(representative);
+      }
+    }
+    for (const item of candidates) {
+      if (selected.length >= limit) break;
+      select(item);
+    }
+  };
 
-  for (const item of qualified) {
+  selectDiversified(normal.sort(compareTriaged), maximum);
+  const normalCount = selected.length;
+  const fallbackCapacity = Math.max(
+    0,
+    Math.min(fallbackTarget - normalCount, maximum - normalCount),
+  );
+  if (fallbackCapacity > 0) {
+    const core = fallback
+      .filter((item) => classifyResearchRelevance(item) === "core")
+      .sort(compareTriaged);
+    const adjacent = fallback
+      .filter((item) => classifyResearchRelevance(item) === "adjacent")
+      .sort(compareTriaged);
+    selectDiversified(core, selected.length + fallbackCapacity, true);
+    selectDiversified(adjacent, normalCount + fallbackCapacity, true);
+  }
+
+  for (const item of [...normal, ...fallback]) {
     if (selectedIds.has(item.id)) continue;
     const reason: ResearchTriageExclusionReason =
       (perFamily.get(discoveryFamily(item)) ?? 0) >= maximumPerFamily
@@ -384,8 +464,15 @@ export function triageResearch(
     exclusions.push({ itemId: item.id, reason });
   }
 
+  const normalIds = new Set(selected.slice(0, normalCount).map(({ id }) => id));
+  const admissions = selected.map(({ id }) => ({
+    itemId: id,
+    route: normalIds.has(id) ? "normal" as const : "near_match" as const,
+  }));
+
   return {
     items: selected,
+    admissions,
     exclusions: exclusions.sort((left, right) =>
       left.itemId.localeCompare(right.itemId) ||
       left.reason.localeCompare(right.reason)

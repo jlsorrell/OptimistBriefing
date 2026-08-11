@@ -20,9 +20,19 @@ import {
 } from "./types";
 import type { PaperContentRetriever } from "./paper-content";
 import {
+  InvalidRequiredProviderDisplayTextError,
+  markPreparedRawCandidate,
+  prepareRawCandidateForPipeline,
+} from "../editorial/normalize";
+import {
   normalizeArxivIdentifier,
   normalizeDoi,
 } from "./identifiers";
+import {
+  runProviderTasks,
+  type ProviderSchedulePolicy,
+  type ProviderSchedulerRuntime,
+} from "./provider-scheduler";
 
 const PAPER_LANE_LIMIT = 100;
 const DISCOVERY_DIAGNOSTIC_LIMIT = 64;
@@ -31,6 +41,38 @@ const RECOGNIZED_PROVIDER_NAMES = new Set([
   "papers-with-code",
   "semanticscholar",
 ]);
+
+export const RESEARCH_PROVIDER_LANE_POLICIES: Readonly<
+  Record<string, ProviderSchedulePolicy>
+> = Object.freeze({
+  "semantic-scholar": {
+    maxConcurrency: 1,
+    minimumStartIntervalMs: 0,
+  },
+  openalex: {
+    maxConcurrency: 2,
+    minimumStartIntervalMs: 0,
+  },
+});
+
+export const RESEARCH_PROVIDER_REQUEST_POLICIES: ReadonlyMap<
+  string,
+  ProviderSchedulePolicy
+> = new Map([
+  ["semantic-scholar", {
+    maxConcurrency: 1,
+    minimumStartIntervalMs: 1_000,
+  }],
+  ["openalex", {
+    maxConcurrency: 2,
+    minimumStartIntervalMs: 0,
+  }],
+]);
+
+const DEFAULT_PROVIDER_POLICY = Object.freeze({
+  maxConcurrency: 16,
+  minimumStartIntervalMs: 0,
+});
 
 const INSTITUTION_ALIASES = new Map<string, string>([
   ["stanford", "Stanford"],
@@ -300,11 +342,59 @@ function initialResearchCandidate(item: RawItem): RawResearchCandidate {
   });
 }
 
+async function collectDiscoveryLane(
+  adapter: SourceAdapter,
+  window: CollectionWindow,
+): Promise<{
+  batch: CollectionBatch<{ laneId: string; item: RawItem }>;
+  diagnostic: DiscoveryLaneDiagnostic;
+}> {
+  const laneId = adapterLaneId(adapter);
+  const discoveryFamily = adapterDiscoveryFamily(adapter);
+  const batch = await settleCollectionBatch([{
+    sourceId: adapter.sourceId,
+    collect: async () => (await adapter.collect(window))
+      .map((item) => {
+        const parsed = RawItemSchema.parse(item);
+        const itemFamily = DiscoveryFamilySchema.safeParse(
+          parsed.metadata.discoveryFamily,
+        );
+        return {
+          laneId,
+          item: RawItemSchema.parse({
+            ...parsed,
+            metadata: {
+              ...parsed.metadata,
+              discoveryFamily: itemFamily.success
+                ? itemFamily.data
+                : discoveryFamily,
+              discoveryLaneIds: [laneId],
+            },
+          }),
+        };
+      })
+      .sort(compareDiscovered)
+      .slice(0, PAPER_LANE_LIMIT),
+  }]);
+  const diagnostic = DiscoveryLaneDiagnosticSchema.parse({
+    laneId,
+    sourceId: adapter.sourceId,
+    discoveryFamily,
+    discovered: batch.candidates.length,
+    deduplicated: 0,
+    triaged: 0,
+    assessed: 0,
+    outcome: batch.failures[0]?.kind ?? "success",
+  });
+  return { batch, diagnostic };
+}
+
 type ResearchCollectorOptions = {
   discoveryAdapters: readonly SourceAdapter[];
   enrichers: readonly ResearchEnricher[];
   preferredInstitutions: readonly string[];
   preferredLabs?: readonly string[];
+  schedulerRuntime?: ProviderSchedulerRuntime;
   paperContent?: {
     retriever: PaperContentRetriever;
     sources: readonly ResearchSourceInput[];
@@ -329,48 +419,33 @@ export class ResearchCollector {
     const adapters = [...this.options.discoveryAdapters].sort((left, right) =>
       adapterLaneId(left).localeCompare(adapterLaneId(right)),
     );
-    const discoveryOutcomes = await Promise.all(
-      adapters.map(async (adapter) => {
-        const laneId = adapterLaneId(adapter);
-        const discoveryFamily = adapterDiscoveryFamily(adapter);
-        const batch = await settleCollectionBatch([{
-          sourceId: adapter.sourceId,
-          collect: async () => (await adapter.collect(validWindow))
-            .map((item) => {
-              const parsed = RawItemSchema.parse(item);
-              const itemFamily = DiscoveryFamilySchema.safeParse(
-                parsed.metadata.discoveryFamily,
-              );
-              return {
-                laneId,
-                item: RawItemSchema.parse({
-                  ...parsed,
-                  metadata: {
-                    ...parsed.metadata,
-                    discoveryFamily: itemFamily.success
-                      ? itemFamily.data
-                      : discoveryFamily,
-                    discoveryLaneIds: [laneId],
-                  },
-                }),
-              };
-            })
-            .sort(compareDiscovered)
-            .slice(0, PAPER_LANE_LIMIT),
-        }]);
-        const diagnostic = DiscoveryLaneDiagnosticSchema.parse({
-          laneId,
-          sourceId: adapter.sourceId,
-          discoveryFamily,
-          discovered: batch.candidates.length,
-          deduplicated: 0,
-          triaged: 0,
-          assessed: 0,
-          outcome: batch.failures[0]?.kind ?? "success",
-        });
-        return { batch, diagnostic };
-      }),
+    const adaptersByProvider = new Map<string, SourceAdapter[]>();
+    for (const adapter of adapters) {
+      const providerAdapters = adaptersByProvider.get(adapter.sourceId);
+      if (providerAdapters === undefined) {
+        adaptersByProvider.set(adapter.sourceId, [adapter]);
+      } else {
+        providerAdapters.push(adapter);
+      }
+    }
+    const providerOutcomes = await Promise.all(
+      [...adaptersByProvider].map(([sourceId, providerAdapters]) =>
+        runProviderTasks(
+          providerAdapters.map((adapter) =>
+            () => collectDiscoveryLane(adapter, validWindow)
+          ),
+          Object.hasOwn(RESEARCH_PROVIDER_LANE_POLICIES, sourceId)
+            ? RESEARCH_PROVIDER_LANE_POLICIES[sourceId]!
+            : DEFAULT_PROVIDER_POLICY,
+          this.options.schedulerRuntime,
+        )
+      ),
     );
+    const discoveryOutcomes = providerOutcomes
+      .flat()
+      .sort((left, right) =>
+        left.diagnostic.laneId.localeCompare(right.diagnostic.laneId)
+      );
     const discovery = {
       candidates: discoveryOutcomes.flatMap(({ batch }) => batch.candidates),
       succeededSourceIds: unique(
@@ -447,23 +522,55 @@ export class ResearchCollector {
       );
     }
 
-    const candidates = enriched.map((candidate) => {
-      const institutions = unique(
-        candidate.institutions.map(normalizeInstitutionName),
-      );
-      return RawResearchCandidateSchema.parse({
-        ...candidate,
-        institutions,
-        preferredInstitutionMatches: institutions.filter((institution) =>
-          this.preferredInstitutions.has(institution),
-        ),
-      });
+    const qualityRejectedByLane = new Map<string, number>();
+    const candidates = enriched.flatMap((rawCandidate) => {
+      try {
+        const candidate = RawResearchCandidateSchema.parse(
+          prepareRawCandidateForPipeline(rawCandidate),
+        );
+        const institutions = unique(
+          candidate.institutions.map(normalizeInstitutionName),
+        );
+        return [markPreparedRawCandidate(RawResearchCandidateSchema.parse({
+          ...candidate,
+          institutions,
+          preferredInstitutionMatches: institutions.filter((institution) =>
+            this.preferredInstitutions.has(institution),
+          ),
+        }))];
+      } catch (error) {
+        if (error instanceof InvalidRequiredProviderDisplayTextError) {
+          for (const laneId of metadataStringArray(
+            rawCandidate.metadata,
+            "discoveryLaneIds",
+          )) {
+            qualityRejectedByLane.set(
+              laneId,
+              (qualityRejectedByLane.get(laneId) ?? 0) + 1,
+            );
+          }
+          return [];
+        }
+        throw error;
+      }
     });
     return {
       candidates,
       succeededSourceIds: unique(succeededSourceIds),
       failures,
-      discoveryDiagnostics,
+      discoveryDiagnostics: discoveryDiagnostics.map((diagnostic) => {
+        const qualityRejected = qualityRejectedByLane.get(diagnostic.laneId) ??
+          0;
+        return qualityRejected === 0
+          ? diagnostic
+          : DiscoveryLaneDiagnosticSchema.parse({
+              ...diagnostic,
+              rejectionCounts: {
+                ...diagnostic.rejectionCounts,
+                quality_rejected: qualityRejected,
+              },
+            });
+      }),
     };
   }
 }

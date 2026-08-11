@@ -1076,10 +1076,9 @@ describe("durable workflow checkpoint execution", () => {
       item("dmv", "dmv"),
       item("baltimore", "baltimore"),
     ];
-    let localAvailable = false;
+    let researchAvailable = false;
     context.collect = async () => candidates.filter((candidate) =>
-      localAvailable ||
-      !["dmv", "baltimore"].includes(candidate.metadata.section as string)
+      researchAvailable || candidate.metadata.section !== "research"
     );
     context.checkpointExecutor = async (_step, execute) => execute();
 
@@ -1091,7 +1090,7 @@ describe("durable workflow checkpoint execution", () => {
       failureCode: "MINIMUM_COVERAGE_FAILED",
     });
 
-    localAvailable = true;
+    researchAvailable = true;
     await expect(runEditorialPipeline(context)).resolves.toMatchObject({
       status: "published",
     });

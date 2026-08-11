@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { routePublication } from "../../../src/editorial/route-publication";
+import {
+  markPreparedRawCandidate,
+  normalizePreparedCandidate,
+} from "../../../src/editorial/normalize";
 import type { RawPublicationCandidate } from "../../../src/sources/types";
 import { createProductionPipelineContext } from "../../../src/workflow/run-editorial-pipeline";
 import type { PipelineStore } from "../../../src/workflow/types";
@@ -104,6 +108,55 @@ describe("routePublication", () => {
 
     expect(routePublication(ambiguousOfficialLabPost)).toMatchObject({
       metadata: { primarySection: "technology" },
+    });
+  });
+
+  it.each([
+    {
+      label: "AI-policy",
+      title:
+        "&lt;span data-note=\"artificial intelligence regulation\"&gt;Ordinary update",
+      sectionEligibility: ["ai_policy"],
+    },
+    {
+      label: "technology",
+      title: "&lt;span data-note=\"product launch\"&gt;Ordinary update",
+      sectionEligibility: ["technology"],
+    },
+    {
+      label: "research-topic",
+      title: "&lt;span data-note=\"interpretability study\"&gt;Ordinary update",
+      sectionEligibility: ["research", "research_radar"],
+    },
+  ] as const)(
+    "does not route commentary from residual $label attributes",
+    ({ title, sectionEligibility }) => {
+      expect(routePublication(publication({
+        sourceId: "independent-commentary",
+        sourceName: "Independent Commentary",
+        discoveryFamily: "commentary",
+        sectionEligibility: [...sectionEligibility],
+        title,
+      }))).toBeNull();
+    },
+  );
+
+  it("keeps residual attributes out of publication-to-Item routing signals", () => {
+    const title =
+      "&lt;span data-note=\"artificial intelligence regulation\"&gt;Ordinary update";
+    const routed = routePublication(publication({ title }));
+
+    expect(routed).toMatchObject({
+      title,
+      metadata: { primarySection: "technology" },
+    });
+    const item = normalizePreparedCandidate(markPreparedRawCandidate(routed!));
+    expect(item).toMatchObject({
+      title,
+      metadata: {
+        namedEntities: [],
+        primarySection: "technology",
+      },
     });
   });
 

@@ -7,8 +7,11 @@ import { SourceFetchError, SourceHttpClient } from "./http-client";
 import { transientExtractionPermitted } from "./news-collector";
 import { assertSafeOutboundUrl, type OutboundUrlPolicy } from "./outbound-url";
 import { relatedArxivIds } from "./rss";
+import { boundProviderText } from "./provider-text";
 import {
   CollectionWindowSchema,
+  MAX_PROVIDER_EVIDENCE_CHARACTERS,
+  MAX_PROVIDER_TITLE_CHARACTERS,
   RawPublicationCandidateSchema,
   type CollectionWindow,
   type RawPublicationCandidate,
@@ -36,14 +39,22 @@ type ListingItem = {
   summary: string | null;
 };
 
-function text(value: unknown): string | null {
+function text(
+  value: unknown,
+  maxCharacters = MAX_PROVIDER_TITLE_CHARACTERS,
+): string | null {
+  if (typeof value !== "string") return null;
+  return boundProviderText(value, { stripHtml: true, maxCharacters });
+}
+
+function rawText(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const normalized = value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   return normalized.length === 0 ? null : normalized;
 }
 
 function date(value: unknown): string | null {
-  const normalized = text(value);
+  const normalized = rawText(value);
   if (normalized === null) return null;
   const timestamp = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(normalized) ? `${normalized}T00:00:00Z` : normalized);
   return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
@@ -67,11 +78,11 @@ function schemaType(value: unknown): string[] {
 }
 
 function schemaUrl(value: Record<string, unknown>): string | null {
-  const direct = text(value.url);
+  const direct = rawText(value.url);
   if (direct !== null) return direct;
-  if (typeof value.mainEntityOfPage === "string") return text(value.mainEntityOfPage);
+  if (typeof value.mainEntityOfPage === "string") return rawText(value.mainEntityOfPage);
   if (value.mainEntityOfPage !== null && typeof value.mainEntityOfPage === "object") {
-    return text((value.mainEntityOfPage as Record<string, unknown>)["@id"]);
+    return rawText((value.mainEntityOfPage as Record<string, unknown>)["@id"]);
   }
   return null;
 }
@@ -122,18 +133,19 @@ export class PublicationPageAdapter {
     private readonly http: SourceHttpClient,
     private readonly source: ResearchSourceRecord,
     pageUrl: string,
-    private readonly urlPolicy: OutboundUrlPolicy,
+    private readonly pageUrlPolicy: OutboundUrlPolicy,
+    private readonly articleUrlPolicy: OutboundUrlPolicy,
     listing?: unknown,
   ) {
     this.sourceId = source.id;
     this.laneId = `${source.id}:page`;
-    this.pageUrl = assertSafeOutboundUrl(pageUrl, urlPolicy).toString();
+    this.pageUrl = assertSafeOutboundUrl(pageUrl, pageUrlPolicy).toString();
     this.listing = listing === undefined ? null : ListingConfigSchema.parse(listing);
   }
 
   private permittedItem(input: Omit<ListingItem, "url"> & { url: string }, baseUrl: string): ListingItem | null {
     try {
-      return { ...input, url: assertSafeOutboundUrl(new URL(input.url, baseUrl), this.urlPolicy).toString() };
+      return { ...input, url: assertSafeOutboundUrl(new URL(input.url, baseUrl), this.articleUrlPolicy).toString() };
     } catch {
       return null;
     }
@@ -145,7 +157,7 @@ export class PublicationPageAdapter {
     const response = await this.http.get(this.source, this.pageUrl, {
       headers: { accept: "text/html,application/xhtml+xml" },
       useValidators: false,
-      urlPolicy: this.urlPolicy,
+      urlPolicy: this.pageUrlPolicy,
     });
     if (response.body === null) return [];
     const mediaType = response.contentType?.split(";", 1)[0]?.trim().toLowerCase();
@@ -160,7 +172,7 @@ export class PublicationPageAdapter {
         const url = schemaUrl(entry);
         const publishedAt = date(entry.datePublished ?? entry.dateCreated);
         if (title === null || url === null || publishedAt === null) return [];
-        const item = this.permittedItem({ title, url, publishedAt, authors: authorNames(entry.author), summary: text(entry.description) }, response.finalUrl);
+        const item = this.permittedItem({ title, url, publishedAt, authors: authorNames(entry.author), summary: text(entry.description, MAX_PROVIDER_EVIDENCE_CHARACTERS) }, response.finalUrl);
         return item === null ? [] : [item];
       });
     let discovered = jsonLd;
@@ -172,7 +184,7 @@ export class PublicationPageAdapter {
         const dateElement = nested(item, this.listing!.dateSelector);
         const publishedAt = date(this.listing!.dateAttribute === undefined ? dateElement?.textContent : dateElement?.getAttribute(this.listing!.dateAttribute));
         if (href === null || href === undefined || title === null || publishedAt === null) return [];
-        const found = this.permittedItem({ title, url: href, publishedAt, authors: [], summary: this.listing!.summarySelector === undefined ? null : text(nested(item, this.listing!.summarySelector)?.textContent) }, response.finalUrl);
+        const found = this.permittedItem({ title, url: href, publishedAt, authors: [], summary: this.listing!.summarySelector === undefined ? null : text(nested(item, this.listing!.summarySelector)?.textContent, MAX_PROVIDER_EVIDENCE_CHARACTERS) }, response.finalUrl);
         return found === null ? [] : [found];
       });
     }
@@ -184,7 +196,7 @@ export class PublicationPageAdapter {
         const time = item.querySelector("time");
         const publishedAt = date(time?.getAttribute("datetime") ?? time?.textContent);
         if (href === null || href === undefined || title === null || publishedAt === null) return [];
-        const found = this.permittedItem({ title, url: href, publishedAt, authors: [], summary: text(item.querySelector("p")?.textContent) }, response.finalUrl);
+        const found = this.permittedItem({ title, url: href, publishedAt, authors: [], summary: text(item.querySelector("p")?.textContent, MAX_PROVIDER_EVIDENCE_CHARACTERS) }, response.finalUrl);
         return found === null ? [] : [found];
       });
     }
@@ -201,7 +213,7 @@ export class PublicationPageAdapter {
           const detail = await this.http.get(this.source, item.url, {
             headers: { accept: "text/html,application/xhtml+xml" },
             useValidators: false,
-            urlPolicy: this.urlPolicy,
+            urlPolicy: this.articleUrlPolicy,
           });
           originalUrl = detail.finalUrl;
           retrievedAt = detail.retrievedAt;
