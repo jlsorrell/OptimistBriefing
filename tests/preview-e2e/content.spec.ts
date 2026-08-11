@@ -1,13 +1,11 @@
 import type { Page } from "@playwright/test";
 
+import { fixtureEdition } from "../../scripts/seed-dev";
+import type { EditionEntry, EditionWithEntries } from "../../src/contracts/editorial";
 import { expect, getPreviewJSON, test } from "./fixtures";
+import { parsePreviewEdition } from "./edition-contract";
+import { expectRenderedPreviewEdition } from "./rendered-edition";
 
-const sectionHeadings = ["Research", "World", "AI policy", "DMV", "Baltimore"] as const;
-const sourceHosts = [
-  "arxiv.org",
-  "www.reuters.com",
-  "www.thebaltimorebanner.com",
-] as const;
 const routeHeadings = [
   ["/archive", "Archive"],
   ["/preferences", "Preferences"],
@@ -32,66 +30,49 @@ const editionSections = [
   "forecast",
 ] as const;
 
-type PreviewEntry = {
-  id: string;
-  itemId: string | null;
-  section: string;
-  position: number;
-  selectionReasons: string[];
-  sourceRefs: Array<{
-    id: string;
-    name: string;
-    url: string;
-    role: string;
-    retrievedAt: string;
-  }>;
-  summary: { title: string };
-};
-
-type PreviewEdition = Record<string, unknown> & { entries: PreviewEntry[] };
-
-function previewEdition(body: unknown): PreviewEdition {
-  if (body === null || typeof body !== "object") {
-    throw new TypeError("Preview edition response must be an object");
-  }
-  const entries = (body as { entries?: unknown }).entries;
-  if (!Array.isArray(entries)) {
-    throw new TypeError("Preview edition response must contain entries");
-  }
-  return { ...(body as Record<string, unknown>), entries } as PreviewEdition;
+function sparsePreviewEdition() {
+  const seeded = fixtureEdition();
+  const editionId = "edition-2026-08-09";
+  return {
+    ...seeded,
+    id: editionId,
+    editionDate: "2026-08-09",
+    runId: "run-2026-08-09",
+    status: "partial" as const,
+    readingMinutes: 20,
+    publishedAt: "2026-08-09T10:04:00.000Z",
+    createdAt: "2026-08-09T10:00:00.000Z",
+    entries: seeded.entries
+      .filter(({ section }) => section === "research" || section === "baltimore")
+      .map((entry) => ({ ...entry, editionId })),
+  };
 }
 
-test("shows the fixed edition and leaves run state unchanged", async ({ page }) => {
+for (const [name, fixture] of [
+  ["seeded July 29 edition", fixtureEdition()],
+  ["newer sparse partial edition", sparsePreviewEdition()],
+] as const) {
+  test(`renders the ${name} from its API contract`, async ({ page }) => {
+    const runsBefore = await readArray(page, "/api/runs");
+    await page.route("**/api/edition/latest", async (route) => {
+      await route.fulfill({ json: fixture });
+    });
+    await expectRenderedPreviewEdition(page, parsePreviewEdition(fixture));
+    expect(await readArray(page, "/api/runs")).toEqual(runsBefore);
+  });
+}
+
+test("shows the latest published edition and leaves run state unchanged", async ({
+  page,
+}) => {
   const runsBefore = await readArray(page, "/api/runs");
   const sources = await readArray(page, "/api/sources");
   expect(sources.length).toBeGreaterThan(0);
 
-  const editionResponse = await getPreviewJSON(page, "/api/edition/latest");
-  expect(editionResponse.status()).toBe(200);
-  await expect(editionResponse.json()).resolves.toMatchObject({
-    editionDate: "2026-07-29",
-  });
-
-  await page.goto("/");
-  await expect(
-    page.getByRole("heading", {
-      level: 1,
-      name: "The day, thoughtfully distilled.",
-    }),
-  ).toBeVisible();
-  await expect(page.locator(".header-date")).toContainText("July 29, 2026");
-  for (const heading of sectionHeadings) {
-    await expect(page.getByRole("heading", { level: 2, name: heading })).toBeVisible();
-  }
-  await expect(page.getByText("Primary source").first()).toBeVisible();
-  await expect(page.getByText("Forecast, not fact")).toBeVisible();
-
-  const visibleSourceHosts = await page.locator(".source-list a").evaluateAll((links) =>
-    links.map((link) => new URL((link as HTMLAnchorElement).href).hostname),
-  );
-  for (const hostname of sourceHosts) {
-    expect(visibleSourceHosts).toContain(hostname);
-  }
+  const response = await getPreviewJSON(page, "/api/edition/latest");
+  expect(response.status()).toBe(200);
+  const edition = parsePreviewEdition(await response.json());
+  await expectRenderedPreviewEdition(page, edition);
 
   for (const [path, heading] of routeHeadings) {
     await page.goto(path);
@@ -105,9 +86,7 @@ test("renders layered research context and omits empty sections without mutation
   page,
 }) => {
   const runsBefore = await readArray(page, "/api/runs");
-  const response = await getPreviewJSON(page, "/api/edition/latest");
-  expect(response.status()).toBe(200);
-  const base = previewEdition(await response.json());
+  const base = fixtureEdition();
   const featuredTemplate = base.entries.find(({ section }) =>
     section === "research"
   );
@@ -126,7 +105,7 @@ test("renders layered research context and omits empty sections without mutation
   if (retrievedAt === undefined) {
     throw new Error("Featured preview template has no source timestamp");
   }
-  const featured: PreviewEntry = {
+  const featured: EditionEntry = {
     ...featuredTemplate,
     selectionReasons: [
       ...featuredTemplate.selectionReasons,
@@ -144,7 +123,7 @@ test("renders layered research context and omits empty sections without mutation
       },
     ],
   };
-  const technology: PreviewEntry = {
+  const technology: EditionEntry = {
     ...newsTemplate,
     id: "preview-layered-technology",
     itemId: "preview-layered-technology-item",
@@ -161,7 +140,7 @@ test("renders layered research context and omits empty sections without mutation
       },
     ],
   };
-  const aiPolicy: PreviewEntry = {
+  const aiPolicy: EditionEntry = {
     ...policyTemplate,
     id: "preview-layered-ai-policy",
     itemId: "preview-layered-ai-policy-item",
@@ -178,12 +157,12 @@ test("renders layered research context and omits empty sections without mutation
       },
     ],
   };
-  const fixture: PreviewEdition = {
+  const fixture: EditionWithEntries = {
     ...base,
     entries: [
       ...base.entries
-        .filter((entry) =>
-          !["technology", "ai_policy", "forecast"].includes(entry.section)
+        .filter(({ section }) =>
+          section !== "technology" && section !== "ai_policy" && section !== "forecast"
         )
         .map((entry) => entry.id === featured.id ? featured : entry),
       technology,
