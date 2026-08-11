@@ -878,6 +878,14 @@ class RankingEmbeddingProvider implements ModelProvider {
     texts: readonly string[],
   ): Promise<readonly (readonly number[])[]> {
     return texts.map((text) => {
+      const coverageLocalIndex = /coverage-local-(\d+)/.exec(text)?.[1];
+      if (coverageLocalIndex !== undefined) {
+        const index = Number(coverageLocalIndex);
+        const embedding = this.basis(1);
+        embedding[6 + index] = 1;
+        return embedding;
+      }
+      if (text.includes("Source coverage-world")) return this.basis(3);
       const highNewsIndex = /high-news-(\d+)/.exec(text)?.[1];
       if (highNewsIndex !== undefined) {
         const index = Number(highNewsIndex);
@@ -7540,6 +7548,59 @@ describe("manual editorial run", () => {
     )).toHaveLength(3);
     expect(shortlisted.slice(0, 3).map((item) => item.metadata.section))
       .toEqual(["research", "research", "research"]);
+    expect(new Set(shortlisted.map(({ id }) => id)).size).toBe(8);
+    expect(shortlisted.map(({ id }) => id))
+      .toEqual(reversed.map(({ id }) => id));
+  });
+
+  it("admits nonlocal news below a local-heavy cutoff", async () => {
+    // This fails if the production shortlist reads only the capped global
+    // morning brief before it reserves one nonlocal and one local candidate.
+    const candidates = [
+      rawResearchCandidate(
+        "2607.32001",
+        "Interpretability study Alpha for coverage",
+        0,
+      ),
+      rawResearchCandidate(
+        "2607.32002",
+        "Interpretability study Beta for coverage",
+        0,
+      ),
+      rawResearchCandidate(
+        "2607.32003",
+        "Interpretability study Gamma for coverage",
+        0,
+      ),
+      ...Array.from({ length: 5 }, (_, index) => rawNewsCandidate(
+        `coverage-local-${index + 1}`,
+        index < 2 ? "dmv" : "baltimore",
+      )),
+      rawNewsCandidate("coverage-world", "world"),
+    ];
+    const assessments = Array.from(
+      { length: 3 },
+      () => qualifiedResearchAssessment,
+    );
+
+    const shortlisted = await productionShortlist(
+      candidates,
+      assessments,
+      "local-heavy-coverage-forward",
+    );
+    const reversed = await productionShortlist(
+      [...candidates].reverse(),
+      assessments,
+      "local-heavy-coverage-reverse",
+    );
+
+    expect(shortlisted).toHaveLength(8);
+    expect(shortlisted.slice(0, 3).map(({ metadata }) => metadata.section))
+      .toEqual(["research", "research", "research"]);
+    expect(shortlisted.map(({ metadata }) => metadata.section))
+      .toContain("world");
+    expect(shortlisted.map(({ metadata }) => metadata.section))
+      .toContain("baltimore");
     expect(new Set(shortlisted.map(({ id }) => id)).size).toBe(8);
     expect(shortlisted.map(({ id }) => id))
       .toEqual(reversed.map(({ id }) => id));

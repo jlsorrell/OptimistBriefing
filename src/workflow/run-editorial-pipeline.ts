@@ -1,5 +1,6 @@
 import { composeEdition } from "./compose-edition";
 import { publishEdition } from "./publish-edition";
+import { assembleResearchFirstMorning } from "./research-first-morning";
 import {
   normalizeLegacyCompositionProviderText,
   prepareCurrentCompositionProviderText,
@@ -2974,19 +2975,7 @@ export function createProductionPipelineContext(
         preferences,
         budgets,
       );
-      const featured = selected.researchFeatured
-        .slice(0, Math.min(budgets.featuredResearch, budgets.morningBrief))
-        .map((item) => ({ id: item.id, section: "research" as const }));
-      const reservedIds = new Set(featured.map(({ id }) => id));
-      const rankedMorning = selected.morningBrief
-        .filter((candidate) => !reservedIds.has(candidate.id))
-        .map((candidate) =>
-          "representativeItem" in candidate
-            ? { id: candidate.id, section: candidate.primarySection }
-            : { id: candidate.id, section: "research" as const }
-        );
-      const morning = [...featured, ...rankedMorning]
-        .slice(0, budgets.morningBrief);
+      const morning = assembleResearchFirstMorning(selected, budgets);
       const morningIds = new Set(morning.map(({ id }) => id));
       const radar = selected.researchRadar
         .filter((item) => !morningIds.has(item.id))
