@@ -1949,7 +1949,7 @@ describe("manual editorial run", () => {
     expect(synthesisCalls).toBe(1);
   });
 
-  it("publishes a source-partial edition only when research, nonlocal news, and DMV coverage remain", async () => {
+  it("publishes a covered undersized edition as partial", async () => {
     const context = fixturePipelineContext({
       runId: "run-partial",
       synthesize: async (items) => items
