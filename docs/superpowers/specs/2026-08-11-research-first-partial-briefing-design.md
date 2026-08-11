@@ -62,12 +62,12 @@ final morning list will use deterministic coverage-aware admission.
 5. Admit research-radar items only into capacity still unused after the morning
    list, as today.
 
-The `morningBrief` list produced by `shortlist()` already provides the global
-score/date/ID order. The section lists identify which IDs belong to each
-coverage family. The integration selects the first matching ID from
-`morningBrief`, so it can choose each representative without rescoring or
-inventing a second tie-break rule. If a coverage family has no candidate, its
-reservation consumes no slot.
+The shortlist calculation already computes the complete global score/date/ID
+order before applying the morning cap. It will expose that full eligible order
+as an internal, non-persisted decision surface while retaining the existing
+capped `morningBrief` output. Section lists identify coverage-family IDs, and
+the workflow selects the first matching ID from the full ranking without
+rescoring or inventing a second tie-break rule.
 
 This design does not impose strict quotas for world, technology, and AI policy.
 It guarantees one nonlocal representative when any exists, preserves a local

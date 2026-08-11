@@ -52,6 +52,7 @@ export type ShortlistExclusion = {
 
 export type Shortlist = {
   morningBrief: (Item | NewsDevelopment)[];
+  rankedMorningCandidates: (Item | NewsDevelopment)[];
   researchFeatured: Item[];
   researchRadar: Item[];
   world: NewsDevelopment[];
@@ -422,7 +423,7 @@ export function shortlist(
     "forecast",
     budgets.forecastSignals,
   );
-  const morningBrief = uniqueMorningBrief(
+  const rankedMorningCandidates = uniqueMorningBrief(
     featured,
     [
       ...world,
@@ -431,10 +432,12 @@ export function shortlist(
       ...local,
       ...forecastSignals,
     ],
-  ).slice(0, budgets.morningBrief);
+  );
+  const morningBrief = rankedMorningCandidates.slice(0, budgets.morningBrief);
 
   return {
     morningBrief,
+    rankedMorningCandidates,
     researchFeatured: featured.map(({ item }) => item),
     researchRadar: radar.map(({ item }) => item),
     world: world.map(({ development }) => development),

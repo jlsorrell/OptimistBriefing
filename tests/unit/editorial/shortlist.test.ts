@@ -386,6 +386,46 @@ describe("shortlist", () => {
     expect(result.world).toHaveLength(4);
   });
 
+  it("retains eligible candidates below the capped morning cutoff", () => {
+    const research = [
+      itemWithText("research-a", "Mechanistic interpretability for oversight"),
+      itemWithText("research-b", "Capability elicitation for hidden abilities"),
+      itemWithText("research-c", "Debate-based oversight for language models"),
+    ];
+    const local = Array.from({ length: 5 }, (_, index) =>
+      development(
+        item(`local-${index + 1}`, "baltimore", "article", {
+          section: "baltimore",
+        }),
+      ),
+    );
+    const world = development(
+      item("world-reserve", "world", "article", { section: "world" }),
+    );
+    const candidates = [...research, ...local, world];
+    const scores = [
+      researchScore("research-a", 0.99),
+      researchScore("research-b", 0.98),
+      researchScore("research-c", 0.97),
+      ...local.map((candidate, index) =>
+        newsScore(candidate.id, 0.96 - index * 0.01),
+      ),
+      newsScore(world.id, 0.9),
+    ];
+
+    const result = shortlist(candidates, scores, preferences, budgets);
+
+    expect(result.morningBrief).toHaveLength(8);
+    expect(result.morningBrief.map(({ id }) => id)).not.toContain(world.id);
+    expect(result.rankedMorningCandidates.map(({ id }) => id)).toEqual([
+      "research-a",
+      "research-b",
+      "research-c",
+      ...local.map(({ id }) => id),
+      world.id,
+    ]);
+  });
+
   it("rejects an unchanged previous-edition development but keeps material changes", () => {
     const unchanged = item("unchanged", "ai_policy", "article", {
       section: "ai_policy",
