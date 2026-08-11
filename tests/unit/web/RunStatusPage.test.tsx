@@ -204,7 +204,7 @@ describe("RunStatusPage", () => {
     expect(document.body.textContent).not.toContain("private provider detail");
   });
 
-  it("renders bounded discovery rejection labels without private fields", async () => {
+  it("renders current and historical fallback diagnostics without private fields", async () => {
     const run: WorkflowRun = {
       id: "run-1",
       editionDate: "2026-08-02",
@@ -229,6 +229,7 @@ describe("RunStatusPage", () => {
         discovered: 7,
         deduplicated: 5,
         triaged: 3,
+        fallbackTriaged: 2,
         assessed: 2,
         outcome: "success",
         rejectionCounts: {
@@ -271,6 +272,7 @@ describe("RunStatusPage", () => {
       "Discovered",
       "Deduplicated",
       "Triaged",
+      "Fallback",
       "Assessed",
       "Rejections",
       "Outcome",
@@ -281,8 +283,25 @@ describe("RunStatusPage", () => {
     expect(within(laneRow!).getByText(
       "Unchanged observation: 2; Capacity limited: 1",
     )).toBeTruthy();
+    expect(within(laneRow!).getAllByRole("cell").map(
+      (cell) => cell.textContent,
+    )).toEqual([
+      "arxiv:oversight-governance",
+      "7",
+      "5",
+      "3",
+      "2",
+      "2",
+      "Unchanged observation: 2; Capacity limited: 1",
+      "success",
+    ]);
+    const historicalLaneRow = within(table).getByText("arxiv:empty")
+      .closest("tr");
+    expect(historicalLaneRow).not.toBeNull();
+    expect(within(historicalLaneRow!).getAllByRole("cell")[4]?.textContent)
+      .toBe("0");
     expect(within(table).getByText("None")).toBeTruthy();
-    for (const value of ["7", "5", "3", "2", "success"]) {
+    for (const value of ["7", "5", "3", "success"]) {
       expect(within(laneRow!).getByText(value)).toBeTruthy();
     }
     await waitFor(() => {

@@ -198,6 +198,7 @@ export function RunStatusPage() {
                 <th scope="col">Discovered</th>
                 <th scope="col">Deduplicated</th>
                 <th scope="col">Triaged</th>
+                <th scope="col">Fallback</th>
                 <th scope="col">Assessed</th>
                 <th scope="col">Rejections</th>
                 <th scope="col">Outcome</th>
@@ -210,6 +211,7 @@ export function RunStatusPage() {
                   <td>{diagnostic.discovered}</td>
                   <td>{diagnostic.deduplicated}</td>
                   <td>{diagnostic.triaged}</td>
+                  <td>{diagnostic.fallbackTriaged ?? 0}</td>
                   <td>{diagnostic.assessed}</td>
                   <td>{rejectionSummary(diagnostic.rejectionCounts)}</td>
                   <td>{diagnostic.outcome}</td>

@@ -1580,14 +1580,16 @@ describe("D1BriefingRepository", () => {
       "2026-07-30T09:01:00.000Z",
     ).run();
     const diagnostic = {
-      laneId: "arxiv:oversight-governance",
-      sourceId: "arxiv",
-      discoveryFamily: "arxiv" as const,
-      discovered: 3,
-      deduplicated: 2,
-      triaged: 1,
-      assessed: 1,
+      laneId: "openalex:alignment",
+      sourceId: "openalex",
+      discoveryFamily: "bibliographic" as const,
+      discovered: 10,
+      deduplicated: 8,
+      triaged: 6,
+      fallbackTriaged: 5,
+      assessed: 4,
       outcome: "success" as const,
+      rejectionCounts: {},
     };
 
     await env.DB.prepare(
@@ -1619,7 +1621,7 @@ describe("D1BriefingRepository", () => {
 
     await repo.recordDiscoveryDiagnostics("run-diagnostics", [{
       ...diagnostic,
-      discovered: 4,
+      discovered: 11,
       rejectionCounts: {
         unchanged_observation: 2,
         capacity_limited: 1,
@@ -1652,7 +1654,7 @@ describe("D1BriefingRepository", () => {
       event_json: JSON.stringify({
         diagnostics: [{
           ...diagnostic,
-          discovered: 4,
+          discovered: 11,
           rejectionCounts: {
             unchanged_observation: 2,
             capacity_limited: 1,
@@ -1672,10 +1674,19 @@ describe("D1BriefingRepository", () => {
         },
       }),
     }]);
+    expect(events.results[0]?.event_json).toContain('"fallbackTriaged":5');
+    for (const privateCandidateValue of [
+      "candidate title should not persist",
+      "candidate abstract should not persist",
+      "candidate-id-should-not-persist",
+      "candidate-embedding-should-not-persist",
+    ]) {
+      expect(events.results[0]?.event_json).not.toContain(privateCandidateValue);
+    }
     expect((await repo.getWorkflowRunDetail("run-diagnostics"))
       ?.discoveryDiagnostics).toEqual([{
         ...diagnostic,
-        discovered: 4,
+        discovered: 11,
         rejectionCounts: {
           unchanged_observation: 2,
           capacity_limited: 1,
