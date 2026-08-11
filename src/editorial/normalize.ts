@@ -378,10 +378,15 @@ export function normalizePreparedCandidate(
     candidate.originalUrl,
     candidate.metadata,
   );
+  const restoredOpenAlexArxiv = candidate.sourceId === "openalex"
+    ? normalizeArxivIdentifier(canonicalUrl)
+    : null;
   const externalIds = uniqueSorted(
-    [candidate.externalId, ...candidate.externalIds].map(
-      canonicalIdentifier,
-    ),
+    [
+      candidate.externalId,
+      ...candidate.externalIds,
+      ...(restoredOpenAlexArxiv === null ? [] : [restoredOpenAlexArxiv]),
+    ].map(canonicalIdentifier),
   );
   const topics = preparedTextArray(input.topics);
   const preferredInstitutionMatches = preparedTextArray(

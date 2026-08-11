@@ -299,4 +299,41 @@ describe("research normalization", () => {
       "arXiv:2608.00001",
     ]);
   });
+
+  it("restores an OpenAlex-only checkpoint candidate to the arXiv durable item identity", () => {
+    const arxiv = normalizeCandidate(candidate({
+      sourceId: "arxiv",
+      sourceName: "arXiv",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "arXiv:2608.03626",
+      externalIds: ["arXiv:2608.03626"],
+    }));
+    const openAlex = normalizeCandidate(candidate({
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      sourceRole: "analysis",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "OpenAlex:W7197052950",
+      externalIds: ["OpenAlex:W7197052950"],
+      metadata: { discoveryFamily: "bibliographic" },
+    }));
+
+    expect(openAlex.id).toBe(arxiv.id);
+    expect(openAlex.metadata.externalIds).toEqual([
+      "arXiv:2608.03626",
+      "OpenAlex:W7197052950",
+    ].sort((left, right) => left.localeCompare(right)));
+    expect(openAlex.canonicalUrl).toBe("https://arxiv.org/abs/2608.03626");
+
+    const unrelated = normalizeCandidate(candidate({
+      sourceId: "custom-provider",
+      sourceName: "Custom Provider",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "custom:W7197052950",
+      externalIds: ["custom:W7197052950"],
+    }));
+
+    expect(unrelated.id).not.toBe(arxiv.id);
+    expect(unrelated.metadata.externalIds).toEqual(["custom:W7197052950"]);
+  });
 });
