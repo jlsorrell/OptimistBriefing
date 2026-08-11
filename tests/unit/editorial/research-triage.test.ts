@@ -28,6 +28,7 @@ function researchItem(
     updatedAt?: string;
     domain?: string;
     topics?: readonly string[];
+    title?: string;
     preferredInstitution?: boolean;
     normalizedText?: string;
     sourceId?: string;
@@ -39,6 +40,7 @@ function researchItem(
   const domain = options.domain ?? `${family}.example`;
   const topicalFit = options.topicalFit ?? 0.8;
   const topics = options.topics ?? [CONFIGURED_RESEARCH_TOPIC_IDS[0]];
+  const title = options.title ?? `Research candidate ${id}`;
   const preferredInstitutionMatches = options.preferredInstitution
     ? ["Stanford"]
     : [];
@@ -47,7 +49,7 @@ function researchItem(
     id,
     kind: "paper",
     canonicalUrl: `https://${domain}/papers/${id}`,
-    title: `Research candidate ${id}`,
+    title,
     publishedAt: options.publishedAt ?? "2026-08-02T08:00:00.000Z",
     sourceRefs: [{
       id: sourceId,
@@ -82,7 +84,7 @@ function researchItem(
           sourceId,
           sourceName: `${family} source`,
           sourceRole: "primary",
-          title: `Research candidate ${id}`,
+          title,
           originalUrl: `https://${domain}/papers/${id}`,
           externalId: id,
           externalIds: [id],
@@ -392,6 +394,171 @@ describe("classifyDiscoveryWindow", () => {
 });
 
 describe("triageResearch", () => {
+  describe("fallback and near-match admission", () => {
+    const fallbackOptions = {
+      maximum: 24,
+      maximumPerFamily: 12,
+      maximumPerPublisherDomain: 6,
+      configuredTopics: CONFIGURED_RESEARCH_TOPIC_IDS,
+      now: NOW,
+      fallbackTarget: 6,
+      fallbackMinimumTopicalFit: 0.35,
+    };
+
+    it("fills a sparse normal queue with core then adjacent near-matches", () => {
+      const normal = Array.from({ length: 4 }, (_, index) =>
+        researchItem(`normal-${index}`, {
+          topicalFit: 0.8 - index / 100,
+          domain: `normal-${index}.example`,
+        })
+      );
+      const core = researchItem("fallback-core", {
+        topicalFit: 0.4,
+        domain: "core.example",
+        normalizedText: "Capability elicitation reveals hidden model abilities.",
+      });
+      const adjacent = researchItem("fallback-adjacent", {
+        topicalFit: 0.49,
+        domain: "adjacent.example",
+        normalizedText: "A broad framework for AI safety and governance.",
+      });
+
+      const result = triageResearch([...normal, adjacent, core], fallbackOptions);
+
+      expect(result.items.map(({ id }) => id)).toEqual([
+        "normal-0",
+        "normal-1",
+        "normal-2",
+        "normal-3",
+        "fallback-core",
+        "fallback-adjacent",
+      ]);
+      expect(result.admissions).toEqual([
+        ...normal.map(({ id }) => ({ itemId: id, route: "normal" as const })),
+        { itemId: "fallback-core", route: "near_match" },
+        { itemId: "fallback-adjacent", route: "near_match" },
+      ]);
+    });
+
+    it("applies the exact fallback and normal boundaries", () => {
+      const result = triageResearch([
+        researchItem("below", { topicalFit: 0.349999 }),
+        researchItem("floor", { topicalFit: 0.35 }),
+        researchItem("near", { topicalFit: 0.499999 }),
+        researchItem("normal", { topicalFit: 0.5 }),
+      ], fallbackOptions);
+
+      expect(result.admissions).toEqual([
+        { itemId: "normal", route: "normal" },
+        { itemId: "near", route: "near_match" },
+        { itemId: "floor", route: "near_match" },
+      ]);
+      expect(result.exclusions).toContainEqual({
+        itemId: "below",
+        reason: "below_topical_fit",
+      });
+    });
+
+    it("does not use near-matches when six normal candidates meet the target", () => {
+      const normal = Array.from({ length: 6 }, (_, index) =>
+        researchItem(`normal-${index}`, {
+          topicalFit: 0.8 - index / 100,
+          domain: `normal-${index}.example`,
+        })
+      );
+      const fallback = researchItem("fallback", {
+        topicalFit: 0.49,
+        domain: "fallback.example",
+      });
+
+      const result = triageResearch([...normal, fallback], fallbackOptions);
+
+      expect(result.admissions).toEqual(
+        normal.map(({ id }) => ({ itemId: id, route: "normal" })),
+      );
+    });
+
+    it("admits at most six near-matches when no normal candidates qualify", () => {
+      const candidates = Array.from({ length: 7 }, (_, index) =>
+        researchItem(`fallback-${index}`, {
+          topicalFit: 0.49,
+          domain: `fallback-${index}.example`,
+        })
+      );
+
+      const result = triageResearch(candidates, fallbackOptions);
+
+      expect(result.items).toHaveLength(6);
+      expect(result.admissions).toHaveLength(6);
+      expect(result.admissions.every(({ route }) => route === "near_match"))
+        .toBe(true);
+    });
+
+    it.each([
+      ["without a configured topic", researchItem("no-topic", {
+        topicalFit: 0.49,
+        topics: [],
+      })],
+      ["below the fallback floor despite a preferred institution", researchItem("preferred-low", {
+        topicalFit: 0.349999,
+        preferredInstitution: true,
+      })],
+    ])("excludes a near-match %s", (_description, candidate) => {
+      const result = triageResearch([candidate], fallbackOptions);
+
+      expect(result.admissions).toEqual([]);
+      expect(result.exclusions).toContainEqual({
+        itemId: candidate.id,
+        reason: "below_topical_fit",
+      });
+    });
+
+    it("prioritizes a lower-scoring core near-match above an adjacent one", () => {
+      const adjacent = researchItem("adjacent", {
+        topicalFit: 0.49,
+        domain: "adjacent.example",
+        normalizedText: "A broad framework for AI safety and governance.",
+      });
+      const core = researchItem("core", {
+        topicalFit: 0.4,
+        domain: "core.example",
+        normalizedText: "Capability elicitation reveals hidden model abilities.",
+      });
+
+      const result = triageResearch([adjacent, core], fallbackOptions);
+
+      expect(result.items.map(({ id }) => id)).toEqual(["core", "adjacent"]);
+      expect(result.admissions).toEqual([
+        { itemId: "core", route: "near_match" },
+        { itemId: "adjacent", route: "near_match" },
+      ]);
+    });
+
+    it("keeps item and admission order stable when input is reversed", () => {
+      const candidates = [
+        researchItem("normal-a", { topicalFit: 0.8, domain: "normal-a.example" }),
+        researchItem("normal-b", { topicalFit: 0.7, domain: "normal-b.example" }),
+        researchItem("adjacent", {
+          topicalFit: 0.49,
+          domain: "adjacent.example",
+          normalizedText: "A broad framework for AI safety and governance.",
+        }),
+        researchItem("core", {
+          topicalFit: 0.4,
+          domain: "core.example",
+          normalizedText: "Capability elicitation reveals hidden model abilities.",
+        }),
+      ];
+
+      const forward = triageResearch(candidates, fallbackOptions);
+      const reversed = triageResearch([...candidates].reverse(), fallbackOptions);
+
+      expect(reversed.items.map(({ id }) => id))
+        .toEqual(forward.items.map(({ id }) => id));
+      expect(reversed.admissions).toEqual(forward.admissions);
+    });
+  });
+
   it("filters empty and below-gate research with explicit exclusion reasons", () => {
     const result = triageResearch([
       researchItem("empty", { normalizedText: "   " }),
@@ -406,6 +573,9 @@ describe("triageResearch", () => {
     });
 
     expect(result.items.map(({ id }) => id)).toEqual(["qualified"]);
+    expect(result.admissions).toEqual([
+      { itemId: "qualified", route: "normal" },
+    ]);
     expect(result.exclusions).toEqual(expect.arrayContaining([
       { itemId: "empty", reason: "invalid_content" },
       { itemId: "low-fit", reason: "below_topical_fit" },
