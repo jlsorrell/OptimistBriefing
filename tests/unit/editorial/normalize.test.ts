@@ -336,4 +336,54 @@ describe("research normalization", () => {
     expect(unrelated.id).not.toBe(arxiv.id);
     expect(unrelated.metadata.externalIds).toEqual(["custom:W7197052950"]);
   });
+
+  it("keeps an explicit OpenAlex arXiv identity over a conflicting canonical URL", () => {
+    const explicitArxiv = normalizeCandidate(candidate({
+      originalUrl: "https://arxiv.org/abs/2608.99999",
+      externalId: "arXiv:2608.99999",
+      externalIds: ["arXiv:2608.99999"],
+    }));
+    const openAlex = normalizeCandidate(candidate({
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      sourceRole: "analysis",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "OpenAlex:W7197052951",
+      externalIds: ["OpenAlex:W7197052951", "arXiv:2608.99999"],
+      metadata: { discoveryFamily: "bibliographic" },
+    }));
+
+    expect(openAlex.id).toBe(explicitArxiv.id);
+    expect(openAlex.metadata.externalIds).toEqual([
+      "arXiv:2608.99999",
+      "OpenAlex:W7197052951",
+    ].sort((left, right) => left.localeCompare(right)));
+  });
+
+  it("prefers a DOI durable identity over an inferred OpenAlex arXiv identity", () => {
+    const doi = normalizeCandidate(candidate({
+      originalUrl: "https://doi.org/10.1000/identity-precedence",
+      externalId: "DOI:10.1000/identity-precedence",
+      externalIds: ["DOI:10.1000/identity-precedence"],
+    }));
+    const openAlex = normalizeCandidate(candidate({
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      sourceRole: "analysis",
+      originalUrl: "https://arxiv.org/abs/2608.03626",
+      externalId: "DOI:10.1000/identity-precedence",
+      externalIds: [
+        "DOI:10.1000/identity-precedence",
+        "OpenAlex:W7197052952",
+      ],
+      metadata: { discoveryFamily: "bibliographic" },
+    }));
+
+    expect(openAlex.id).toBe(doi.id);
+    expect(openAlex.metadata.externalIds).toEqual([
+      "arXiv:2608.03626",
+      "DOI:10.1000/identity-precedence",
+      "OpenAlex:W7197052952",
+    ].sort((left, right) => left.localeCompare(right)));
+  });
 });

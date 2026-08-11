@@ -378,15 +378,22 @@ export function normalizePreparedCandidate(
     candidate.originalUrl,
     candidate.metadata,
   );
-  const restoredOpenAlexArxiv = candidate.sourceId === "openalex"
+  const explicitExternalIds = [
+    candidate.externalId,
+    ...candidate.externalIds,
+  ].map(canonicalIdentifier);
+  const restoredOpenAlexArxiv =
+    candidate.sourceId === "openalex" &&
+      !explicitExternalIds.some((identifier) =>
+        identifier.startsWith("arXiv:")
+      )
     ? normalizeArxivIdentifier(canonicalUrl)
     : null;
   const externalIds = uniqueSorted(
     [
-      candidate.externalId,
-      ...candidate.externalIds,
+      ...explicitExternalIds,
       ...(restoredOpenAlexArxiv === null ? [] : [restoredOpenAlexArxiv]),
-    ].map(canonicalIdentifier),
+    ],
   );
   const topics = preparedTextArray(input.topics);
   const preferredInstitutionMatches = preparedTextArray(
@@ -553,9 +560,10 @@ export function normalizePreparedCandidate(
       : new Date(candidate.publishedAt).toISOString();
   const stableIdentifier =
     externalIds.find(
-      (identifier) =>
-        identifier.startsWith("DOI:") ||
-        identifier.startsWith("arXiv:"),
+      (identifier) => identifier.startsWith("DOI:"),
+    ) ??
+    externalIds.find(
+      (identifier) => identifier.startsWith("arXiv:"),
     ) ??
     externalIds[0] ??
     canonicalUrl;
