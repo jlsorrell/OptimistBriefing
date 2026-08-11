@@ -91,8 +91,12 @@ export async function composeEdition(
   });
   const missing = missingSections(entries);
   edition.metadata = { missingSections: missing, sourceFailures };
-  const complete = entries.length >= 6 && entries.length <= 8 && missing.length === 0;
-  const partial = !complete && missing.length === 0;
+  const complete =
+    entries.length >= 6 &&
+    entries.length <= 8 &&
+    missing.length === 0;
+  const hasResearch = entries.some((entry) => entry.section === "research");
+  const partial = !complete && hasResearch;
   return {
     edition,
     entries,

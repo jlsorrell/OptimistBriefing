@@ -1765,6 +1765,56 @@ describe("manual editorial run", () => {
     );
   });
 
+  it.each([
+    {
+      name: "research with local but no nonlocal news",
+      sections: ["research", "dmv"],
+      status: "partial",
+      missingSections: ["nonlocal_news"],
+    },
+    {
+      name: "research with nonlocal but no local news",
+      sections: ["research", "world"],
+      status: "partial",
+      missingSections: ["dmv_or_baltimore"],
+    },
+    {
+      name: "research only",
+      sections: ["research"],
+      status: "partial",
+      missingSections: ["nonlocal_news", "dmv_or_baltimore"],
+    },
+    {
+      name: "news only",
+      sections: ["world", "dmv"],
+      status: "failed",
+      missingSections: ["research"],
+    },
+    {
+      name: "no valid entries",
+      sections: [],
+      status: "failed",
+      missingSections: ["research", "nonlocal_news", "dmv_or_baltimore"],
+    },
+  ])("classifies $name", async ({ sections, status, missingSections }) => {
+    const items = sections.map((section, index) =>
+      fixtureItem(`composition-${section}-${index}`, section),
+    );
+    const composition = await composeEdition(
+      fixturePipelineContext({ runId: `compose-${sections.join("-") || "empty"}` }),
+      items.map((item) => ({
+        item,
+        summary: fixtureSummary(item),
+        valid: true,
+      })),
+      items,
+    );
+
+    expect(composition.status).toBe(status);
+    expect(composition.missingSections).toEqual(missingSections);
+    expect(composition.edition.metadata?.missingSections).toEqual(missingSections);
+  });
+
   it("preserves the calculated shortlist reasons in the persisted edition", async () => {
     // This fails if composition replaces the shortlist's actual reasons.
     const item = fixtureItem("reasoned-research", "research");
@@ -1911,9 +1961,9 @@ describe("manual editorial run", () => {
     expect((await context.store.getLatestEdition())?.status).toBe("partial");
   });
 
-  it("leaves a failed minimum draft unpublished and preserves the prior edition", async () => {
+  it("publishes a research-only partial edition with honest missing coverage", async () => {
     const context = fixturePipelineContext({
-      runId: "run-failed-minimum",
+      runId: "run-research-only-partial",
       synthesize: async (items) => items
         .filter((item) => item.id === "research")
         .map((item) => ({ item, summary: fixtureSummary(item) })),
@@ -1930,8 +1980,19 @@ describe("manual editorial run", () => {
     };
     context.store.editions.set(prior.editionDate, prior);
 
-    await expect(runEditorialPipeline(context)).resolves.toMatchObject({ status: "failed" });
-    expect(await context.store.getLatestEdition()).toEqual(prior);
+    await expect(runEditorialPipeline(context)).resolves.toMatchObject({
+      status: "partial",
+      missingSections: ["nonlocal_news", "dmv_or_baltimore"],
+    });
+    await expect(context.store.getLatestEdition()).resolves.toMatchObject({
+      runId: "run-research-only-partial",
+      status: "partial",
+      metadata: {
+        missingSections: ["nonlocal_news", "dmv_or_baltimore"],
+      },
+      entries: [expect.objectContaining({ section: "research" })],
+    });
+    expect(await context.store.getLatestEdition()).not.toEqual(prior);
   });
 
   it("fails six valid entries when they omit required coverage", async () => {
