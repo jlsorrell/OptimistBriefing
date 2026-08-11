@@ -177,6 +177,9 @@ import {
 export { PIPELINE_STEPS } from "./types";
 export type { PipelineContext, PipelineRun, PipelineStore } from "./types";
 
+const RESEARCH_FALLBACK_TARGET = 6;
+const RESEARCH_FALLBACK_MINIMUM_TOPICAL_FIT = 0.35;
+
 export class WorkflowRunAlreadyExistsError extends Error {
   constructor() {
     super("RUN_ALREADY_EXISTS");
@@ -2376,6 +2379,7 @@ export function createProductionPipelineContext(
   const recordDiscoveryDiagnostics = async (
     field?: "deduplicated" | "triaged" | "assessed",
     items: readonly Item[] = [],
+    fallbackItems: readonly Item[] = [],
   ): Promise<void> => {
     await withDiscoveryDiagnostics(async (tracker) => {
       if (field !== undefined) {
@@ -2383,6 +2387,9 @@ export function createProductionPipelineContext(
           field,
           stageDiagnosticRefs(items, field === "assessed"),
         );
+      }
+      if (field === "triaged") {
+        tracker.setFallbackTriaged(stageDiagnosticRefs(fallbackItems));
       }
       await discoveryDiagnosticsWriter!(
         options.runId,
@@ -2728,7 +2735,18 @@ export function createProductionPipelineContext(
         now: options.now(),
         minimumTopicalFit:
           READER_PROFILE.researchQualityGates.minimumTopicalFit,
+        fallbackTarget: RESEARCH_FALLBACK_TARGET,
+        fallbackMinimumTopicalFit:
+          RESEARCH_FALLBACK_MINIMUM_TOPICAL_FIT,
       });
+      const fallbackIds = new Set(
+        triaged.admissions
+          .filter(({ route }) => route === "near_match")
+          .map(({ itemId }) => itemId),
+      );
+      const fallbackItems = triaged.items.filter(({ id }) =>
+        fallbackIds.has(id)
+      );
       const researchById = new Map(research.map((item) => [item.id, item]));
       for (const exclusion of triaged.exclusions) {
         const item = researchById.get(exclusion.itemId);
@@ -2745,7 +2763,7 @@ export function createProductionPipelineContext(
         );
       }
       const result = [...triaged.items, ...news];
-      await recordDiscoveryDiagnostics("triaged", result);
+      await recordDiscoveryDiagnostics("triaged", result, fallbackItems);
       return result;
     },
     assess: async (items) => {

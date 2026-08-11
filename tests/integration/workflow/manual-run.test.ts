@@ -588,6 +588,23 @@ class GroundedProductionProvider implements ModelProvider {
   }
 }
 
+class SparseResearchEmbeddingProvider extends GroundedProductionProvider {
+  override async embed(
+    texts: readonly string[],
+  ): Promise<readonly number[][]> {
+    return texts.map((text) => {
+      const fit = text.includes("NORMAL_FIT")
+        ? 0.8
+        : text.includes("NEAR_FIT")
+          ? 0.4
+          : text.includes("BELOW_FLOOR")
+            ? 0.3
+            : 1;
+      return [fit, Math.sqrt(1 - fit * fit)];
+    });
+  }
+}
+
 class ConcurrencyTrackingAssessmentProvider implements ModelProvider {
   active = 0;
   maximumActive = 0;
@@ -4413,12 +4430,18 @@ describe("manual editorial run", () => {
         },
       ],
       [
-        { ...initialDiagnostics[0], deduplicated: 2, triaged: 2 },
-        initialDiagnostics[1],
+        {
+          ...initialDiagnostics[0],
+          deduplicated: 2,
+          triaged: 2,
+          fallbackTriaged: 0,
+        },
+        { ...initialDiagnostics[1], fallbackTriaged: 0 },
         {
           ...initialDiagnostics[2],
           deduplicated: 1,
           triaged: 1,
+          fallbackTriaged: 0,
           rejectionCounts: { identity_merged: 1 },
         },
       ],
@@ -4427,13 +4450,15 @@ describe("manual editorial run", () => {
           ...initialDiagnostics[0],
           deduplicated: 2,
           triaged: 2,
+          fallbackTriaged: 0,
           assessed: 2,
         },
-        initialDiagnostics[1],
+        { ...initialDiagnostics[1], fallbackTriaged: 0 },
         {
           ...initialDiagnostics[2],
           deduplicated: 1,
           triaged: 1,
+          fallbackTriaged: 0,
           assessed: 1,
           rejectionCounts: { identity_merged: 1 },
         },
@@ -4799,6 +4824,7 @@ describe("manual editorial run", () => {
       discovered: 6,
       deduplicated: 4,
       triaged: 3,
+      fallbackTriaged: 0,
       assessed: 3,
       outcome: "success",
       rejectionCounts: {
@@ -4817,6 +4843,7 @@ describe("manual editorial run", () => {
       discovered: 1,
       deduplicated: 1,
       triaged: 1,
+      fallbackTriaged: 0,
       assessed: 1,
       outcome: "success",
       rejectionCounts: { identity_merged: 1 },
@@ -6942,6 +6969,238 @@ describe("manual editorial run", () => {
       expect(workflow.topicalFit).toEqual(expect.any(Number));
       expect(workflow).not.toHaveProperty("embedding");
     }
+  });
+
+  it("assesses a bounded configured-topic fallback when the normal research queue is sparse", async () => {
+    const laneId = "openalex:sparse-fallback";
+    const candidate = (
+      id: string,
+      marker: "NORMAL_FIT" | "NEAR_FIT" | "BELOW_FLOOR",
+      topicalEvidence = "Mechanistic interpretability for model oversight",
+    ): RawResearchCandidate => ({
+      ...rawResearchCandidate(id, `${marker} ${topicalEvidence}`),
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      originalUrl: `https://openalex.org/works/${id}`,
+      externalId: `openalex:${id}`,
+      externalIds: [`openalex:${id}`],
+      abstract:
+        `${marker}. ${topicalEvidence}. The paper reports a concrete method.`,
+      topics: topicalEvidence === "Unrelated materials theorem"
+        ? []
+        : ["Interpretability"],
+      metadata: {
+        discoveryFamily: "bibliographic",
+        discoveryLaneIds: [laneId],
+      },
+    });
+    const candidates = [
+      candidate("W-normal", "NORMAL_FIT"),
+      ...Array.from({ length: 5 }, (_, index) =>
+        candidate(`W-near-${index}`, "NEAR_FIT")
+      ),
+      candidate("W-topicless", "NEAR_FIT", "Unrelated materials theorem"),
+      ...Array.from({ length: 3 }, (_, index) =>
+        candidate(`W-below-${index}`, "BELOW_FLOOR")
+      ),
+    ];
+    let persistedDiagnostics: DiscoveryDiagnosticsState["diagnostics"] = [];
+    const researchRepository = {
+      getDiscoveryObservations: async () => [],
+      upsertDiscoveryObservations: async () => undefined,
+      getCachedResearchAssessment: async () => null,
+      putCachedResearchAssessment: async () => undefined,
+      recordDiscoveryDiagnostics: async (
+        _runId: string,
+        diagnostics: DiscoveryDiagnosticsState["diagnostics"],
+      ) => {
+        persistedDiagnostics = structuredClone(diagnostics);
+      },
+    };
+    const initialDiagnostic = {
+      laneId,
+      sourceId: "openalex",
+      discoveryFamily: "bibliographic" as const,
+      discovered: candidates.length,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "success" as const,
+      rejectionCounts: {},
+    };
+    const context = createProductionPipelineContext({
+      editionDate: "2033-03-14",
+      runId: "sparse-research-fallback",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new SparseResearchEmbeddingProvider(),
+        assessment: new FakeModelProvider({
+          generatedObjects: Array.from(
+            { length: 6 },
+            () => researchAssessment,
+          ),
+        }),
+      },
+      collectCandidates: async () => candidates,
+      loadDiscoveryDiagnostics: () => [initialDiagnostic],
+      researchRepository,
+    });
+
+    const normalized = await context.normalize(await context.collect());
+    const enriched = await context.enrich(normalized);
+    const prefiltered = await context.prefilter(enriched);
+    const assessed = await context.assess(prefiltered);
+
+    expect(prefiltered).toHaveLength(6);
+    expect(prefiltered[0]?.normalizedText).toContain("NORMAL_FIT");
+    expect(prefiltered.slice(1).every(({ normalizedText }) =>
+      normalizedText.includes("NEAR_FIT")
+    )).toBe(true);
+    expect(assessed).toHaveLength(6);
+    expect(persistedDiagnostics[0]).toEqual({
+      ...initialDiagnostic,
+      deduplicated: 10,
+      triaged: 6,
+      fallbackTriaged: 5,
+      assessed: 6,
+      rejectionCounts: { topic_mismatch: 4 },
+    });
+    const persistedJson = JSON.stringify(persistedDiagnostics);
+    for (const forbidden of [
+      "NORMAL_FIT",
+      "NEAR_FIT",
+      "BELOW_FLOOR",
+      ...candidates.flatMap(({ title, abstract }) =>
+        abstract === null ? [title] : [title, abstract]
+      ),
+      JSON.stringify([0.8, Math.sqrt(1 - 0.8 * 0.8)]),
+      JSON.stringify([0.4, Math.sqrt(1 - 0.4 * 0.4)]),
+      JSON.stringify([0.3, Math.sqrt(1 - 0.3 * 0.3)]),
+      JSON.stringify([1, 0]),
+    ]) {
+      expect(persistedJson).not.toContain(forbidden);
+    }
+    expect(persistedJson).not.toContain("embedding");
+  });
+
+  it("preserves fallback priority under degraded budget and makes no hard-stop assessment calls", async () => {
+    const candidate = (
+      id: string,
+      marker: "NORMAL_FIT" | "NEAR_FIT",
+      topicalEvidence: string,
+    ): RawResearchCandidate => ({
+      ...rawResearchCandidate(id, `${marker} ${topicalEvidence}`),
+      sourceId: "openalex",
+      sourceName: "OpenAlex",
+      originalUrl: `https://openalex.org/works/${id}`,
+      externalId: `openalex:${id}`,
+      externalIds: [`openalex:${id}`],
+      abstract:
+        `${marker}. ${topicalEvidence}. The paper reports a concrete method.`,
+      topics: ["Interpretability"],
+      metadata: { discoveryFamily: "bibliographic" },
+    });
+    const candidates = [
+      candidate(
+        "W-normal-0",
+        "NORMAL_FIT",
+        "Mechanistic interpretability for model oversight",
+      ),
+      candidate(
+        "W-normal-1",
+        "NORMAL_FIT",
+        "Mechanistic interpretability for model oversight",
+      ),
+      candidate(
+        "W-core-0",
+        "NEAR_FIT",
+        "Capability elicitation reveals hidden model abilities",
+      ),
+      candidate(
+        "W-core-1",
+        "NEAR_FIT",
+        "Capability elicitation reveals hidden model abilities",
+      ),
+      candidate(
+        "W-adjacent-0",
+        "NEAR_FIT",
+        "A broad framework for AI safety and governance",
+      ),
+      candidate(
+        "W-adjacent-1",
+        "NEAR_FIT",
+        "A broad framework for AI safety and governance",
+      ),
+    ];
+    const degradedAssessment = new FakeModelProvider({
+      generatedObjects: Array.from({ length: 4 }, () => researchAssessment),
+    });
+    const degraded = createProductionPipelineContext({
+      editionDate: "2033-03-15",
+      runId: "degraded-fallback-priority",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new SparseResearchEmbeddingProvider(),
+        assessment: degradedAssessment,
+      },
+      collectCandidates: async () => candidates,
+      budgetPolicy: {
+        state: "degraded",
+        radarSummaryTokens: 120,
+        featuredSummaryTokens: 900,
+      },
+    });
+
+    const normalized = await degraded.normalize(await degraded.collect());
+    const enriched = await degraded.enrich(normalized);
+    const prefiltered = await degraded.prefilter(enriched);
+    const assessed = await degraded.assess(prefiltered);
+
+    expect(prefiltered).toHaveLength(6);
+    expect(assessed).toHaveLength(4);
+    expect(degradedAssessment.generateRequests.map(({ sourcePacket }) =>
+      packetValue(sourcePacket, "title")
+    )).toEqual([
+      "NORMAL_FIT Mechanistic interpretability for model oversight",
+      "NORMAL_FIT Mechanistic interpretability for model oversight",
+      "NEAR_FIT Capability elicitation reveals hidden model abilities",
+      "NEAR_FIT Capability elicitation reveals hidden model abilities",
+    ]);
+    expect(degradedAssessment.generateRequests.every(({ sourcePacket }) =>
+      !sourcePacket.includes("A broad framework for AI safety and governance")
+    )).toBe(true);
+
+    const hardStopAssessment = new FakeModelProvider({
+      generatedObjects: Array.from({ length: 6 }, () => researchAssessment),
+    });
+    const hardStop = createProductionPipelineContext({
+      editionDate: "2033-03-16",
+      runId: "hard-stop-fallback-priority",
+      store: new FixtureStore(),
+      now: () => now,
+      providers: {
+        summary: new SparseResearchEmbeddingProvider(),
+        assessment: hardStopAssessment,
+      },
+      collectCandidates: async () => candidates,
+      budgetPolicy: {
+        state: "hard_stop",
+        radarSummaryTokens: 0,
+        featuredSummaryTokens: 900,
+      },
+    });
+
+    const hardStopNormalized = await hardStop.normalize(
+      await hardStop.collect(),
+    );
+    const hardStopEnriched = await hardStop.enrich(hardStopNormalized);
+    const hardStopPrefiltered = await hardStop.prefilter(hardStopEnriched);
+    const hardStopAssessed = await hardStop.assess(hardStopPrefiltered);
+
+    expect(hardStopAssessed).toHaveLength(0);
+    expect(hardStopAssessment.generateRequests).toHaveLength(0);
   });
 
   it("keeps two-window research selection stable when the same run retries", async () => {
