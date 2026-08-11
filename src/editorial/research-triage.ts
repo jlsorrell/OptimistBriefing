@@ -399,9 +399,16 @@ export function triageResearch(
     return true;
   };
 
-  const selectDiversified = (candidates: Item[], limit: number): void => {
+  const selectDiversified = (
+    candidates: Item[],
+    limit: number,
+    skipCoveredTopics = false,
+  ): void => {
     for (const topic of options.configuredTopics) {
-      if (selected.some((item) => researchTopics(item).includes(topic))) {
+      if (
+        skipCoveredTopics &&
+        selected.some((item) => researchTopics(item).includes(topic))
+      ) {
         continue;
       }
       const representative = candidates.find((item) =>
@@ -441,8 +448,8 @@ export function triageResearch(
     const adjacent = fallback
       .filter((item) => classifyResearchRelevance(item) === "adjacent")
       .sort(compareTriaged);
-    selectDiversified(core, selected.length + fallbackCapacity);
-    selectDiversified(adjacent, normalCount + fallbackCapacity);
+    selectDiversified(core, selected.length + fallbackCapacity, true);
+    selectDiversified(adjacent, normalCount + fallbackCapacity, true);
   }
 
   for (const item of [...normal, ...fallback]) {

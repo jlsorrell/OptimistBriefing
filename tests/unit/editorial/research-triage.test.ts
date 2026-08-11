@@ -683,6 +683,114 @@ describe("triageResearch", () => {
     ]);
   });
 
+  it.each([
+    ["omitted", {}],
+    ["zero", { fallbackTarget: 0 }],
+  ])("preserves legacy ordering for overlapping configured topics when fallback is %s", (
+    _fallbackState,
+    fallbackOptions,
+  ) => {
+    const candidates = [
+      researchItem("a", {
+        family: "arxiv",
+        topicalFit: 0.9,
+        topics: [
+          CONFIGURED_RESEARCH_TOPIC_IDS[0]!,
+          CONFIGURED_RESEARCH_TOPIC_IDS[1]!,
+        ],
+      }),
+      researchItem("b", {
+        family: "arxiv",
+        topicalFit: 0.8,
+        topics: [CONFIGURED_RESEARCH_TOPIC_IDS[1]!],
+      }),
+      researchItem("c", {
+        family: "bibliographic",
+        topicalFit: 0.7,
+        topics: [CONFIGURED_RESEARCH_TOPIC_IDS[0]!],
+      }),
+      researchItem("d", {
+        family: "official-publication",
+        topicalFit: 0.6,
+        topics: [CONFIGURED_RESEARCH_TOPIC_IDS[0]!],
+      }),
+    ];
+
+    const result = triageResearch(candidates, {
+      maximum: 3,
+      maximumPerFamily: 3,
+      maximumPerPublisherDomain: 3,
+      configuredTopics: CONFIGURED_RESEARCH_TOPIC_IDS,
+      now: NOW,
+      ...fallbackOptions,
+    });
+
+    expect(result.items.map(({ id }) => id)).toEqual(["a", "b", "c"]);
+    expect(result.admissions).toEqual([
+      { itemId: "a", route: "normal" },
+      { itemId: "b", route: "normal" },
+      { itemId: "c", route: "normal" },
+    ]);
+  });
+
+  it("preserves legacy normal ordering and shared fallback diversity for overlapping configured topics", () => {
+    const candidates = [
+      researchItem("a", {
+        family: "arxiv",
+        topicalFit: 0.9,
+        topics: [
+          CONFIGURED_RESEARCH_TOPIC_IDS[0]!,
+          CONFIGURED_RESEARCH_TOPIC_IDS[1]!,
+        ],
+      }),
+      researchItem("b", {
+        family: "arxiv",
+        topicalFit: 0.8,
+        topics: [CONFIGURED_RESEARCH_TOPIC_IDS[1]!],
+      }),
+      researchItem("c", {
+        family: "bibliographic",
+        topicalFit: 0.7,
+        topics: [CONFIGURED_RESEARCH_TOPIC_IDS[0]!],
+      }),
+      researchItem("fallback-covered", {
+        family: "arxiv",
+        topicalFit: 0.49,
+        topics: [CONFIGURED_RESEARCH_TOPIC_IDS[0]!],
+        normalizedText: "Capability elicitation reveals hidden model abilities.",
+      }),
+      researchItem("fallback-uncovered", {
+        family: "official-publication",
+        topicalFit: 0.4,
+        topics: [CONFIGURED_RESEARCH_TOPIC_IDS[2]!],
+        normalizedText: "Capability elicitation reveals hidden model abilities.",
+      }),
+    ];
+
+    const result = triageResearch(candidates, {
+      maximum: 4,
+      maximumPerFamily: 4,
+      maximumPerPublisherDomain: 4,
+      configuredTopics: CONFIGURED_RESEARCH_TOPIC_IDS,
+      now: NOW,
+      fallbackTarget: 4,
+      fallbackMinimumTopicalFit: 0.35,
+    });
+
+    expect(result.items.map(({ id }) => id)).toEqual([
+      "a",
+      "b",
+      "c",
+      "fallback-uncovered",
+    ]);
+    expect(result.admissions).toEqual([
+      { itemId: "a", route: "normal" },
+      { itemId: "b", route: "normal" },
+      { itemId: "c", route: "normal" },
+      { itemId: "fallback-uncovered", route: "near_match" },
+    ]);
+  });
+
   it("breaks equal-ranked ties by stable item ID instead of arrival order", () => {
     const candidates = ["c", "a", "b"].map((id) =>
       researchItem(id, { domain: `${id}.example` })

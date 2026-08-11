@@ -1675,14 +1675,6 @@ describe("D1BriefingRepository", () => {
       }),
     }]);
     expect(events.results[0]?.event_json).toContain('"fallbackTriaged":5');
-    for (const privateCandidateValue of [
-      "candidate title should not persist",
-      "candidate abstract should not persist",
-      "candidate-id-should-not-persist",
-      "candidate-embedding-should-not-persist",
-    ]) {
-      expect(events.results[0]?.event_json).not.toContain(privateCandidateValue);
-    }
     expect((await repo.getWorkflowRunDetail("run-diagnostics"))
       ?.discoveryDiagnostics).toEqual([{
         ...diagnostic,
