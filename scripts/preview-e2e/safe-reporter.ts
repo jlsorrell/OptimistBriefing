@@ -10,7 +10,7 @@ import type {
 const PROJECTS = new Set(["desktop", "tablet", "mobile"]);
 const FILE_MAX_SOURCE_LINES = {
   "tests/preview-e2e/access.spec.ts": 24,
-  "tests/preview-e2e/content.spec.ts": 65,
+  "tests/preview-e2e/content.spec.ts": 400,
   "tests/preview-e2e/responsive-accessibility.spec.ts": 89,
 } as const;
 const FIXTURE_FILE = "tests/preview-e2e/fixtures.ts";

@@ -33,7 +33,7 @@ header only when the request origin exactly matches the preview origin;
 requests to source sites, analytics endpoints, redirects, or lookalike hosts
 never receive it. Browser-global `extraHTTPHeaders` are not used.
 
-The desktop, tablet, and mobile projects run with one worker. All 42 tests are
+The desktop, tablet, and mobile projects run with one worker. All preview tests are
 read-only, traces/screenshots/video are disabled, and nonsecret Playwright
 output stays in the runner's mode-`0700` directory directly under
 `os.tmpdir()`. Identity-bound cleanup removes that exact directory after
@@ -83,10 +83,13 @@ Review the canary in this order:
    assessment cache entry.
 
 Run the read-only preview suite only after the approved canary edition is
-available. Its content assertions verify observable commentary and
-implementation labels, distinct official-lab Technology and AI Policy items,
-and omission of empty sections. Golden and unit evaluation—not rendered HTML—
-enforce the score floor and gate exclusions.
+available. Its content assertions fetch the current `/api/edition/latest` and
+require the homepage date, present sections, counts, entries, source hosts, and
+conditional labels to agree. Empty sections are omitted and valid in sparse or
+partial editions. Route-fulfilled cases preserve the seeded July 29 edition and
+richer layered Research, Technology, and AI Policy coverage independently of
+live contents. Golden and unit evaluation—not rendered HTML—enforce the score
+floor and gate exclusions.
 
 ## Secret-free evidence
 
