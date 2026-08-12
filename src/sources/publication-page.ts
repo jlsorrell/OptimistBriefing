@@ -267,16 +267,17 @@ export class PublicationPageAdapter {
       const found = this.reviewedItem(item, response.finalUrl);
       return found === null ? [] : [found];
     });
-    const plausible = validated.filter((item) =>
-      mapResearchTopicIds([
-        item.title,
-        item.summary ?? "",
-        item.category ?? "",
-      ]).length > 0 &&
-      (item.publishedAt === null ||
-        insideCollectionWindow(item.publishedAt, validWindow)),
+    const seenUrls = new Set<string>();
+    const unique = validated.filter((item) => {
+      if (seenUrls.has(item.url)) return false;
+      seenUrls.add(item.url);
+      return true;
+    });
+    const recent = unique.filter((item) =>
+      item.publishedAt === null ||
+      insideCollectionWindow(item.publishedAt, validWindow),
     );
-    const candidates = (await Promise.all(plausible.map(async (item, index) => {
+    const candidates = (await Promise.all(recent.map(async (item, index) => {
       let extraction = noExtraction();
       let originalUrl = item.url;
       let retrievedAt = response.retrievedAt;
@@ -322,6 +323,14 @@ export class PublicationPageAdapter {
         publishedAt === null ||
         !insideCollectionWindow(publishedAt, validWindow)
       ) return null;
+      if (mapResearchTopicIds([
+        item.title,
+        item.summary ?? "",
+        item.category ?? "",
+        extraction.title ?? "",
+        extraction.excerpt ?? "",
+        extraction.text ?? "",
+      ]).length === 0) return null;
       return this.candidateFromReviewedItem({
         item: { ...item, publishedAt },
         extraction,
