@@ -116,7 +116,7 @@ export class PapersWithCodeAdapter {
         kind: "publication",
         sourceId: this.source.id,
         sourceName: this.source.canonicalName,
-        sourceRole: this.source.role,
+        sourceRole: "blog",
         title,
         originalUrl: paperUrl.toString(),
         externalId: identifier,

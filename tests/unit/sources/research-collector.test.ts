@@ -3088,6 +3088,7 @@ describe("provider endpoint and identifier policy", () => {
       candidates: [],
       succeededSourceIds: [],
       failures: [{ sourceId: "alignment-lab", kind: "policy" }],
+      sourceObservations: [],
     });
     expect(fetch).not.toHaveBeenCalled();
   });

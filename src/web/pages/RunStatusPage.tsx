@@ -22,6 +22,19 @@ const REJECTION_LABELS = [
   ["capacity_limited", "Capacity limited"],
 ] as const;
 
+const OUTCOME_LABELS: Record<
+  WorkflowRunDetail["discoveryDiagnostics"][number]["outcome"],
+  string
+> = {
+  success: "Success",
+  fetch: "Fetch",
+  parse: "Parse",
+  policy: "Policy",
+  timeout: "Timeout",
+  unsupported_media: "Unsupported media",
+  unknown: "Unknown",
+};
+
 function rejectionSummary(
   counts: WorkflowRunDetail["discoveryDiagnostics"][number]["rejectionCounts"],
 ): string {
@@ -195,6 +208,7 @@ export function RunStatusPage() {
             <thead>
               <tr>
                 <th scope="col">Lane</th>
+                <th scope="col">Observed</th>
                 <th scope="col">Discovered</th>
                 <th scope="col">Deduplicated</th>
                 <th scope="col">Triaged</th>
@@ -208,13 +222,14 @@ export function RunStatusPage() {
               {detail.discoveryDiagnostics.map((diagnostic) => (
                 <tr key={`${diagnostic.laneId}:${diagnostic.sourceId}`}>
                   <td>{diagnostic.laneId}</td>
+                  <td>{diagnostic.observed ?? "—"}</td>
                   <td>{diagnostic.discovered}</td>
                   <td>{diagnostic.deduplicated}</td>
                   <td>{diagnostic.triaged}</td>
                   <td>{diagnostic.fallbackTriaged ?? 0}</td>
                   <td>{diagnostic.assessed}</td>
                   <td>{rejectionSummary(diagnostic.rejectionCounts)}</td>
-                  <td>{diagnostic.outcome}</td>
+                  <td>{OUTCOME_LABELS[diagnostic.outcome]}</td>
                 </tr>
               ))}
             </tbody>
