@@ -141,7 +141,7 @@ export class PapersWithCodeAdapter {
         },
       })];
     });
-    if (response.body.trim().length > 0 && discovered.length === 0) {
+    if (response.body.length > 0 && discovered.length === 0) {
       throw new SyntaxError("Papers with Code recent-paper list was not interpretable.");
     }
     return {

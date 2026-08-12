@@ -1568,4 +1568,26 @@ describe("PapersWithCodeAdapter", () => {
 
     await expect(adapter.collect(window)).rejects.toThrow(SyntaxError);
   });
+
+  it("treats a whitespace-only HTML response as reviewed-list parser drift", async () => {
+    const adapter = new PapersWithCodeAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(" \n\t ", {
+          headers: { "content-type": "text/html" },
+        })),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      ResearchSourceRecordSchema.parse(source({
+        id: "papers-with-code-co",
+        canonicalName: "Papers with Code",
+        canonicalUrl: "https://paperswithcode.co/",
+        role: "analysis",
+        restrictions: { bodyRetrieval: "permitted", paywall: "none", contentUse: "discovery-metadata-only" },
+        discoveryMechanism: "page",
+        sectionEligibility: ["research", "research_radar"],
+      })),
+    );
+
+    await expect(adapter.collect(window)).rejects.toThrow(SyntaxError);
+  });
 });
