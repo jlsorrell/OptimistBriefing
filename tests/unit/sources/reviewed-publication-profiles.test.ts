@@ -160,6 +160,35 @@ describe("reviewed publication profiles", () => {
       datetime="2026-08-02Tnot-a-time">August 2, 2026</time>`))).toBeNull();
   });
 
+  it.each([
+    ["2026-02-30", null],
+    ["February 30 2026", null],
+    ["2024-02-29", "2024-02-29T00:00:00.000Z"],
+    ["February 29 2024", "2024-02-29T00:00:00.000Z"],
+    ["December 31 2026", "2026-12-31T00:00:00.000Z"],
+    ["January 1, 2027", "2027-01-01T00:00:00.000Z"],
+  ])("parses the reviewed calendar date %s strictly in UTC", (
+    date,
+    expected,
+  ) => {
+    const profile = reviewedPublicationProfile("anthropic")!;
+    const entries = profile.parseListing(documentFrom(`<!doctype html>
+      <a href="/research/calendar-date">
+        <h2>Strict calendar date result</h2>
+        <time datetime="${date}">${date}</time>
+      </a>`), "https://www.anthropic.com/research");
+
+    expect(entries[0]?.publishedAt).toBe(expected);
+  });
+
+  it("preserves a valid explicitly offset reviewed timestamp", () => {
+    const profile = reviewedPublicationProfile("google-deepmind")!;
+
+    expect(profile.parseDetailPublishedAt(documentFrom(`<!doctype html><time
+      datetime="2026-08-02T23:30:00-04:00">August 2, 2026</time>`)))
+      .toBe("2026-08-03T03:30:00.000Z");
+  });
+
   it("extracts Google Research cards while isolating malformed siblings", async () => {
     const profile = reviewedPublicationProfile("google-research")!;
     const html = await loadFixture("google-research-blog-listing.html");

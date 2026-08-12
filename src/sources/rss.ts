@@ -9,6 +9,7 @@ import {
 } from "./provider-text";
 import {
   assertSafeOutboundUrl,
+  UnsafeOutboundUrlError,
   type OutboundUrlPolicy,
 } from "./outbound-url";
 import {
@@ -42,6 +43,7 @@ export type ConfiguredFeed = {
   feedUrlPolicy?: unknown;
   articleUrlPolicy?: unknown;
   maxEntries?: unknown;
+  requireExactEndpoint?: unknown;
 };
 
 type NormalizedFeedEntry = {
@@ -77,6 +79,19 @@ function feedEntries(value: unknown): unknown[] {
   const feed = record(root?.feed);
   if (feed) return asArray(feed.entry);
   throw new SyntaxError("Unsupported feed envelope.");
+}
+
+function parseFeedXml(value: string): unknown {
+  try {
+    return new XMLParser({
+      ignoreAttributes: false,
+      removeNSPrefix: true,
+      trimValues: true,
+      parseTagValue: false,
+    }).parse(value, true);
+  } catch {
+    throw new SyntaxError("Feed XML was not interpretable.");
+  }
 }
 
 function strings(value: unknown): string[] {
@@ -240,6 +255,9 @@ export class RssAdapter {
             const maxEntries = feed.maxEntries === undefined
               ? undefined
               : ConfiguredFeedMaxEntriesSchema.parse(feed.maxEntries);
+            const requireExactEndpoint = z.literal(true).optional().parse(
+              feed.requireExactEndpoint,
+            ) === true;
             const feedUrl = assertSafeOutboundUrl(
               z.string().min(1).parse(feed.feedUrl),
               feedUrlPolicy,
@@ -249,6 +267,17 @@ export class RssAdapter {
               feedUrl,
               { urlPolicy: feedUrlPolicy },
             );
+            if (
+              requireExactEndpoint &&
+              assertSafeOutboundUrl(
+                response.finalUrl,
+                feedUrlPolicy,
+              ).toString() !== feedUrl
+            ) {
+              throw new UnsafeOutboundUrlError(
+                "final feed endpoint is not the reviewed endpoint",
+              );
+            }
             if (response.notModified || response.body === null) {
               return { candidates: [], observed: 0 };
             }
@@ -263,12 +292,7 @@ export class RssAdapter {
             ) {
               throw new UnsupportedSourceMediaTypeError();
             }
-            const parsedXml: unknown = new XMLParser({
-              ignoreAttributes: false,
-              removeNSPrefix: true,
-              trimValues: true,
-              parseTagValue: false,
-            }).parse(response.body);
+            const parsedXml = parseFeedXml(response.body);
             const rawEntries = feedEntries(parsedXml);
             const entries = maxEntries === undefined
               ? rawEntries

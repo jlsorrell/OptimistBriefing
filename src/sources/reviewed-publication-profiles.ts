@@ -1,3 +1,4 @@
+import { exactCalendarTimestamp } from "./calendar-date";
 import { boundProviderText } from "./provider-text";
 import {
   MAX_PROVIDER_EVIDENCE_CHARACTERS,
@@ -47,27 +48,7 @@ function providerEvidence(value: string | null | undefined): string | null {
 }
 
 function exactCalendarDate(value: string | null | undefined): string | null {
-  if (typeof value !== "string") return null;
-  const raw = value.trim();
-  if (raw.length === 0) return null;
-  const day = /^(\d{4})-(\d{2})-(\d{2})(?:T.*)?$/.exec(raw);
-  if (day !== null) {
-    const [year, month, date] = day.slice(1).map(Number);
-    const calendar = new Date(Date.UTC(year!, month! - 1, date!));
-    if (
-      calendar.getUTCFullYear() !== year ||
-      calendar.getUTCMonth() !== month! - 1 ||
-      calendar.getUTCDate() !== date
-    ) return null;
-    const timestamp = Date.parse(raw);
-    if (raw.length > 10 && !Number.isFinite(timestamp)) return null;
-    return Number.isFinite(timestamp)
-      ? new Date(timestamp).toISOString()
-      : `${raw.slice(0, 10)}T00:00:00.000Z`;
-  }
-  if (!/[A-Za-z]+\s+\d{1,2}(?:,|\s)\s*\d{4}/.test(raw)) return null;
-  const timestamp = Date.parse(raw);
-  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+  return exactCalendarTimestamp(value);
 }
 
 function resolvedUrl(value: string | null, baseUrl: string): string | null {

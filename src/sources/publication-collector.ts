@@ -247,20 +247,35 @@ export function createPublicationCollectorFromCatalog(options: {
     try {
       const source = SourceRecordSchema.parse(input);
       const collectionSource = ResearchSourceRecordSchema.parse(source);
-      if (papersWithCode) {
-        pageAdapters.push(new PapersWithCodeAdapter(options.http, collectionSource));
-        continue;
-      }
       const feedUrlPolicy = CatalogPolicySchema.parse(
         source.restrictions.feedUrlPolicy,
       ) as OutboundUrlPolicy;
       const articleUrlPolicy = CatalogPolicySchema.parse(
         source.restrictions.articleUrlPolicy,
       ) as OutboundUrlPolicy;
-      if (source.id === "openai" && source.discoveryMechanism === "rss") {
+      if (papersWithCode) {
+        if (source.discoveryMechanism !== "page") {
+          throw new SyntaxError(
+            "Papers with Code requires page discovery.",
+          );
+        }
+        pageAdapters.push(new PapersWithCodeAdapter(
+          options.http,
+          collectionSource,
+          z.string().min(1).parse(source.restrictions.pageUrl),
+          feedUrlPolicy,
+          articleUrlPolicy,
+        ));
+        continue;
+      }
+      if (source.id === "openai") {
+        if (source.discoveryMechanism !== "rss") {
+          throw new SyntaxError("OpenAI requires RSS discovery.");
+        }
         pageAdapters.push(new OpenAiPublicationFeedAdapter(
           options.http,
           collectionSource,
+          z.string().min(1).parse(source.restrictions.feedUrl),
           feedUrlPolicy,
           articleUrlPolicy,
         ));

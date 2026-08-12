@@ -3,6 +3,7 @@ import type { D1Migration } from "@cloudflare/vitest-pool-workers";
 import { describe, expect, it } from "vitest";
 
 import { D1BriefingRepository } from "../../../src/db/d1-repository";
+import type { DiscoveryMechanism } from "../../../src/db/repository";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv {
@@ -106,6 +107,7 @@ async function source(id: string, database = env.UPGRADE_DB) {
 async function replaceRestrictions(
   id: string,
   restrictions: Record<string, unknown>,
+  discoveryMechanism?: DiscoveryMechanism,
 ): Promise<void> {
   const current = await source(id);
   await env.UPGRADE_DB.prepare(
@@ -113,7 +115,7 @@ async function replaceRestrictions(
   ).bind(
     JSON.stringify({
       ...restrictions,
-      discoveryMechanism: current.discoveryMechanism,
+      discoveryMechanism: discoveryMechanism ?? current.discoveryMechanism,
       sectionEligibility: current.sectionEligibility,
     }),
     id,
@@ -276,6 +278,59 @@ describe("non-arXiv research source migration", () => {
     await execute0012();
 
     expect(await source(id)).toMatchObject(expected);
+  });
+
+  it.each([
+    {
+      label: "Papers with Code endpoint update",
+      id: "papers-with-code-co",
+      absentPolicies: false,
+    },
+    {
+      label: "DeepMind endpoint update",
+      id: "google-deepmind",
+      absentPolicies: false,
+    },
+    {
+      label: "Anthropic exact-policy update",
+      id: "anthropic",
+      absentPolicies: false,
+    },
+    {
+      label: "Anthropic absent-policy fill",
+      id: "anthropic",
+      absentPolicies: true,
+    },
+    {
+      label: "Google Research absent-policy fill",
+      id: "google-research",
+      absentPolicies: true,
+    },
+    {
+      label: "OpenAI feed conversion",
+      id: "openai",
+      absentPolicies: false,
+    },
+  ])("preserves $label for a non-page discovery mechanism", async ({
+    id,
+    absentPolicies,
+  }) => {
+    await applyThrough0011();
+    const before = await source(id);
+    const restrictions = absentPolicies
+      ? without(
+          before.restrictions,
+          "feedUrlPolicy",
+          "articleUrlPolicy",
+        )
+      : before.restrictions;
+    await replaceRestrictions(id, restrictions, "manual");
+
+    await execute0012();
+
+    const after = await source(id);
+    expect(after.discoveryMechanism).toBe("manual");
+    expect(after.restrictions).toEqual(restrictions);
   });
 
   it.each([

@@ -83,6 +83,7 @@ export class OpenAiPublicationFeedAdapter implements PublicationSourceAdapter {
   constructor(
     private readonly http: SourceHttpClient,
     private readonly source: ResearchSourceRecord,
+    feedUrl: string,
     feedUrlPolicy: OutboundUrlPolicy,
     private readonly articleUrlPolicy: OutboundUrlPolicy,
   ) {
@@ -90,13 +91,19 @@ export class OpenAiPublicationFeedAdapter implements PublicationSourceAdapter {
       throw new SyntaxError("Reviewed publication feed source must be OpenAI.");
     }
     this.sourceId = source.id;
-    assertSafeOutboundUrl(OPENAI_NEWS_RSS_URL, feedUrlPolicy);
+    const endpoint = assertSafeOutboundUrl(feedUrl, feedUrlPolicy);
+    if (endpoint.toString() !== OPENAI_NEWS_RSS_URL) {
+      throw new UnsafeOutboundUrlError(
+        "OpenAI feed endpoint is not the reviewed endpoint",
+      );
+    }
     this.rss = new RssAdapter(http, [{
       source,
-      feedUrl: OPENAI_NEWS_RSS_URL,
+      feedUrl,
       feedUrlPolicy,
       articleUrlPolicy,
       maxEntries: 20,
+      requireExactEndpoint: true,
     }]);
   }
 

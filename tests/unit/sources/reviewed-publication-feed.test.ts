@@ -35,7 +35,7 @@ function openAiSource(overrides: Partial<SourceRecord> = {}): SourceRecord {
       bodyRetrieval: "permitted",
       paywall: "none",
       contentUse: "ephemeral-summarization",
-      feedUrl: "https://openai.com/catalog-supplied-wrong-feed.xml",
+      feedUrl: "https://openai.com/news/rss.xml",
       feedUrlPolicy: {
         allowedHosts: ["openai.com"],
         allowedPorts: [""],
@@ -161,6 +161,7 @@ describe("reviewed OpenAI publication feed", () => {
         now: () => new Date("2026-08-02T12:00:00.000Z"),
       }),
       ResearchSourceRecordSchema.parse(source),
+      source.restrictions.feedUrl as string,
       source.restrictions.feedUrlPolicy as never,
       source.restrictions.articleUrlPolicy as never,
     );
@@ -214,6 +215,7 @@ describe("reviewed OpenAI publication feed", () => {
     const adapter = new OpenAiPublicationFeedAdapter(
       new SourceHttpClient({ fetch, maxRetries: 0 }),
       ResearchSourceRecordSchema.parse(source),
+      source.restrictions.feedUrl as string,
       source.restrictions.feedUrlPolicy as never,
       source.restrictions.articleUrlPolicy as never,
     );

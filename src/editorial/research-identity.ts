@@ -128,20 +128,51 @@ function intersects(
   return false;
 }
 
+function providerIdentityConflict(
+  left: ReadonlySet<string>,
+  right: ReadonlySet<string>,
+): boolean {
+  const leftByProvider = new Map<string, Set<string>>();
+  for (const identity of left) {
+    const separator = identity.indexOf(":");
+    const provider = identity.slice(0, separator);
+    leftByProvider.set(provider, new Set([
+      ...(leftByProvider.get(provider) ?? []),
+      identity,
+    ]));
+  }
+  const rightByProvider = new Map<string, Set<string>>();
+  for (const identity of right) {
+    const separator = identity.indexOf(":");
+    const provider = identity.slice(0, separator);
+    rightByProvider.set(provider, new Set([
+      ...(rightByProvider.get(provider) ?? []),
+      identity,
+    ]));
+  }
+  return [...leftByProvider].some(([provider, leftIdentities]) => {
+    const rightIdentities = rightByProvider.get(provider);
+    return rightIdentities !== undefined &&
+      !intersects(leftIdentities, rightIdentities);
+  });
+}
+
 function durableIdentityConflict(
   left: DurableIdentities,
   right: DurableIdentities,
 ): boolean {
-  if (left.arxiv.size > 0 && right.arxiv.size > 0) {
-    return !intersects(left.arxiv, right.arxiv);
-  }
-  if (left.doi.size > 0 && right.doi.size > 0) {
-    return !intersects(left.doi, right.doi);
-  }
-  if (left.provider.size > 0 && right.provider.size > 0) {
-    return !intersects(left.provider, right.provider);
-  }
-  return false;
+  const families: readonly (readonly [
+    ReadonlySet<string>,
+    ReadonlySet<string>,
+  ])[] = [
+    [left.arxiv, right.arxiv],
+    [left.doi, right.doi],
+  ];
+  return families.some(([leftFamily, rightFamily]) =>
+    leftFamily.size > 0 &&
+    rightFamily.size > 0 &&
+    !intersects(leftFamily, rightFamily)
+  ) || providerIdentityConflict(left.provider, right.provider);
 }
 
 function mergeDurableIdentities(

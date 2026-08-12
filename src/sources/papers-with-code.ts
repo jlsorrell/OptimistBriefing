@@ -1,8 +1,13 @@
 import { parseHTML } from "linkedom";
 
+import { exactCalendarTimestamp } from "./calendar-date";
 import { SourceHttpClient } from "./http-client";
 import { normalizeArxivIdentifier } from "./identifiers";
-import { assertSafeOutboundUrl, type OutboundUrlPolicy } from "./outbound-url";
+import {
+  assertSafeOutboundUrl,
+  UnsafeOutboundUrlError,
+  type OutboundUrlPolicy,
+} from "./outbound-url";
 import { boundProviderText } from "./provider-text";
 import {
   CollectionWindowSchema,
@@ -18,11 +23,6 @@ import {
 
 const PAPERS_WITH_CODE_ORIGIN = "https://paperswithcode.co";
 const PAPERS_WITH_CODE_URL = `${PAPERS_WITH_CODE_ORIGIN}/papers/recent`;
-const PAPERS_WITH_CODE_POLICY: OutboundUrlPolicy = {
-  allowedHosts: ["paperswithcode.co"],
-  allowedPorts: [""],
-  allowedPathPrefixes: ["/"],
-};
 
 function normalizedText(value: string | null | undefined): string | null {
   const normalized = value?.replace(/\s+/g, " ").trim() ?? "";
@@ -31,9 +31,7 @@ function normalizedText(value: string | null | undefined): string | null {
 
 function publishedAt(value: string | null | undefined): string | null {
   const normalized = normalizedText(value);
-  if (normalized === null) return null;
-  const timestamp = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(normalized) ? `${normalized}T00:00:00Z` : normalized);
-  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
+  return normalized === null ? null : exactCalendarTimestamp(normalized);
 }
 
 function paperIdentity(pathname: string): string | null {
@@ -61,10 +59,19 @@ export class PapersWithCodeAdapter {
   constructor(
     private readonly http: SourceHttpClient,
     source: ResearchSourceInput,
+    private readonly listingUrl: string,
+    private readonly listingUrlPolicy: OutboundUrlPolicy,
+    private readonly articleUrlPolicy: OutboundUrlPolicy,
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
     this.sourceId = this.source.id;
     this.laneId = `${this.source.id}:page`;
+    const endpoint = assertSafeOutboundUrl(listingUrl, listingUrlPolicy);
+    if (endpoint.toString() !== PAPERS_WITH_CODE_URL) {
+      throw new UnsafeOutboundUrlError(
+        "Papers with Code endpoint is not the reviewed endpoint",
+      );
+    }
   }
 
   async collect(window: CollectionWindow): Promise<RawPublicationCandidate[]> {
@@ -76,29 +83,34 @@ export class PapersWithCodeAdapter {
   ): Promise<{ candidates: RawPublicationCandidate[]; observed: number }> {
     const validWindow = CollectionWindowSchema.parse(window);
     if (!this.source.enabled) return { candidates: [], observed: 0 };
-    const response = await this.http.get(this.source, PAPERS_WITH_CODE_URL, {
+    const response = await this.http.get(this.source, this.listingUrl, {
       headers: { accept: "text/html,application/xhtml+xml" },
       useValidators: false,
-      urlPolicy: PAPERS_WITH_CODE_POLICY,
+      urlPolicy: this.listingUrlPolicy,
     });
+    const finalUrl = assertSafeOutboundUrl(
+      response.finalUrl,
+      this.listingUrlPolicy,
+    );
+    if (finalUrl.toString() !== PAPERS_WITH_CODE_URL) {
+      throw new UnsafeOutboundUrlError(
+        "Papers with Code final endpoint is not the reviewed endpoint",
+      );
+    }
     if (response.body === null) return { candidates: [], observed: 0 };
     const mediaType = response.contentType?.split(";", 1)[0]?.trim().toLowerCase();
     if (mediaType !== "text/html" && mediaType !== "application/xhtml+xml") {
       throw new UnsupportedSourceMediaTypeError();
-    }
-    const finalUrl = assertSafeOutboundUrl(response.finalUrl, PAPERS_WITH_CODE_POLICY);
-    if (
-      finalUrl.origin !== PAPERS_WITH_CODE_ORIGIN ||
-      finalUrl.pathname !== "/papers/recent"
-    ) {
-      return { candidates: [], observed: 0 };
     }
     const { document } = parseHTML(response.body);
     const rows = [...document.querySelectorAll("li")].slice(0, 100);
     const discovered = rows.flatMap((row): RawPublicationCandidate[] => {
       const paperLink = [...row.querySelectorAll("a[href]")].find((link) => {
         try {
-          const url = assertSafeOutboundUrl(new URL(link.getAttribute("href") ?? "", finalUrl), PAPERS_WITH_CODE_POLICY);
+          const url = assertSafeOutboundUrl(
+            new URL(link.getAttribute("href") ?? "", finalUrl),
+            this.articleUrlPolicy,
+          );
           return url.origin === PAPERS_WITH_CODE_ORIGIN && paperIdentity(url.pathname) !== null;
         } catch { return false; }
       });
@@ -107,7 +119,12 @@ export class PapersWithCodeAdapter {
         maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
       });
       let paperUrl: URL;
-      try { paperUrl = assertSafeOutboundUrl(new URL(paperLink.getAttribute("href") ?? "", finalUrl), PAPERS_WITH_CODE_POLICY); } catch { return []; }
+      try {
+        paperUrl = assertSafeOutboundUrl(
+          new URL(paperLink.getAttribute("href") ?? "", finalUrl),
+          this.articleUrlPolicy,
+        );
+      } catch { return []; }
       const identifier = paperIdentity(paperUrl.pathname);
       const time = row.querySelector("time");
       const date = publishedAt(time?.getAttribute("datetime") ?? time?.textContent);
