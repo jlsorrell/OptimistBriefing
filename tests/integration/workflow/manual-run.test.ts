@@ -7111,39 +7111,30 @@ describe("manual editorial run", () => {
     }
   });
 
-  it("assesses a bounded configured-topic fallback when the normal research queue is sparse", async () => {
-    const laneId = "openalex:sparse-fallback";
-    const candidate = (
-      id: string,
-      marker: "NORMAL_FIT" | "NEAR_FIT" | "BELOW_FLOOR",
-      topicalEvidence = "Mechanistic interpretability for model oversight",
-    ): RawResearchCandidate => ({
-      ...rawResearchCandidate(id, `${marker} ${topicalEvidence}`),
-      sourceId: "openalex",
-      sourceName: "OpenAlex",
-      originalUrl: `https://openalex.org/works/${id}`,
-      externalId: `openalex:${id}`,
-      externalIds: [`openalex:${id}`],
-      abstract:
-        `${marker}. ${topicalEvidence}. The paper reports a concrete method.`,
-      topics: topicalEvidence === "Unrelated materials theorem"
-        ? []
-        : ["Interpretability"],
+  it("uses spare capacity after seven normal candidates qualify", async () => {
+    const normal = Array.from({ length: 7 }, (_, index) => ({
+      ...rawResearchCandidate(`2608.${String(40_000 + index)}`, `NORMAL_FIT normal ${index}`),
+      abstract: `NORMAL_FIT. Mechanistic interpretability for model oversight ${index}.`,
       metadata: {
-        discoveryFamily: "bibliographic",
-        discoveryLaneIds: [laneId],
+        discoveryFamily: "arxiv",
+        discoveryLaneIds: ["arxiv:daily"],
       },
-    });
-    const candidates = [
-      candidate("W-normal", "NORMAL_FIT"),
-      ...Array.from({ length: 5 }, (_, index) =>
-        candidate(`W-near-${index}`, "NEAR_FIT")
-      ),
-      candidate("W-topicless", "NEAR_FIT", "Unrelated materials theorem"),
-      ...Array.from({ length: 3 }, (_, index) =>
-        candidate(`W-below-${index}`, "BELOW_FLOOR")
-      ),
-    ];
+    }));
+    const papersWithCode = Array.from({ length: 3 }, (_, index): RawResearchCandidate => ({
+      ...rawResearchCandidate(`pwc-${index}`, `NEAR_FIT Papers with Code ${index}`),
+      sourceId: "papers-with-code-co",
+      sourceName: "Papers with Code",
+      sourceRole: "blog",
+      originalUrl: `https://paperswithcode.com/paper/example-${index}`,
+      externalId: `paperswithcode:example-${index}`,
+      externalIds: [`paperswithcode:example-${index}`],
+      abstract: `NEAR_FIT. Capability elicitation reveals hidden model abilities ${index}.`,
+      metadata: {
+        discoveryFamily: "official-publication",
+        discoveryLaneIds: ["papers-with-code-co:page"],
+      },
+    }));
+    const candidates = [...normal, ...papersWithCode];
     let persistedDiagnostics: DiscoveryDiagnosticsState["diagnostics"] = [];
     const researchRepository = {
       getDiscoveryObservations: async () => [],
@@ -7157,33 +7148,43 @@ describe("manual editorial run", () => {
         persistedDiagnostics = structuredClone(diagnostics);
       },
     };
-    const initialDiagnostic = {
-      laneId,
-      sourceId: "openalex",
-      discoveryFamily: "bibliographic" as const,
-      discovered: candidates.length,
-      deduplicated: 0,
-      triaged: 0,
-      assessed: 0,
-      outcome: "success" as const,
-      rejectionCounts: {},
-    };
+    const initialDiagnostics = [
+      {
+        laneId: "arxiv:daily",
+        sourceId: "arxiv",
+        discoveryFamily: "arxiv" as const,
+        discovered: normal.length,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "success" as const,
+        rejectionCounts: {},
+      },
+      {
+        laneId: "papers-with-code-co:page",
+        sourceId: "papers-with-code-co",
+        discoveryFamily: "official-publication" as const,
+        discovered: papersWithCode.length,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "success" as const,
+        rejectionCounts: {},
+      },
+    ];
     const context = createProductionPipelineContext({
       editionDate: "2033-03-14",
-      runId: "sparse-research-fallback",
+      runId: "spare-research-capacity",
       store: new FixtureStore(),
       now: () => now,
       providers: {
         summary: new SparseResearchEmbeddingProvider(),
         assessment: new FakeModelProvider({
-          generatedObjects: Array.from(
-            { length: 6 },
-            () => researchAssessment,
-          ),
+          generatedObjects: Array.from({ length: 10 }, () => researchAssessment),
         }),
       },
       collectCandidates: async () => candidates,
-      loadDiscoveryDiagnostics: () => [initialDiagnostic],
+      loadDiscoveryDiagnostics: () => initialDiagnostics,
       researchRepository,
     });
 
@@ -7192,32 +7193,31 @@ describe("manual editorial run", () => {
     const prefiltered = await context.prefilter(enriched);
     const assessed = await context.assess(prefiltered);
 
-    expect(prefiltered).toHaveLength(6);
-    expect(prefiltered[0]?.normalizedText).toContain("NORMAL_FIT");
-    expect(prefiltered.slice(1).every(({ normalizedText }) =>
-      normalizedText.includes("NEAR_FIT")
+    expect(prefiltered).toHaveLength(10);
+    expect(prefiltered.slice(0, 7).every(({ normalizedText }) =>
+      normalizedText.includes("NORMAL_FIT")
     )).toBe(true);
-    expect(assessed).toHaveLength(6);
-    expect(persistedDiagnostics[0]).toEqual({
-      ...initialDiagnostic,
-      deduplicated: 10,
-      triaged: 6,
-      fallbackTriaged: 5,
-      assessed: 6,
-      rejectionCounts: { topic_mismatch: 4 },
-    });
+    expect(prefiltered.slice(7).map((item) => item.sourceRefs[0]?.id))
+      .toEqual(["papers-with-code-co", "papers-with-code-co", "papers-with-code-co"]);
+    expect(assessed).toHaveLength(10);
+    expect(persistedDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        laneId: "papers-with-code-co:page",
+        triaged: 3,
+        fallbackTriaged: 3,
+        assessed: 3,
+      }),
+    ]));
     const persistedJson = JSON.stringify(persistedDiagnostics);
     for (const forbidden of [
       "NORMAL_FIT",
       "NEAR_FIT",
-      "BELOW_FLOOR",
       ...candidates.flatMap(({ title, abstract }) =>
         abstract === null ? [title] : [title, abstract]
       ),
       JSON.stringify([0.8, Math.sqrt(1 - 0.8 * 0.8)]),
       JSON.stringify([0.4, Math.sqrt(1 - 0.4 * 0.4)]),
-      JSON.stringify([0.3, Math.sqrt(1 - 0.3 * 0.3)]),
-      JSON.stringify([1, 0]),
+      ...papersWithCode.map(({ originalUrl }) => originalUrl),
     ]) {
       expect(persistedJson).not.toContain(forbidden);
     }

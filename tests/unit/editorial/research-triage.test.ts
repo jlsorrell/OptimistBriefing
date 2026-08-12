@@ -401,8 +401,9 @@ describe("triageResearch", () => {
       maximumPerPublisherDomain: 6,
       configuredTopics: CONFIGURED_RESEARCH_TOPIC_IDS,
       now: NOW,
-      fallbackTarget: 6,
+      nearMatchAllowance: 6,
       fallbackMinimumTopicalFit: 0.35,
+      maximumPerPublisherDomainByFamily: { arxiv: 12 },
     };
 
     it("fills a sparse normal queue with core then adjacent near-matches", () => {
@@ -459,23 +460,101 @@ describe("triageResearch", () => {
       });
     });
 
-    it("does not use near-matches when six normal candidates meet the target", () => {
-      const normal = Array.from({ length: 6 }, (_, index) =>
+    it("uses spare capacity after seven normal candidates qualify", () => {
+      const normal = Array.from({ length: 7 }, (_, index) =>
         researchItem(`normal-${index}`, {
-          topicalFit: 0.8 - index / 100,
+          topicalFit: 0.9 - index / 100,
           domain: `normal-${index}.example`,
         })
       );
-      const fallback = researchItem("fallback", {
-        topicalFit: 0.49,
-        domain: "fallback.example",
+      const nearMatches = Array.from({ length: 3 }, (_, index) =>
+        researchItem(`pwc-${index}`, {
+          family: "official-publication",
+          topicalFit: 0.49 - index / 100,
+          domain: `pwc-${index}.example`,
+          normalizedText: "Capability elicitation reveals hidden model abilities.",
+        })
+      );
+
+      const result = triageResearch([...nearMatches, ...normal], fallbackOptions);
+
+      expect(result.items.map(({ id }) => id)).toEqual([
+        ...normal.map(({ id }) => id),
+        ...nearMatches.map(({ id }) => id),
+      ]);
+      expect(result.admissions.slice(7)).toEqual(
+        nearMatches.map(({ id }) => ({ itemId: id, route: "near_match" })),
+      );
+    });
+
+    it("allows twelve arXiv candidates from arxiv.org", () => {
+      const candidates = Array.from({ length: 13 }, (_, index) =>
+        researchItem(`arxiv-${String(index).padStart(2, "0")}`, {
+          family: "arxiv",
+          topicalFit: 0.9,
+          domain: "arxiv.org",
+        })
+      );
+      const result = triageResearch(candidates, {
+        ...fallbackOptions,
+        maximumPerFamily: 24,
       });
 
-      const result = triageResearch([...normal, fallback], fallbackOptions);
+      expect(result.items).toHaveLength(12);
+      expect(result.exclusions).toContainEqual({
+        itemId: "arxiv-12",
+        reason: "publisher_domain_cap",
+      });
+    });
 
-      expect(result.admissions).toEqual(
-        normal.map(({ id }) => ({ itemId: id, route: "normal" })),
+    it("keeps every non-arXiv publisher domain capped at six", () => {
+      const candidates = Array.from({ length: 7 }, (_, index) =>
+        researchItem(`bibliographic-${index}`, {
+          family: "bibliographic",
+          topicalFit: 0.9,
+          domain: "openalex.org",
+        })
       );
+      const result = triageResearch(candidates, fallbackOptions);
+
+      expect(result.items).toHaveLength(6);
+      expect(result.exclusions).toContainEqual({
+        itemId: "bibliographic-6",
+        reason: "publisher_domain_cap",
+      });
+    });
+
+    it.each([
+      { normalCount: 20, expectedFallback: 4 },
+      { normalCount: 24, expectedFallback: 0 },
+    ])("admits $expectedFallback near-matches after $normalCount normal candidates", ({
+      normalCount,
+      expectedFallback,
+    }) => {
+      const normal = Array.from({ length: normalCount }, (_, index) =>
+        researchItem(`normal-${index}`, {
+          topicalFit: 0.9,
+          domain: `normal-${index}.example`,
+        })
+      );
+      const fallback = Array.from({ length: 6 }, (_, index) =>
+        researchItem(`near-${index}`, {
+          topicalFit: 0.4,
+          domain: `near-${index}.example`,
+          normalizedText: "Capability elicitation reveals hidden model abilities.",
+        })
+      );
+      const result = triageResearch([...fallback, ...normal], {
+        ...fallbackOptions,
+        maximumPerFamily: 25,
+        maximumPerPublisherDomain: 24,
+      });
+
+      expect(result.items).toHaveLength(normalCount + expectedFallback);
+      expect(result.admissions.filter(({ route }) => route === "near_match"))
+        .toHaveLength(expectedFallback);
+      expect(result.exclusions.filter(({ reason }) => reason === "queue_capacity"))
+        .toHaveLength(6 - expectedFallback);
     });
 
     it("admits at most six near-matches when no normal candidates qualify", () => {
@@ -685,7 +764,7 @@ describe("triageResearch", () => {
 
   it.each([
     ["omitted", {}],
-    ["zero", { fallbackTarget: 0 }],
+    ["zero", { nearMatchAllowance: 0 }],
   ])("preserves legacy ordering for overlapping configured topics when fallback is %s", (
     _fallbackState,
     fallbackOptions,
@@ -773,7 +852,7 @@ describe("triageResearch", () => {
       maximumPerPublisherDomain: 4,
       configuredTopics: CONFIGURED_RESEARCH_TOPIC_IDS,
       now: NOW,
-      fallbackTarget: 4,
+      nearMatchAllowance: 4,
       fallbackMinimumTopicalFit: 0.35,
     });
 
