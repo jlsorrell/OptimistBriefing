@@ -762,6 +762,34 @@ describe("PublicationCollector", () => {
     }]);
   });
 
+  it("reports an RSS envelope without a channel as parse", async () => {
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          "<?xml version=\"1.0\"?><rss><version>2.0</version></rss>",
+          { headers: { "content-type": "application/rss+xml" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [rssSource()],
+    }).collect(window);
+
+    expect(result.failures).toEqual([
+      { sourceId: "alignment-forum", kind: "parse" },
+    ]);
+    expect(result.discoveryDiagnostics).toEqual([{
+      laneId: "alignment-forum:rss",
+      sourceId: "alignment-forum",
+      discoveryFamily: "commentary",
+      discovered: 0,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "parse",
+      rejectionCounts: {},
+    }]);
+  });
+
   it("reports unsupported RSS and publication-page media without marking lanes healthy", async () => {
     const result = await createPublicationCollectorFromCatalog({
       http: new SourceHttpClient({
