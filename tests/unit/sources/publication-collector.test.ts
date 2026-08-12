@@ -138,6 +138,16 @@ function rssHttp(articleUrl: string): SourceHttpClient {
   });
 }
 
+function responseWithUrl(
+  body: string,
+  url: string,
+  headers: HeadersInit = { "content-type": "text/html" },
+): Response {
+  const response = new Response(body, { headers });
+  Object.defineProperty(response, "url", { value: url });
+  return response;
+}
+
 describe("PublicationCollector", () => {
   it("collects JSON-LD official listings, bounded stripped detail text, authors, dates, and paper links", async () => {
     const listing = await loadFixture("official-research-listing.html");
@@ -197,11 +207,19 @@ describe("PublicationCollector", () => {
     expect(technical?.content).not.toContain("discard()");
   });
 
-  it("maps Alignment Forum and LessWrong RSS without duplicating the RSS parser", async () => {
+  it("maps Alignment Forum, LessWrong Curated, and LessWrong Frontpage RSS without duplicating the RSS parser", async () => {
+    const frontpage = await loadFixture("lesswrong-frontpage-feed.xml");
     const rss = (host: string) => `<?xml version="1.0"?><rss><channel><item><title>Original alignment study</title><link>https://${host}/posts/example/original-study</link><guid>${host}-example</guid><pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate><author>Researcher Example</author><description><![CDATA[We present a result related to https://arxiv.org/abs/2608.00001v2.]]></description></item></channel></rss>`;
+    const curated = `<?xml version="1.0"?><rss><channel><item><title>Curated post also on Frontpage</title><link>https://www.lesswrong.com/posts/shared-curated-post</link><guid>lesswrong:shared-curated-post</guid><pubDate>Sat, 02 Aug 2026 12:00:00 GMT</pubDate><author>Ada Example</author><description><![CDATA[An interpretation of a bounded oversight result.]]></description></item></channel></rss>`;
     const fetch = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
-      return new Response(rss(url.host), {
+      const body = url.host === "www.lesswrong.com" &&
+          url.searchParams.get("view") === "frontpage"
+        ? frontpage
+        : url.host === "www.lesswrong.com"
+          ? curated
+          : rss(url.host);
+      return new Response(body, {
         headers: { "content-type": "application/rss+xml" },
       });
     });
@@ -237,17 +255,35 @@ describe("PublicationCollector", () => {
       discoveryMechanism: "rss",
       sectionEligibility: ["research", "research_radar"],
     });
+    const frontpageSource = source({
+      id: "lesswrong-frontpage",
+      canonicalName: "LessWrong Frontpage",
+      canonicalUrl: "https://www.lesswrong.com/",
+      restrictions: {
+        bodyRetrieval: "permitted",
+        paywall: "none",
+        contentUse: "ephemeral-summarization",
+        feedUrl: "https://www.lesswrong.com/feed.xml?view=frontpage",
+        urlPolicy: { allowedHosts: ["www.lesswrong.com"], allowedPorts: [""], allowedPathPrefixes: ["/feed.xml", "/posts/"] },
+        feedUrlPolicy: { allowedHosts: ["www.lesswrong.com"], allowedPorts: [""], allowedPathPrefixes: ["/feed.xml"] },
+        articleUrlPolicy: { allowedHosts: ["www.lesswrong.com"], allowedPorts: [""], allowedPathPrefixes: ["/posts/"] },
+      },
+      discoveryMechanism: "rss",
+      sectionEligibility: ["research", "research_radar"],
+    });
     const collector = createPublicationCollectorFromCatalog({
       http: new SourceHttpClient({ fetch, now: () => new Date("2026-08-02T12:00:00.000Z") }),
-      sources: [forum, lesswrong],
+      sources: [forum, lesswrong, frontpageSource],
     });
 
     const result = await collector.collect(window);
 
-    expect(result.candidates).toHaveLength(2);
+    expect(result.candidates).toHaveLength(4);
     expect(result.candidates).toEqual(expect.arrayContaining([
       expect.objectContaining({ sourceId: "alignment-forum", discoveryFamily: "commentary", relatedPaperIds: ["arXiv:2608.00001"], metadata: expect.objectContaining({ canCorroborateFacts: false, discoveryLaneIds: ["alignment-forum:rss"] }) }),
-      expect.objectContaining({ sourceId: "lesswrong-curated", discoveryFamily: "commentary", relatedPaperIds: ["arXiv:2608.00001"], metadata: expect.objectContaining({ canCorroborateFacts: false, discoveryLaneIds: ["lesswrong-curated:rss"] }) }),
+      expect.objectContaining({ sourceId: "lesswrong-curated", discoveryFamily: "commentary", metadata: expect.objectContaining({ canCorroborateFacts: false, discoveryLaneIds: ["lesswrong-curated:rss"] }) }),
+      expect.objectContaining({ sourceId: "lesswrong-frontpage", originalUrl: "https://www.lesswrong.com/posts/shared-curated-post", discoveryFamily: "commentary", metadata: expect.objectContaining({ canCorroborateFacts: false, discoveryLaneIds: ["lesswrong-frontpage:rss"] }) }),
+      expect.objectContaining({ sourceId: "lesswrong-frontpage", originalUrl: "https://www.lesswrong.com/posts/frontpage-only-post", discoveryFamily: "commentary", metadata: expect.objectContaining({ canCorroborateFacts: false, discoveryLaneIds: ["lesswrong-frontpage:rss"] }) }),
     ]));
     expect(result.discoveryDiagnostics).toEqual([
       expect.objectContaining({
@@ -262,6 +298,14 @@ describe("PublicationCollector", () => {
         sourceId: "lesswrong-curated",
         observed: 1,
         discovered: 1,
+        outcome: "success",
+      }),
+      expect.objectContaining({
+        laneId: "lesswrong-frontpage:rss",
+        sourceId: "lesswrong-frontpage",
+        discoveryFamily: "commentary",
+        observed: 2,
+        discovered: 2,
         outcome: "success",
       }),
     ]);
@@ -872,10 +916,10 @@ describe("PublicationCollector", () => {
     const result = await createPublicationCollectorFromCatalog({
       http: new SourceHttpClient({
         fetch: vi.fn(async () => new Response(`<!doctype html><html><body>
-          <section><h2>Relevant papers</h2><article>
+          <ul><li>
             <a href="/paper/2608.12345">Ordinary research item</a>
             <time datetime="2026-08-02"></time>
-          </article></section>
+          </li></ul>
         </body></html>`, { headers: { "content-type": "text/html" } })),
         now: () => new Date("2026-08-02T12:00:00.000Z"),
       }),
@@ -1325,23 +1369,23 @@ describe("RssAdapter feed normalization", () => {
 });
 
 describe("PapersWithCodeAdapter", () => {
-  it("decodes topical provider text before publication routing", async () => {
+  it("fetches the reviewed recent-paper list and decodes its topical provider text before routing", async () => {
+    const fetch = vi.fn(async () => new Response(
+      `<!doctype html><html><body><ul>
+        <li>
+          <a href="/paper/2608.12345">&amp;#105;nterpretability study results</a>
+          <time datetime="2026-08-02">August 2, 2026</time>
+        </li>
+        <li>
+          <a href="/paper/2608.12346">&#65308;interpretability&#65310;Ordinary study results&#65308;/interpretability&#65310;</a>
+          <time datetime="2026-08-02">August 2, 2026</time>
+        </li>
+      </ul></body></html>`,
+      { headers: { "content-type": "text/html" } },
+    ));
     const adapter = new PapersWithCodeAdapter(
       new SourceHttpClient({
-        fetch: vi.fn(async () => new Response(
-          `<!doctype html><html><body><section>
-            <h2>Relevant papers</h2>
-            <article>
-              <a href="/paper/2608.12345">&amp;#105;nterpretability study results</a>
-              <time datetime="2026-08-02">August 2, 2026</time>
-            </article>
-            <article>
-              <a href="/paper/2608.12346">&#65308;interpretability&#65310;Ordinary study results&#65308;/interpretability&#65310;</a>
-              <time datetime="2026-08-02">August 2, 2026</time>
-            </article>
-          </section></body></html>`,
-          { headers: { "content-type": "text/html" } },
-        )),
+        fetch,
         now: () => new Date("2026-08-02T12:00:00.000Z"),
       }),
       ResearchSourceRecordSchema.parse(rssSource({
@@ -1379,13 +1423,21 @@ describe("PapersWithCodeAdapter", () => {
         prepareRawCandidateForPipeline(candidates[1]),
       ),
     )).toBeNull();
+    expect(fetch).toHaveBeenCalledWith(
+      "https://paperswithcode.co/papers/recent",
+      expect.any(Object),
+    );
   });
 
   it("parses only on-origin paper links into discovery-only identifiers and code metadata", async () => {
     const fixture = await loadFixture("papers-with-code-recent.html");
+    const fetch = vi.fn(async (_input: string | URL | Request) => new Response(
+      fixture,
+      { headers: { "content-type": "text/html" } },
+    ));
     const adapter = new PapersWithCodeAdapter(
       new SourceHttpClient({
-        fetch: vi.fn(async () => new Response(fixture, { headers: { "content-type": "text/html" } })),
+        fetch,
         now: () => new Date("2026-08-02T12:00:00.000Z"),
       }),
       ResearchSourceRecordSchema.parse(source({
@@ -1397,7 +1449,7 @@ describe("PapersWithCodeAdapter", () => {
           bodyRetrieval: "permitted",
           paywall: "none",
           contentUse: "discovery-metadata-only",
-          pageUrl: "https://paperswithcode.co/?order_by=date_published",
+          pageUrl: "https://paperswithcode.co/papers/recent",
           urlPolicy: { allowedHosts: ["paperswithcode.co"], allowedPorts: [""], allowedPathPrefixes: ["/"] },
         },
         discoveryMechanism: "page",
@@ -1405,15 +1457,17 @@ describe("PapersWithCodeAdapter", () => {
       })),
     );
 
-    const candidates = await adapter.collect(window);
+    const { candidates, observed } = await adapter.collectWithStats(window);
 
     expect(adapter.laneId).toBe("papers-with-code-co:page");
+    expect(fetch.mock.calls[0]?.[0]).toBe("https://paperswithcode.co/papers/recent");
+    expect(observed).toBe(5);
     expect(candidates).toHaveLength(2);
     expect(candidates[0]).toMatchObject({
       externalId: "arXiv:2608.00001",
       externalIds: ["arXiv:2608.00001"],
       relatedPaperIds: ["arXiv:2608.00001"],
-      discoveryFamily: "commentary",
+      discoveryFamily: "official-publication",
       accessLevel: "metadata",
       abstract: null,
       content: null,
@@ -1424,11 +1478,94 @@ describe("PapersWithCodeAdapter", () => {
       },
     });
     expect(candidates[1]).toMatchObject({
-      externalId: "papers-with-code:98456",
-      relatedPaperIds: ["papers-with-code:98456"],
+      externalId: "papers-with-code:opaque-provider-paper",
+      relatedPaperIds: ["papers-with-code:opaque-provider-paper"],
       metadata: { implementationAvailable: false },
     });
-    expect(JSON.stringify(candidates)).not.toContain("98.7");
     expect(JSON.stringify(candidates)).not.toContain("2608.99999");
+    expect(JSON.stringify(candidates)).not.toContain("Older Paper");
+    expect(JSON.stringify(candidates)).not.toContain("Invalid Date Paper");
+  });
+
+  it("accepts only the exact reviewed final path", async () => {
+    const adapter = new PapersWithCodeAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => responseWithUrl(
+          `<!doctype html><html><body><ul><li>
+            <a href="/paper/2608.12345">Interpretability result</a>
+            <time datetime="2026-08-02">2 August 2026</time>
+          </li></ul></body></html>`,
+          "https://paperswithcode.co/",
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      ResearchSourceRecordSchema.parse(source({
+        id: "papers-with-code-co",
+        canonicalName: "Papers with Code",
+        canonicalUrl: "https://paperswithcode.co/",
+        role: "analysis",
+        restrictions: { bodyRetrieval: "permitted", paywall: "none", contentUse: "discovery-metadata-only" },
+        discoveryMechanism: "page",
+        sectionEligibility: ["research", "research_radar"],
+      })),
+    );
+
+    await expect(adapter.collect(window)).resolves.toEqual([]);
+  });
+
+  it("examines at most the first one hundred reviewed list rows", async () => {
+    const olderRows = Array.from({ length: 100 }, (_, index) => `<li>
+      <a href="/paper/2607.${String(index).padStart(5, "0")}">Older ${index}</a>
+      <time datetime="2026-07-01">1 July 2026</time>
+    </li>`).join("");
+    const adapter = new PapersWithCodeAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          `<!doctype html><html><body><ul>${olderRows}<li>
+            <a href="/paper/2608.99999">One-hundred-first result</a>
+            <time datetime="2026-08-02">2 August 2026</time>
+          </li></ul></body></html>`,
+          { headers: { "content-type": "text/html" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      ResearchSourceRecordSchema.parse(source({
+        id: "papers-with-code-co",
+        canonicalName: "Papers with Code",
+        canonicalUrl: "https://paperswithcode.co/",
+        role: "analysis",
+        restrictions: { bodyRetrieval: "permitted", paywall: "none", contentUse: "discovery-metadata-only" },
+        discoveryMechanism: "page",
+        sectionEligibility: ["research", "research_radar"],
+      })),
+    );
+
+    await expect(adapter.collect(window)).resolves.toEqual([]);
+  });
+
+  it("surfaces reviewed-list parser drift instead of falling back to homepage paper links", async () => {
+    const adapter = new PapersWithCodeAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          `<!doctype html><html><body><section><h2>Relevant papers</h2>
+            <article><a href="/paper/2608.12345">Homepage-only result</a>
+              <time datetime="2026-08-02">2 August 2026</time></article>
+          </section></body></html>`,
+          { headers: { "content-type": "text/html" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      ResearchSourceRecordSchema.parse(source({
+        id: "papers-with-code-co",
+        canonicalName: "Papers with Code",
+        canonicalUrl: "https://paperswithcode.co/",
+        role: "analysis",
+        restrictions: { bodyRetrieval: "permitted", paywall: "none", contentUse: "discovery-metadata-only" },
+        discoveryMechanism: "page",
+        sectionEligibility: ["research", "research_radar"],
+      })),
+    );
+
+    await expect(adapter.collect(window)).rejects.toThrow(SyntaxError);
   });
 });

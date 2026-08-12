@@ -25,13 +25,20 @@ const CatalogPolicySchema = z.object({
   allowedPathPrefixes: z.array(z.string().startsWith("/")).min(1),
 });
 const ELIGIBLE_SECTIONS = new Set(["research", "research_radar", "technology", "ai_policy"]);
+const COMMENTARY_SOURCE_IDS = new Set([
+  "alignment-forum",
+  "lesswrong-curated",
+  "lesswrong-frontpage",
+]);
 
 function publicationFromRss(item: RawItem, source: SourceRecord): RawPublicationCandidate {
   return RawPublicationCandidateSchema.parse({
     ...item,
     kind: "publication",
     sectionEligibility: source.sectionEligibility,
-    discoveryFamily: source.id === "alignment-forum" || source.id === "lesswrong-curated" ? "commentary" : "official-publication",
+    discoveryFamily: COMMENTARY_SOURCE_IDS.has(source.id)
+      ? "commentary"
+      : "official-publication",
     metadata: {
       ...item.metadata,
       canCorroborateFacts: false,
@@ -63,9 +70,7 @@ type PublicationSourceAdapter = {
 };
 
 function publicationFamily(source: SourceRecord): DiscoveryFamily {
-  return source.id === "alignment-forum" ||
-      source.id === "lesswrong-curated" ||
-      source.id === "papers-with-code-co"
+  return COMMENTARY_SOURCE_IDS.has(source.id)
     ? "commentary"
     : "official-publication";
 }

@@ -8578,16 +8578,20 @@ describe("manual editorial run", () => {
       .slice(0, 10);
     const sourceFetch = vi.fn(async (input: string | URL | Request) => {
       expect(String(input)).toBe(
-        "https://paperswithcode.co/?order_by=date_published",
+        "https://paperswithcode.co/papers/recent",
       );
       return new Response(
-        `<!doctype html><html><body><section><h2>Relevant papers</h2>
-          <article>
-            <a href="/paper/2608.01234">Production PapersWithCode result</a>
+        `<!doctype html><html><body><ul>
+          <li>
+            <a href="/paper/2608.01234">Interpretability method for scalable oversight</a>
             <time datetime="${publishedDate}">${publishedDate}</time>
             <a href="https://github.com/example/production-result">Code</a>
-          </article>
-        </section></body></html>`,
+          </li>
+          <li>
+            <a href="/paper/2608.01235">Image compression benchmark update</a>
+            <time datetime="${publishedDate}">${publishedDate}</time>
+          </li>
+        </ul></body></html>`,
         { headers: { "content-type": "text/html" } },
       );
     });
@@ -8613,7 +8617,9 @@ describe("manual editorial run", () => {
         editionDate,
         runId,
         {
-          summary: new FakeModelProvider(),
+          summary: new FakeModelProvider({
+            embeddingBatches: [[[1, 0], [1, 0], [1, 0], [1, 0]]],
+          }),
           assessment: new FakeModelProvider(),
         },
       );
@@ -8621,26 +8627,37 @@ describe("manual editorial run", () => {
       const collected = await context.collect();
 
       expect(sourceFetch).toHaveBeenCalledOnce();
-      expect(collected).toEqual([
+      expect(collected).toEqual(expect.arrayContaining([
         expect.objectContaining({
           kind: "publication",
           sourceId: "papers-with-code-co",
           externalId: "arXiv:2608.01234",
-          discoveryFamily: "commentary",
+          discoveryFamily: "official-publication",
           metadata: expect.objectContaining({
             implementationAvailable: true,
             discoveryLaneIds: ["papers-with-code-co:page"],
           }),
         }),
+        expect.objectContaining({
+          externalId: "arXiv:2608.01235",
+          metadata: expect.objectContaining({ implementationAvailable: false }),
+        }),
+      ]));
+      const normalized = await context.normalize(collected);
+      const triaged = await context.prefilter(await context.enrich(normalized));
+      expect(normalized).toEqual([
+        expect.objectContaining({ title: "Interpretability method for scalable oversight" }),
       ]);
+      expect(triaged).toHaveLength(1);
       await expect(store.repository.getWorkflowRunDetail(runId)).resolves
         .toMatchObject({
           discoveryDiagnostics: [{
             laneId: "papers-with-code-co:page",
             sourceId: "papers-with-code-co",
-            discoveryFamily: "commentary",
-            discovered: 1,
+            discoveryFamily: "official-publication",
+            discovered: 2,
             outcome: "success",
+            rejectionCounts: { route_excluded: 1 },
           }],
         });
       expect((await store.repository.listSources()).find(

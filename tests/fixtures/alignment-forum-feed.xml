@@ -4,15 +4,15 @@
     <title>Example Alignment Feed</title>
     <item>
       <title>A valid alignment result</title>
-      <link href="https://www.alignmentforum.org/posts/example/valid-alignment-result" rel="alternate" />
+      <link>https://www.alignmentforum.org/posts/example/valid-alignment-result</link>
       <guid>alignment-forum:valid-result</guid>
       <pubDate>Sat, 02 Aug 2026 12:00:00 GMT</pubDate>
-      <author><name>Researcher Example</name></author>
+      <author>Researcher Example</author>
       <description><![CDATA[A concise example research summary.]]></description>
     </item>
     <item>
       <title>A malformed sibling</title>
-      <link rel="alternate" />
+      <link>javascript:alert(1)</link>
       <guid>alignment-forum:malformed-result</guid>
     </item>
   </channel>

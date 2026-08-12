@@ -554,6 +554,112 @@ describe("consolidateResearchCandidates", () => {
     ]);
   });
 
+  it("consolidates duplicate Curated and Frontpage commentary before the standalone path", () => {
+    const curated = normalized("lesswrong-curated", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "Curated post also on Frontpage",
+      originalUrl: "https://www.lesswrong.com/posts/shared-curated-post",
+      externalId: "lesswrong-curated:shared-curated-post",
+      externalIds: ["lesswrong-curated:shared-curated-post"],
+      accessLevel: "full_text",
+      abstract: null,
+      content: "A substantive interpretation of the bounded oversight result.",
+      metadata: {
+        discoveryFamily: "commentary",
+        discoveryLaneIds: ["lesswrong-curated:rss"],
+        discoveryLineage: ["curated-lineage"],
+      },
+    });
+    const frontpage = normalized("lesswrong-frontpage", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "Curated post also on Frontpage",
+      originalUrl: "https://www.lesswrong.com/posts/shared-curated-post",
+      externalId: "lesswrong-frontpage:shared-curated-post",
+      externalIds: ["lesswrong-frontpage:shared-curated-post"],
+      accessLevel: "metadata",
+      abstract: null,
+      content: null,
+      metadata: {
+        discoveryFamily: "commentary",
+        discoveryLaneIds: ["lesswrong-frontpage:rss"],
+        discoveryLineage: ["frontpage-lineage"],
+      },
+    });
+
+    const result = consolidateResearchCandidates([frontpage, curated]);
+
+    expect(result.papers).toEqual([]);
+    expect(result.standaloneCommentary).toEqual([
+      expect.objectContaining({
+        id: curated.id,
+        kind: "blog",
+        sourceRefs: expect.arrayContaining([
+          expect.objectContaining({ id: "lesswrong-curated", role: "blog" }),
+          expect.objectContaining({ id: "lesswrong-frontpage", role: "blog" }),
+        ]),
+        metadata: expect.objectContaining({
+          discoveryLaneIds: [
+            "lesswrong-curated:rss",
+            "lesswrong-frontpage:rss",
+          ],
+          discoveryLineage: ["curated-lineage", "frontpage-lineage"],
+        }),
+      }),
+    ]);
+    expect(result.standaloneCommentary[0]?.sourceRefs.map(({ id }) => id))
+      .toEqual(["lesswrong-curated", "lesswrong-frontpage"]);
+    expect(result.merges).toEqual([{
+      keptItemId: curated.id,
+      mergedItemId: frontpage.id,
+      reason: "canonical_url",
+    }]);
+    expect(result.mergeGroups).toEqual([
+      expect.objectContaining({
+        retainedItem: expect.objectContaining({ id: curated.id }),
+        inputItems: expect.arrayContaining([
+          expect.objectContaining({ id: curated.id }),
+          expect.objectContaining({ id: frontpage.id }),
+        ]),
+      }),
+    ]);
+  });
+
+  it("does not merge commentary with conflicting durable identities despite a shared title and URL", () => {
+    const first = normalized("lesswrong-curated", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "Different durable evidence for the same commentary",
+      originalUrl: "https://www.lesswrong.com/posts/conflicting-commentary",
+      externalId: "arXiv:2608.00031",
+      externalIds: ["arXiv:2608.00031"],
+      accessLevel: "full_text",
+      abstract: null,
+      content: "A substantive interpretation from Curated.",
+      metadata: { discoveryFamily: "commentary" },
+    });
+    const second = normalized("lesswrong-frontpage", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "Different durable evidence for the same commentary",
+      originalUrl: "https://www.lesswrong.com/posts/conflicting-commentary",
+      externalId: "arXiv:2608.00032",
+      externalIds: ["arXiv:2608.00032"],
+      accessLevel: "full_text",
+      abstract: null,
+      content: "A substantive interpretation from Frontpage.",
+      metadata: { discoveryFamily: "commentary" },
+    });
+
+    const result = consolidateResearchCandidates([first, second]);
+
+    expect(result.papers).toEqual([]);
+    expect(result.standaloneCommentary).toHaveLength(2);
+    expect(result.merges).toEqual([]);
+    expect(result.mergeGroups).toEqual([]);
+  });
+
   it("is stable across input order and stores all merged paper sources", () => {
     const arxiv = normalized("arxiv", {
       externalId: "arXiv:2608.00003",

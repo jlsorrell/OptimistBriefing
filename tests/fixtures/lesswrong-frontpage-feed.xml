@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Example LessWrong Frontpage Feed</title>
+    <item>
+      <title>Curated post also on Frontpage</title>
+      <link>https://www.lesswrong.com/posts/shared-curated-post</link>
+      <guid>lesswrong:shared-curated-post</guid>
+      <pubDate>Sat, 02 Aug 2026 12:00:00 GMT</pubDate>
+      <author>Ada Example</author>
+      <description><![CDATA[An interpretation of a bounded oversight result.]]></description>
+    </item>
+    <item>
+      <title>Frontpage-only research commentary</title>
+      <link>https://www.lesswrong.com/posts/frontpage-only-post</link>
+      <guid>lesswrong:frontpage-only-post</guid>
+      <pubDate>Sun, 02 Aug 2026 13:00:00 GMT</pubDate>
+      <author>Grace Example</author>
+      <description><![CDATA[A separate substantive research discussion.]]></description>
+    </item>
+  </channel>
+</rss>
