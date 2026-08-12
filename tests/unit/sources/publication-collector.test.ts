@@ -333,6 +333,14 @@ describe("PublicationCollector", () => {
       }),
     ]));
     expect(result.candidates).toHaveLength(4);
+    expect(result.discoveryDiagnostics?.map(({ sourceId, observed }) => ({
+      sourceId,
+      observed,
+    }))).toEqual([
+      { sourceId: "anthropic", observed: 2 },
+      { sourceId: "google-deepmind", observed: 1 },
+      { sourceId: "google-research", observed: 1 },
+    ]);
     expect(JSON.stringify(result.candidates)).not.toContain("Console product release");
     expect(JSON.stringify(result.candidates)).not.toContain("Model launch product update");
     expect(JSON.stringify(result.candidates)).not.toContain("AI Studio product announcement");
@@ -1904,7 +1912,7 @@ describe("PapersWithCodeAdapter", () => {
 
     expect(adapter.laneId).toBe("papers-with-code-co:page");
     expect(fetch.mock.calls[0]?.[0]).toBe("https://paperswithcode.co/papers/recent");
-    expect(observed).toBe(5);
+    expect(observed).toBe(3);
     expect(candidates).toHaveLength(2);
     expect(candidates[0]).toMatchObject({
       externalId: "arXiv:2608.00001",

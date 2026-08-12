@@ -152,7 +152,7 @@ export class PapersWithCodeAdapter {
           candidate.publishedAt >= validWindow.from &&
           candidate.publishedAt <= validWindow.to)
         .slice(0, 100),
-      observed: rows.length,
+      observed: discovered.length,
     };
   }
 }

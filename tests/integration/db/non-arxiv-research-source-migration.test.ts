@@ -353,17 +353,22 @@ describe("non-arXiv research source migration", () => {
   });
 
   it.each([
-    "papers-with-code-co",
-    "google-deepmind",
-    "anthropic",
-    "google-research",
-    "openai",
-  ])(
-    "preserves a %s record with only one split policy present",
-    async (id) => {
+    ["papers-with-code-co", "feedUrlPolicy"],
+    ["papers-with-code-co", "articleUrlPolicy"],
+    ["google-deepmind", "feedUrlPolicy"],
+    ["google-deepmind", "articleUrlPolicy"],
+    ["anthropic", "feedUrlPolicy"],
+    ["anthropic", "articleUrlPolicy"],
+    ["google-research", "feedUrlPolicy"],
+    ["google-research", "articleUrlPolicy"],
+    ["openai", "feedUrlPolicy"],
+    ["openai", "articleUrlPolicy"],
+  ] as const)(
+    "preserves a %s record when %s is absent",
+    async (id, absentPolicy) => {
       await applyThrough0011();
       const before = await source(id);
-      const restrictions = without(before.restrictions, "articleUrlPolicy");
+      const restrictions = without(before.restrictions, absentPolicy);
       await replaceRestrictions(id, restrictions);
 
       await execute0012();
@@ -410,6 +415,42 @@ describe("non-arXiv research source migration", () => {
         ...restrictions,
         feedUrlPolicy,
         articleUrlPolicy,
+      });
+    },
+  );
+
+  it.each([
+    {
+      id: "papers-with-code-co",
+      expectedPatch: {
+        pageUrl: "https://paperswithcode.co/papers/recent",
+      },
+    },
+    {
+      id: "google-deepmind",
+      expectedPatch: {
+        pageUrl: "https://deepmind.google/blog/",
+        feedUrlPolicy: DEEPMIND_POLICY,
+        articleUrlPolicy: DEEPMIND_POLICY,
+      },
+    },
+  ] as const)(
+    "upgrades the reviewed $id endpoint when both split policies are absent",
+    async ({ id, expectedPatch }) => {
+      await applyThrough0011();
+      const before = await source(id);
+      const restrictions = without(
+        before.restrictions,
+        "feedUrlPolicy",
+        "articleUrlPolicy",
+      );
+      await replaceRestrictions(id, restrictions);
+
+      await execute0012();
+
+      expect((await source(id)).restrictions).toEqual({
+        ...restrictions,
+        ...expectedPatch,
       });
     },
   );

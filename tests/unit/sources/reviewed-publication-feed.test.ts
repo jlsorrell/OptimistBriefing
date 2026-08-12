@@ -111,6 +111,26 @@ describe("reviewed OpenAI publication feed", () => {
     });
   });
 
+  it("retains bounded Atom category terms as feed metadata", async () => {
+    const feed = `<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+      <entry>
+        <title>Atom category research study</title>
+        <link rel="alternate" href="https://openai.com/index/atom-category-study/" />
+        <updated>2026-08-01T12:00:00Z</updated>
+        <summary>Bounded Atom feed evidence.</summary>
+        <category term="AI safety" />
+        <category term="Research" />
+      </entry>
+    </feed>`;
+
+    const result = await rssAdapter(openAiSource(), feed).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates[0]?.metadata).toMatchObject({
+      feedCategories: ["AI safety", "Research"],
+    });
+  });
+
   it("uses the exact OpenAI endpoint, bounds inspection and details, and keeps failed details as metadata", async () => {
     const feed = await loadFixture("openai-news-feed.xml");
     const detail = await loadFixture("openai-research-detail.html");

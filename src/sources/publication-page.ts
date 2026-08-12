@@ -330,7 +330,7 @@ export class PublicationPageAdapter {
         listingUrl: response.finalUrl,
       });
     }))).filter((candidate): candidate is RawPublicationCandidate => candidate !== null);
-    return { candidates, observed: parsed.length };
+    return { candidates, observed: validated.length };
   }
 
   async collectWithStats(
