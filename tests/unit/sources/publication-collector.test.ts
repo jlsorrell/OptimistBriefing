@@ -430,6 +430,106 @@ describe("PublicationCollector", () => {
     expect(result.candidates[1]?.content).toContain("bounded study");
   });
 
+  it("drops a month-only reviewed entry when its recovered detail date is outside the collection window", async () => {
+    const listing = `<!doctype html><article class="card__inner">
+      <a class="card__overlay-link" href="/blog/recovered-july"></a>
+      <h3 class="card__title">AI oversight evaluation research</h3>
+      <span class="meta__category">Governance</span>
+      <time datetime="2026-08">August 2026</time>
+    </article>`;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://deepmind.google/blog/") {
+        return new Response(listing, { headers: { "content-type": "text/html" } });
+      }
+      if (url === "https://deepmind.google/blog/recovered-july") {
+        return new Response(`<!doctype html><script type="application/ld+json">
+          {"@type":"BlogPosting","datePublished":"2026-07-31"}
+        </script><article><p>Oversight evaluation evidence.</p></article>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [reviewedLabSource("google-deepmind")],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.succeededSourceIds).toEqual(["google-deepmind"]);
+    expect(result.candidates).toEqual([]);
+  });
+
+  it("isolates non-HTML reviewed detail responses: dated rows stay metadata-only while undated rows drop", async () => {
+    const listing = `<!doctype html>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/dated-non-html"></a>
+        <h3 class="card__title">AI safety oversight study</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-08-02">August 2, 2026</time>
+      </article>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/undated-non-html"></a>
+        <h3 class="card__title">AI safety evaluation study</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-08">August 2026</time>
+      </article>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/healthy-dated"></a>
+        <h3 class="card__title">Mechanistic interpretability research</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-08-02">August 2, 2026</time>
+      </article>`;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://deepmind.google/blog/") {
+        return new Response(listing, { headers: { "content-type": "text/html" } });
+      }
+      if (
+        url === "https://deepmind.google/blog/dated-non-html" ||
+        url === "https://deepmind.google/blog/undated-non-html"
+      ) {
+        return new Response("not HTML", {
+          headers: { "content-type": "application/pdf" },
+        });
+      }
+      if (url === "https://deepmind.google/blog/healthy-dated") {
+        return new Response(article("Healthy reviewed detail"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [reviewedLabSource("google-deepmind")],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates).toEqual([
+      expect.objectContaining({
+        title: "AI safety oversight study",
+        publishedAt: "2026-08-02T00:00:00.000Z",
+        accessLevel: "metadata",
+        abstract: null,
+        content: null,
+      }),
+      expect.objectContaining({
+        title: "Mechanistic interpretability research",
+        content: expect.stringContaining("bounded study"),
+      }),
+    ]);
+  });
+
   it("maps Alignment Forum, LessWrong Curated, and LessWrong Frontpage RSS without duplicating the RSS parser", async () => {
     const frontpage = await loadFixture("lesswrong-frontpage-feed.xml");
     const rss = (host: string) => `<?xml version="1.0"?><rss><channel><item><title>Original alignment study</title><link>https://${host}/posts/example/original-study</link><guid>${host}-example</guid><pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate><author>Researcher Example</author><description><![CDATA[We present a result related to https://arxiv.org/abs/2608.00001v2.]]></description></item></channel></rss>`;

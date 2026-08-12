@@ -283,27 +283,30 @@ export class PublicationPageAdapter {
               ?.trim()
               .toLowerCase();
             if (
-              detailMediaType !== "text/html" &&
-              detailMediaType !== "application/xhtml+xml"
+              detailMediaType === "text/html" ||
+              detailMediaType === "application/xhtml+xml"
             ) {
-              throw new UnsupportedSourceMediaTypeError();
+              const detailDocument = parseHTML(detail.body).document;
+              publishedAt = publishedAt ?? profile.parseDetailPublishedAt(detailDocument);
+              extraction = extractReadableArticle(
+                detail.body,
+                detail.finalUrl,
+                detail.contentType,
+              );
             }
-            const detailDocument = parseHTML(detail.body).document;
-            publishedAt = publishedAt ?? profile.parseDetailPublishedAt(detailDocument);
-            extraction = extractReadableArticle(
-              detail.body,
-              detail.finalUrl,
-              detail.contentType,
-            );
           }
         } catch (error) {
-          if (error instanceof UnsupportedSourceMediaTypeError) throw error;
           if (error instanceof SourceFetchError && error.failureKind === "policy") {
             detailFailedPolicy = true;
           }
         }
       }
-      if (detailFailedPolicy || publishedAt === null) return null;
+      if (
+        detailFailedPolicy ||
+        publishedAt === null ||
+        publishedAt < validWindow.from ||
+        publishedAt > validWindow.to
+      ) return null;
       return this.candidateFromReviewedItem({
         item: { ...item, publishedAt },
         extraction,

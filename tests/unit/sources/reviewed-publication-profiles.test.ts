@@ -107,6 +107,24 @@ describe("reviewed publication profiles", () => {
     ]);
   });
 
+  it("excludes the direct-child display-date span from Anthropic fallback title and category selection", () => {
+    const profile = reviewedPublicationProfile("anthropic")!;
+
+    expect(profile.parseListing(documentFrom(`<!doctype html><a href="/research/span-title">
+      <span>September 22, 2026</span>
+      <span>Safety research</span>
+      <span>Research</span>
+      <time datetime="2026-09-22">September 22, 2026</time>
+    </a>`), "https://www.anthropic.com/research")).toEqual([{
+      title: "Safety research",
+      url: "https://www.anthropic.com/research/span-title",
+      publishedAt: "2026-09-22T00:00:00.000Z",
+      summary: null,
+      category: "Research",
+      authors: [],
+    }]);
+  });
+
   it("extracts DeepMind month-only cards without manufacturing a date and prefers schema dates on details", async () => {
     const profile = reviewedPublicationProfile("google-deepmind")!;
     const listing = await loadFixture("deepmind-blog-listing.html");

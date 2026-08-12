@@ -142,25 +142,31 @@ function anthropicListing(
   return rows.flatMap((row): ReviewedPublicationListingEntry[] => {
     const href = resolvedUrl(row.getAttribute("href"), baseUrl);
     const time = row.querySelector("time");
-    const dateText = timeValue(time);
-    const publishedAt = exactCalendarDate(dateText);
+    const dateValue = timeValue(time);
+    const dateDisplayText = time?.textContent?.trim() ?? null;
+    const publishedAt = exactCalendarDate(dateValue);
     const heading = Array.from(row.querySelectorAll("h2,h3,h4,h5"))
       .map((element) => providerTitle(element.textContent))
       .find((value): value is string => value !== null);
     const spans = directChildren(row, "span").map((element) => ({
       element,
+      rawText: element.textContent?.trim() ?? "",
       value: providerTitle(element.textContent),
     }));
     const fallback = [...spans]
-      .filter(({ value }) => value !== null && codePointLength(value) >= 12)
+      .filter(({ rawText, value }) =>
+        value !== null &&
+        rawText !== dateDisplayText &&
+        codePointLength(value) >= 12,
+      )
       .sort((left, right) => codePointLength(right.value!) - codePointLength(left.value!))
       .at(0);
     const title = heading ?? fallback?.value ?? null;
     if (href === null || title === null) return [];
-    const category = spans.find(({ element, value }) =>
+    const category = spans.find(({ element, rawText, value }) =>
       value !== null &&
       value !== title &&
-      value !== dateText &&
+      rawText !== dateDisplayText &&
       element !== fallback?.element &&
       codePointLength(value) <= 80,
     )?.value ?? null;
