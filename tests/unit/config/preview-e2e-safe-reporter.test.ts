@@ -51,11 +51,38 @@ describe("preview safe test reporter", () => {
     })).toBeUndefined();
   });
 
+  it("keeps the content error-line allowlist large enough for the complete test", () => {
+    const contentLineCount = readFileSync(
+      resolve(process.cwd(), "tests/preview-e2e/content.spec.ts"),
+      "utf8",
+    ).trimEnd().split("\n").length;
+
+    expect(contentLineCount).toBeLessThanOrEqual(400);
+    expect(formatPreviewTestDiagnostic({
+      project: "desktop",
+      file: "tests/preview-e2e/content.spec.ts",
+      line: contentLineCount,
+      errorSource: "test",
+      errorLine: contentLineCount,
+      status: "failed",
+    })).toBe(
+      `OPTIMIST_PREVIEW_TEST_RESULT project=desktop file=tests/preview-e2e/content.spec.ts line=${contentLineCount} errorSource=test errorLine=${contentLineCount} status=failed`,
+    );
+    expect(formatPreviewTestDiagnostic({
+      project: "desktop",
+      file: "tests/preview-e2e/content.spec.ts",
+      line: 401,
+      errorSource: "none",
+      errorLine: 0,
+      status: "failed",
+    })).toBeUndefined();
+  });
+
   it.each([
     ["tests/preview-e2e/access.spec.ts", 1],
     ["tests/preview-e2e/access.spec.ts", 24],
     ["tests/preview-e2e/content.spec.ts", 1],
-    ["tests/preview-e2e/content.spec.ts", 65],
+    ["tests/preview-e2e/content.spec.ts", 400],
     ["tests/preview-e2e/responsive-accessibility.spec.ts", 1],
     ["tests/preview-e2e/responsive-accessibility.spec.ts", 89],
   ])("accepts %s source line %i", (file, line) => {
@@ -73,10 +100,10 @@ describe("preview safe test reporter", () => {
 
   it.each([
     ["tests/preview-e2e/access.spec.ts", 25],
-    ["tests/preview-e2e/content.spec.ts", 66],
+    ["tests/preview-e2e/content.spec.ts", 401],
     ["tests/preview-e2e/responsive-accessibility.spec.ts", 90],
     ["tests/preview-e2e/access.spec.ts", 65],
-    ["tests/preview-e2e/content.spec.ts", 89],
+    ["tests/preview-e2e/content.spec.ts", 401],
     ["tests/preview-e2e/responsive-accessibility.spec.ts", Number.MAX_SAFE_INTEGER],
   ])("rejects %s source line %i when it is out of range", (file, line) => {
     expect(formatPreviewTestDiagnostic({
@@ -93,7 +120,7 @@ describe("preview safe test reporter", () => {
     ["tests/preview-e2e/access.spec.ts", 1],
     ["tests/preview-e2e/access.spec.ts", 24],
     ["tests/preview-e2e/content.spec.ts", 1],
-    ["tests/preview-e2e/content.spec.ts", 65],
+    ["tests/preview-e2e/content.spec.ts", 400],
     ["tests/preview-e2e/responsive-accessibility.spec.ts", 1],
     ["tests/preview-e2e/responsive-accessibility.spec.ts", 89],
   ])("accepts bounded error line for %s at %i", (file, errorLine) => {
@@ -111,10 +138,10 @@ describe("preview safe test reporter", () => {
 
   it.each([
     ["tests/preview-e2e/access.spec.ts", 25],
-    ["tests/preview-e2e/content.spec.ts", 66],
+    ["tests/preview-e2e/content.spec.ts", 401],
     ["tests/preview-e2e/responsive-accessibility.spec.ts", 90],
     ["tests/preview-e2e/access.spec.ts", 65],
-    ["tests/preview-e2e/content.spec.ts", 89],
+    ["tests/preview-e2e/content.spec.ts", 401],
     ["tests/preview-e2e/responsive-accessibility.spec.ts", 1234567890123456],
   ])("rejects unsafe error line for %s at %i", (file, errorLine) => {
     expect(formatPreviewTestDiagnostic({
