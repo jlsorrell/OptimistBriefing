@@ -2,12 +2,21 @@ import { parseHTML } from "linkedom";
 import { z } from "zod";
 
 import type { AccessLevel } from "../contracts/editorial";
+import { mapResearchTopicIds } from "../editorial/research-topics";
 import { extractReadableArticle, type ExtractedArticle } from "./article-extractor";
-import { SourceFetchError, SourceHttpClient } from "./http-client";
+import {
+  SourceFetchError,
+  SourceHttpClient,
+  type SourceHttpResponse,
+} from "./http-client";
 import { transientExtractionPermitted } from "./news-collector";
 import { assertSafeOutboundUrl, type OutboundUrlPolicy } from "./outbound-url";
 import { relatedArxivIds } from "./rss";
 import { boundProviderText } from "./provider-text";
+import {
+  type ReviewedPublicationListingEntry,
+  type ReviewedPublicationProfile,
+} from "./reviewed-publication-profiles";
 import {
   CollectionWindowSchema,
   MAX_PROVIDER_EVIDENCE_CHARACTERS,
@@ -38,6 +47,10 @@ type ListingItem = {
   publishedAt: string;
   authors: string[];
   summary: string | null;
+};
+
+type ReviewedListingItem = ReviewedPublicationListingEntry & {
+  url: string;
 };
 
 function text(
@@ -129,6 +142,7 @@ export class PublicationPageAdapter {
   readonly discoveryFamily = "official-publication" as const;
   private readonly pageUrl: string;
   private readonly listing: ListingConfig | null;
+  private readonly reviewedProfile: ReviewedPublicationProfile | null;
 
   constructor(
     private readonly http: SourceHttpClient,
@@ -137,11 +151,13 @@ export class PublicationPageAdapter {
     private readonly pageUrlPolicy: OutboundUrlPolicy,
     private readonly articleUrlPolicy: OutboundUrlPolicy,
     listing?: unknown,
+    reviewedProfile?: ReviewedPublicationProfile | null,
   ) {
     this.sourceId = source.id;
     this.laneId = `${source.id}:page`;
     this.pageUrl = assertSafeOutboundUrl(pageUrl, pageUrlPolicy).toString();
     this.listing = listing === undefined ? null : ListingConfigSchema.parse(listing);
+    this.reviewedProfile = reviewedProfile ?? null;
   }
 
   private permittedItem(input: Omit<ListingItem, "url"> & { url: string }, baseUrl: string): ListingItem | null {
@@ -154,6 +170,149 @@ export class PublicationPageAdapter {
 
   async collect(window: CollectionWindow): Promise<RawPublicationCandidate[]> {
     return (await this.collectWithStats(window)).candidates;
+  }
+
+  private reviewedItem(
+    item: ReviewedPublicationListingEntry,
+    baseUrl: string,
+  ): ReviewedListingItem | null {
+    try {
+      return {
+        ...item,
+        url: assertSafeOutboundUrl(
+          new URL(item.url, baseUrl),
+          this.articleUrlPolicy,
+        ).toString(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private candidateFromReviewedItem(input: {
+    item: ReviewedListingItem;
+    extraction: ExtractedArticle;
+    originalUrl: string;
+    retrievedAt: string;
+    listingUrl: string;
+  }): RawPublicationCandidate {
+    const { item, extraction, originalUrl, retrievedAt, listingUrl } = input;
+    const abstract = extraction.excerpt ?? item.summary;
+    const content = extraction.text;
+    return RawPublicationCandidateSchema.parse({
+      kind: "publication",
+      sourceId: this.source.id,
+      sourceName: this.source.canonicalName,
+      sourceRole: this.source.role,
+      title: item.title,
+      originalUrl,
+      externalId: originalUrl,
+      externalIds: [originalUrl],
+      publishedAt: item.publishedAt,
+      retrievedAt,
+      accessLevel: accessLevel(extraction),
+      authors: extraction.byline === null ? item.authors : [extraction.byline],
+      institutions: [],
+      abstract,
+      content,
+      relatedPaperIds: relatedArxivIds(
+        [originalUrl, item.summary, abstract, content].filter(Boolean).join(" "),
+      ).slice(0, 16),
+      sectionEligibility: this.source.sectionEligibility ?? [],
+      discoveryFamily: "official-publication",
+      metadata: {
+        canCorroborateFacts: false,
+        extractionLevel: extraction.extractionLevel,
+        contentUse: restriction(this.source, "contentUse", "metadata-only"),
+        paywall: restriction(this.source, "paywall", "unknown"),
+        retention:
+          abstract === null && content === null
+            ? "metadata-only"
+            : "ephemeral-only",
+        discoveryMechanism: "page",
+        discoveryLaneIds: [this.laneId],
+        listingUrl,
+      },
+    });
+  }
+
+  private async collectReviewed(
+    validWindow: CollectionWindow,
+    response: SourceHttpResponse,
+    document: Document,
+  ): Promise<{ candidates: RawPublicationCandidate[]; observed: number }> {
+    const profile = this.reviewedProfile!;
+    const parsed = profile.parseListing(document, response.finalUrl)
+      .slice(0, profile.maxListingEntries);
+    if (response.body !== null && response.body.length > 0 && parsed.length === 0) {
+      throw new SyntaxError("Reviewed publication listing was not interpretable.");
+    }
+    const validated = parsed.flatMap((item): ReviewedListingItem[] => {
+      const found = this.reviewedItem(item, response.finalUrl);
+      return found === null ? [] : [found];
+    });
+    const plausible = validated.filter((item) =>
+      mapResearchTopicIds([
+        item.title,
+        item.summary ?? "",
+        item.category ?? "",
+      ]).length > 0 &&
+      (item.publishedAt === null ||
+        (item.publishedAt >= validWindow.from && item.publishedAt <= validWindow.to)),
+    );
+    const candidates = (await Promise.all(plausible.map(async (item, index) => {
+      let extraction = noExtraction();
+      let originalUrl = item.url;
+      let retrievedAt = response.retrievedAt;
+      let publishedAt = item.publishedAt;
+      let detailFailedPolicy = false;
+      if (
+        index < profile.maxDetailFetches &&
+        transientExtractionPermitted(this.source)
+      ) {
+        try {
+          const detail = await this.http.get(this.source, item.url, {
+            headers: { accept: "text/html,application/xhtml+xml" },
+            useValidators: false,
+            urlPolicy: this.articleUrlPolicy,
+          });
+          originalUrl = detail.finalUrl;
+          retrievedAt = detail.retrievedAt;
+          if (detail.body !== null) {
+            const detailMediaType = detail.contentType?.split(";", 1)[0]
+              ?.trim()
+              .toLowerCase();
+            if (
+              detailMediaType !== "text/html" &&
+              detailMediaType !== "application/xhtml+xml"
+            ) {
+              throw new UnsupportedSourceMediaTypeError();
+            }
+            const detailDocument = parseHTML(detail.body).document;
+            publishedAt = publishedAt ?? profile.parseDetailPublishedAt(detailDocument);
+            extraction = extractReadableArticle(
+              detail.body,
+              detail.finalUrl,
+              detail.contentType,
+            );
+          }
+        } catch (error) {
+          if (error instanceof UnsupportedSourceMediaTypeError) throw error;
+          if (error instanceof SourceFetchError && error.failureKind === "policy") {
+            detailFailedPolicy = true;
+          }
+        }
+      }
+      if (detailFailedPolicy || publishedAt === null) return null;
+      return this.candidateFromReviewedItem({
+        item: { ...item, publishedAt },
+        extraction,
+        originalUrl,
+        retrievedAt,
+        listingUrl: response.finalUrl,
+      });
+    }))).filter((candidate): candidate is RawPublicationCandidate => candidate !== null);
+    return { candidates, observed: parsed.length };
   }
 
   async collectWithStats(
@@ -172,6 +331,9 @@ export class PublicationPageAdapter {
       throw new UnsupportedSourceMediaTypeError();
     }
     const { document } = parseHTML(response.body);
+    if (this.reviewedProfile !== null) {
+      return this.collectReviewed(validWindow, response, document);
+    }
     const jsonLd = [...document.querySelectorAll('script[type="application/ld+json"]')]
       .flatMap((script) => {
         try { return schemaArticles(JSON.parse(script.textContent)); } catch { return []; }

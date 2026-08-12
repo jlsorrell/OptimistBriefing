@@ -6,6 +6,7 @@ import { SourceHttpClient } from "./http-client";
 import { type OutboundUrlPolicy } from "./outbound-url";
 import { PapersWithCodeAdapter } from "./papers-with-code";
 import { PublicationPageAdapter } from "./publication-page";
+import { reviewedPublicationProfile } from "./reviewed-publication-profiles";
 import { mapRssCollectionBatch, RssAdapter } from "./rss";
 import {
   DiscoveryLaneDiagnosticSchema,
@@ -262,7 +263,16 @@ export function createPublicationCollectorFromCatalog(options: {
           adapter: new RssAdapter(options.http, [{ source: collectionSource, feedUrl, feedUrlPolicy, articleUrlPolicy }]),
         });
       } else if (source.discoveryMechanism === "page") {
-        pageAdapters.push(new PublicationPageAdapter(options.http, collectionSource, z.string().min(1).parse(source.restrictions.pageUrl), feedUrlPolicy, articleUrlPolicy, source.restrictions.listing));
+        const reviewedProfile = reviewedPublicationProfile(source.id);
+        pageAdapters.push(new PublicationPageAdapter(
+          options.http,
+          collectionSource,
+          z.string().min(1).parse(source.restrictions.pageUrl),
+          feedUrlPolicy,
+          articleUrlPolicy,
+          reviewedProfile === null ? source.restrictions.listing : undefined,
+          reviewedProfile,
+        ));
       } else {
         throw new SyntaxError("Unsupported publication discovery mechanism.");
       }

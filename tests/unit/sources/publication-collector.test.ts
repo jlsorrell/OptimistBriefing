@@ -73,6 +73,63 @@ function article(title: string): string {
   return `<!doctype html><html><body><nav>Discard navigation</nav><article><h1>${title}</h1><p>We report a bounded study and method for interpretable AI debate.</p><script>discard()</script></article></body></html>`;
 }
 
+function reviewedLabSource(
+  id: "anthropic" | "google-deepmind" | "google-research",
+): SourceRecord {
+  const configuration = {
+    anthropic: {
+      canonicalName: "Anthropic Research",
+      canonicalUrl: "https://www.anthropic.com/research",
+      pageUrl: "https://www.anthropic.com/research",
+      host: "www.anthropic.com",
+      prefix: "/research/",
+    },
+    "google-deepmind": {
+      canonicalName: "Google DeepMind",
+      canonicalUrl: "https://deepmind.google/",
+      pageUrl: "https://deepmind.google/blog/",
+      host: "deepmind.google",
+      prefix: "/blog/",
+    },
+    "google-research": {
+      canonicalName: "Google Research",
+      canonicalUrl: "https://research.google/",
+      pageUrl: "https://research.google/blog/",
+      host: "research.google",
+      prefix: "/blog/",
+    },
+  }[id];
+  const pagePolicy = {
+    allowedHosts: [configuration.host],
+    allowedPorts: [""],
+    allowedPathPrefixes: [new URL(configuration.pageUrl).pathname],
+  };
+  const articlePolicy = {
+    allowedHosts: [configuration.host],
+    allowedPorts: [""],
+    allowedPathPrefixes: [configuration.prefix],
+  };
+  return source({
+    id,
+    canonicalName: configuration.canonicalName,
+    canonicalUrl: configuration.canonicalUrl,
+    restrictions: {
+      bodyRetrieval: "permitted",
+      paywall: "none",
+      contentUse: "ephemeral-summarization",
+      pageUrl: configuration.pageUrl,
+      urlPolicy: pagePolicy,
+      feedUrlPolicy: pagePolicy,
+      articleUrlPolicy: articlePolicy,
+      listing: {
+        itemSelector: ".catalog-controlled-selector-that-must-not-run",
+        linkSelector: "a[href]",
+        dateSelector: "time",
+      },
+    },
+  });
+}
+
 function rssSource(overrides: Partial<SourceRecord> = {}): SourceRecord {
   return source({
     id: "alignment-forum",
@@ -205,6 +262,172 @@ describe("PublicationCollector", () => {
     expect(technical?.content).toContain("bounded study");
     expect(technical?.content).not.toContain("Discard navigation");
     expect(technical?.content).not.toContain("discard()");
+  });
+
+  it("collects relevant entries from each reviewed lab profile and skips navigation, product, and off-policy siblings", async () => {
+    const anthropic = await loadFixture("anthropic-research-listing.html");
+    const deepmind = await loadFixture("deepmind-blog-listing.html");
+    const deepmindDetail = await loadFixture("deepmind-blog-detail.html");
+    const google = await loadFixture("google-research-blog-listing.html");
+    const listings = new Map([
+      ["https://www.anthropic.com/research", anthropic],
+      ["https://deepmind.google/blog/", deepmind],
+      ["https://research.google/blog/", google],
+    ]);
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const listing = listings.get(url);
+      if (listing !== undefined) {
+        return new Response(listing, { headers: { "content-type": "text/html" } });
+      }
+      if (url.startsWith("https://deepmind.google/blog/evaluating-ai-systems")) {
+        return new Response(deepmindDetail, { headers: { "content-type": "text/html" } });
+      }
+      if (
+        url.startsWith("https://www.anthropic.com/research/") ||
+        url.startsWith("https://research.google/blog/")
+      ) {
+        return new Response(article("Reviewed detail"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [
+        reviewedLabSource("anthropic"),
+        reviewedLabSource("google-deepmind"),
+        reviewedLabSource("google-research"),
+      ],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.succeededSourceIds).toEqual([
+      "anthropic",
+      "google-deepmind",
+      "google-research",
+    ]);
+    expect(result.candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceId: "anthropic",
+        title: "Alignment through debate",
+        originalUrl: "https://www.anthropic.com/research/alignment-through-debate?ref=listing%2Faugust",
+      }),
+      expect.objectContaining({
+        sourceId: "anthropic",
+        title: "Mechanistic representations",
+      }),
+      expect.objectContaining({
+        sourceId: "google-deepmind",
+        title: "Evaluating AI systems for oversight",
+        publishedAt: "2026-08-02T00:00:00.000Z",
+      }),
+      expect.objectContaining({
+        sourceId: "google-research",
+        title: "Interpretable representations in neural networks",
+      }),
+    ]));
+    expect(result.candidates).toHaveLength(4);
+    expect(JSON.stringify(result.candidates)).not.toContain("Console product release");
+    expect(JSON.stringify(result.candidates)).not.toContain("Model launch product update");
+    expect(JSON.stringify(result.candidates)).not.toContain("AI Studio product announcement");
+    expect(JSON.stringify(result.candidates)).not.toContain("/products/");
+  });
+
+  it("fetches only the first five topical reviewed rows, leaving unrelated rows unfetched", async () => {
+    const unrelated = Array.from({ length: 6 }, (_, index) => `<a href="/research/product-${index}">
+      <h3>Console product release ${index}</h3><span>Product</span>
+      <time datetime="2026-08-02"></time></a>`).join("");
+    const relevant = Array.from({ length: 6 }, (_, index) => `<a href="/research/research-${index}">
+      <h3>AI safety oversight research ${index}</h3><span>Research</span>
+      <time datetime="2026-08-02"></time></a>`).join("");
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://www.anthropic.com/research") {
+        return new Response(`<!doctype html><html><body>${unrelated}${relevant}</body></html>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (url.startsWith("https://www.anthropic.com/research/research-")) {
+        return new Response(article("Reviewed detail"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unrelated reviewed row was fetched: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [reviewedLabSource("anthropic")],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates.map((candidate) => candidate.title)).toEqual([
+      "AI safety oversight research 0",
+      "AI safety oversight research 1",
+      "AI safety oversight research 2",
+      "AI safety oversight research 3",
+      "AI safety oversight research 4",
+      "AI safety oversight research 5",
+    ]);
+    expect(result.candidates[5]).toMatchObject({
+      accessLevel: "metadata",
+      content: null,
+    });
+    expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://www.anthropic.com/research",
+      "https://www.anthropic.com/research/research-0",
+      "https://www.anthropic.com/research/research-1",
+      "https://www.anthropic.com/research/research-2",
+      "https://www.anthropic.com/research/research-3",
+      "https://www.anthropic.com/research/research-4",
+    ]);
+  });
+
+  it("retains dated reviewed siblings when one detail fetch rejects", async () => {
+    const listing = await loadFixture("anthropic-research-listing.html");
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://www.anthropic.com/research") {
+        return new Response(listing, { headers: { "content-type": "text/html" } });
+      }
+      if (url.startsWith("https://www.anthropic.com/research/alignment-through-debate")) {
+        throw new TypeError("temporary detail failure");
+      }
+      if (url === "https://www.anthropic.com/research/representation-learning") {
+        return new Response(article("Healthy reviewed detail"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [reviewedLabSource("anthropic")],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates.map((candidate) => candidate.title)).toEqual([
+      "Alignment through debate",
+      "Mechanistic representations",
+    ]);
+    expect(result.candidates[0]).toMatchObject({
+      accessLevel: "metadata",
+      content: null,
+    });
+    expect(result.candidates[1]?.content).toContain("bounded study");
   });
 
   it("maps Alignment Forum, LessWrong Curated, and LessWrong Frontpage RSS without duplicating the RSS parser", async () => {
