@@ -13,6 +13,7 @@ import {
   type ResearchSourceInput,
   type ResearchSourceRecord,
   ResearchSourceRecordSchema,
+  UnsupportedSourceMediaTypeError,
 } from "./types";
 
 const PAPERS_WITH_CODE_ORIGIN = "https://paperswithcode.co";
@@ -90,20 +91,30 @@ export class PapersWithCodeAdapter {
   }
 
   async collect(window: CollectionWindow): Promise<RawPublicationCandidate[]> {
+    return (await this.collectWithStats(window)).candidates;
+  }
+
+  async collectWithStats(
+    window: CollectionWindow,
+  ): Promise<{ candidates: RawPublicationCandidate[]; observed: number }> {
     const validWindow = CollectionWindowSchema.parse(window);
-    if (!this.source.enabled) return [];
+    if (!this.source.enabled) return { candidates: [], observed: 0 };
     const response = await this.http.get(this.source, PAPERS_WITH_CODE_URL, {
       headers: { accept: "text/html,application/xhtml+xml" },
       useValidators: false,
       urlPolicy: PAPERS_WITH_CODE_POLICY,
     });
-    if (response.body === null) return [];
+    if (response.body === null) return { candidates: [], observed: 0 };
     const mediaType = response.contentType?.split(";", 1)[0]?.trim().toLowerCase();
-    if (mediaType !== "text/html" && mediaType !== "application/xhtml+xml") return [];
+    if (mediaType !== "text/html" && mediaType !== "application/xhtml+xml") {
+      throw new UnsupportedSourceMediaTypeError();
+    }
     const finalUrl = assertSafeOutboundUrl(response.finalUrl, PAPERS_WITH_CODE_POLICY);
-    if (finalUrl.origin !== PAPERS_WITH_CODE_ORIGIN || finalUrl.pathname !== "/") return [];
+    if (finalUrl.origin !== PAPERS_WITH_CODE_ORIGIN || finalUrl.pathname !== "/") {
+      return { candidates: [], observed: 0 };
+    }
     const { document } = parseHTML(response.body);
-    return relevantPaperArticles(document).flatMap((article): RawPublicationCandidate[] => {
+    const discovered = relevantPaperArticles(document).flatMap((article): RawPublicationCandidate[] => {
       const paperLink = [...article.querySelectorAll("a[href]")].find((link) => {
         try {
           const url = assertSafeOutboundUrl(new URL(link.getAttribute("href") ?? "", finalUrl), PAPERS_WITH_CODE_POLICY);
@@ -118,7 +129,7 @@ export class PapersWithCodeAdapter {
       try { paperUrl = assertSafeOutboundUrl(new URL(paperLink.getAttribute("href") ?? "", finalUrl), PAPERS_WITH_CODE_POLICY); } catch { return []; }
       const identifier = paperIdentity(paperUrl.pathname);
       const date = articlePublishedAt(article);
-      if (title === null || identifier === null || date === null || date < validWindow.from || date > validWindow.to) return [];
+      if (title === null || identifier === null || date === null) return [];
       return [RawPublicationCandidateSchema.parse({
         kind: "publication",
         sourceId: this.source.id,
@@ -147,6 +158,16 @@ export class PapersWithCodeAdapter {
           discoveryLaneIds: [this.laneId],
         },
       })];
-    }).slice(0, 100);
+    });
+    return {
+      candidates: discovered
+        .filter((candidate): candidate is RawPublicationCandidate & {
+          publishedAt: string;
+        } => candidate.publishedAt !== null &&
+          candidate.publishedAt >= validWindow.from &&
+          candidate.publishedAt <= validWindow.to)
+        .slice(0, 100),
+      observed: Math.min(10_000, discovered.length),
+    };
   }
 }

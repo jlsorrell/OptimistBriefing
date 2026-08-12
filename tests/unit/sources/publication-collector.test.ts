@@ -184,6 +184,7 @@ describe("PublicationCollector", () => {
       laneId: "example-lab:page",
       sourceId: "example-lab",
       discoveryFamily: "official-publication",
+      observed: 2,
       discovered: 2,
       deduplicated: 0,
       triaged: 0,
@@ -252,12 +253,14 @@ describe("PublicationCollector", () => {
       expect.objectContaining({
         laneId: "alignment-forum:rss",
         sourceId: "alignment-forum",
+        observed: 1,
         discovered: 1,
         outcome: "success",
       }),
       expect.objectContaining({
         laneId: "lesswrong-curated:rss",
         sourceId: "lesswrong-curated",
+        observed: 1,
         discovered: 1,
         outcome: "success",
       }),
@@ -678,6 +681,194 @@ describe("PublicationCollector", () => {
     expect(JSON.stringify(result)).not.toContain("blocked");
   });
 
+  it("records out-of-window RSS entries as healthy source observations", async () => {
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          "<?xml version=\"1.0\"?><rss><channel><item><title>Older result</title><link>https://www.alignmentforum.org/posts/example/older-result</link><pubDate>Sat, 01 Aug 2020 12:00:00 GMT</pubDate></item></channel></rss>",
+          { headers: { "content-type": "application/rss+xml" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [rssSource()],
+    }).collect(window);
+
+    expect(result.candidates).toEqual([]);
+    expect(result.discoveryDiagnostics).toEqual([{
+      laneId: "alignment-forum:rss",
+      sourceId: "alignment-forum",
+      discoveryFamily: "commentary",
+      observed: 1,
+      discovered: 0,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "success",
+      rejectionCounts: {},
+    }]);
+  });
+
+  it("records an empty valid RSS feed as a healthy zero observation", async () => {
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          "<?xml version=\"1.0\"?><rss><channel></channel></rss>",
+          { headers: { "content-type": "application/rss+xml" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [rssSource()],
+    }).collect(window);
+
+    expect(result.discoveryDiagnostics).toEqual([{
+      laneId: "alignment-forum:rss",
+      sourceId: "alignment-forum",
+      discoveryFamily: "commentary",
+      observed: 0,
+      discovered: 0,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "success",
+      rejectionCounts: {},
+    }]);
+  });
+
+  it("reports malformed RSS as parse without inventing an observation", async () => {
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          "<?xml version=\"1.0\"?><rss><channel><item><title>Malformed</title><link>javascript:alert(1)</link></item></channel></rss>",
+          { headers: { "content-type": "application/rss+xml" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [rssSource()],
+    }).collect(window);
+
+    expect(result.failures).toEqual([
+      { sourceId: "alignment-forum", kind: "parse" },
+    ]);
+    expect(result.discoveryDiagnostics).toEqual([{
+      laneId: "alignment-forum:rss",
+      sourceId: "alignment-forum",
+      discoveryFamily: "commentary",
+      discovered: 0,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "parse",
+      rejectionCounts: {},
+    }]);
+  });
+
+  it("reports unsupported RSS and publication-page media without marking lanes healthy", async () => {
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response("not a source listing", {
+          headers: { "content-type": "text/plain" },
+        })),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [rssSource({ id: "plain-rss" }), source({ id: "plain-page" })],
+    }).collect(window);
+
+    expect(result.failures).toEqual([
+      { sourceId: "plain-rss", kind: "unsupported_media" },
+      { sourceId: "plain-page", kind: "unsupported_media" },
+    ]);
+    expect(result.discoveryDiagnostics).toEqual([
+      expect.objectContaining({
+        laneId: "plain-rss:rss",
+        discovered: 0,
+        outcome: "unsupported_media",
+      }),
+      expect.objectContaining({
+        laneId: "plain-page:page",
+        discovered: 0,
+        outcome: "unsupported_media",
+      }),
+    ]);
+    expect(result.discoveryDiagnostics?.every((diagnostic) =>
+      "observed" in diagnostic
+    )).toBe(false);
+  });
+
+  it("does not hide unsupported publication detail media as an empty source", async () => {
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async (input: string | URL | Request) =>
+          String(input) === "https://lab.example.org/research/"
+            ? new Response(`<!doctype html><html><body><article>
+                <h2>Detail media check</h2>
+                <a href="/research/detail-media-check">Read</a>
+                <time datetime="2026-08-02T12:00:00Z"></time>
+              </article></body></html>`, {
+                headers: { "content-type": "text/html" },
+              })
+            : new Response("not HTML", {
+                headers: { "content-type": "text/plain" },
+              }),
+        ),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [source()],
+    }).collect(window);
+
+    expect(result.failures).toEqual([
+      { sourceId: "example-lab", kind: "unsupported_media" },
+    ]);
+    expect(result.discoveryDiagnostics).toEqual([
+      expect.objectContaining({
+        laneId: "example-lab:page",
+        outcome: "unsupported_media",
+      }),
+    ]);
+    expect(result.discoveryDiagnostics?.[0]).not.toHaveProperty("observed");
+  });
+
+  it("preserves parsed publication diagnostics when downstream routing excludes the candidate", async () => {
+    const papersWithCode = source({
+      id: "papers-with-code-co",
+      canonicalName: "Papers with Code",
+      canonicalUrl: "https://paperswithcode.co/",
+      role: "analysis",
+      restrictions: {
+        bodyRetrieval: "permitted",
+        paywall: "none",
+        contentUse: "discovery-metadata-only",
+      },
+      discoveryMechanism: "page",
+      sectionEligibility: ["research", "research_radar"],
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(`<!doctype html><html><body>
+          <section><h2>Relevant papers</h2><article>
+            <a href="/paper/2608.12345">Ordinary research item</a>
+            <time datetime="2026-08-02"></time>
+          </article></section>
+        </body></html>`, { headers: { "content-type": "text/html" } })),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [papersWithCode],
+    }).collect(window);
+
+    expect(result.discoveryDiagnostics).toEqual([
+      expect.objectContaining({
+        laneId: "papers-with-code-co:page",
+        observed: 1,
+        discovered: 1,
+        outcome: "success",
+      }),
+    ]);
+    expect(routePublication(
+      RawPublicationCandidateSchema.parse(
+        prepareRawCandidateForPipeline(result.candidates[0]),
+      ),
+    )).toBeNull();
+  });
+
   it("retains a real page lane when collection succeeds with zero results", async () => {
     const collector = createPublicationCollectorFromCatalog({
       http: new SourceHttpClient({
@@ -697,6 +888,7 @@ describe("PublicationCollector", () => {
       laneId: "example-lab:page",
       sourceId: "example-lab",
       discoveryFamily: "official-publication",
+      observed: 0,
       discovered: 0,
       deduplicated: 0,
       triaged: 0,

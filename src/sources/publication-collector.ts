@@ -56,7 +56,10 @@ type PublicationSourceAdapter = {
   sourceId: string;
   laneId: string;
   discoveryFamily: DiscoveryFamily;
-  collect(window: CollectionWindow): Promise<readonly RawPublicationCandidate[]>;
+  collectWithStats(window: CollectionWindow): Promise<{
+    candidates: readonly RawPublicationCandidate[];
+    observed: number;
+  }>;
 };
 
 function publicationFamily(source: SourceRecord): DiscoveryFamily {
@@ -72,6 +75,7 @@ function publicationDiagnostic(
   sourceId: string,
   discoveryFamily: DiscoveryFamily,
   batch: CollectionBatch<RawPublicationCandidate>,
+  observed?: number,
 ): DiscoveryLaneDiagnostic {
   return DiscoveryLaneDiagnosticSchema.parse({
     laneId,
@@ -82,6 +86,9 @@ function publicationDiagnostic(
     triaged: 0,
     assessed: 0,
     outcome: batch.failures[0]?.kind ?? "success",
+    ...(batch.failures.length === 0 && observed !== undefined
+      ? { observed }
+      : {}),
   });
 }
 
@@ -109,6 +116,9 @@ export class PublicationCollector {
             await adapter.collect(window),
             (item) => publicationFromRss(item, source),
           );
+          const observed = batch.sourceObservations
+            ?.find((observation) => observation.sourceId === source.id)
+            ?.observed;
           return {
             batch,
             diagnostic: publicationDiagnostic(
@@ -116,6 +126,7 @@ export class PublicationCollector {
               source.id,
               discoveryFamily,
               batch,
+              observed,
             ),
           };
         } catch {
@@ -138,9 +149,13 @@ export class PublicationCollector {
     );
     const pageOutcomes = await Promise.all(this.pageAdapters.map(
       async (adapter) => {
+        let observed: number | undefined;
         const batch = await settleCollectionBatch([{
           sourceId: adapter.sourceId,
-          collect: async () => (await adapter.collect(window)).map((candidate) =>
+          collect: async () => {
+            const result = await adapter.collectWithStats(window);
+            observed = result.observed;
+            return result.candidates.map((candidate) =>
             RawPublicationCandidateSchema.parse({
               ...candidate,
               metadata: {
@@ -148,7 +163,8 @@ export class PublicationCollector {
                 discoveryLaneIds: [adapter.laneId],
               },
             })
-          ),
+            );
+          },
         }]);
         return {
           batch,
@@ -157,6 +173,7 @@ export class PublicationCollector {
             adapter.sourceId,
             adapter.discoveryFamily,
             batch,
+            observed,
           ),
         };
       }
@@ -199,7 +216,7 @@ function failedAdapter(
     sourceId: source.id,
     laneId: `${source.id}:${source.discoveryMechanism}`,
     discoveryFamily: publicationFamily(source),
-    collect: async (_window) => { throw failure; },
+    collectWithStats: async (_window) => { throw failure; },
   };
 }
 

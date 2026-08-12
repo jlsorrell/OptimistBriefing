@@ -1608,6 +1608,8 @@ describe("D1BriefingRepository", () => {
         ...diagnostic,
         rejectionCounts: {},
       }]);
+    expect((await repo.getWorkflowRunDetail("run-diagnostics"))
+      ?.discoveryDiagnostics?.[0]).not.toHaveProperty("observed");
     expect(await repo.getDiscoveryDiagnosticsState("run-diagnostics"))
       .toEqual({
         diagnostics: [{ ...diagnostic, rejectionCounts: {} }],

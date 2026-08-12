@@ -6,6 +6,7 @@ import {
   StructuredSummarySchema,
 } from "../../../src/contracts/editorial";
 import {
+  CollectionFailureKindSchema,
   DiscoveryLaneDiagnosticSchema,
   DiscoveryObservationSchema,
   DiscoveryRejectionCountsSchema,
@@ -221,6 +222,75 @@ describe("research discovery source contracts", () => {
 
     expect(DiscoveryLaneDiagnosticSchema.parse(diagnostic).rejectionCounts)
       .toEqual({});
+  });
+
+  it("parses historical discovery diagnostics that omit observed", () => {
+    const parsed = DiscoveryLaneDiagnosticSchema.parse({
+      laneId: "openalex:alignment",
+      sourceId: "openalex",
+      discoveryFamily: "bibliographic",
+      discovered: 3,
+      deduplicated: 2,
+      triaged: 1,
+      assessed: 1,
+      outcome: "success",
+    });
+
+    expect("observed" in parsed).toBe(false);
+  });
+
+  it("round-trips a bounded pre-window observation count", () => {
+    const parsed = DiscoveryLaneDiagnosticSchema.parse({
+      laneId: "openalex:alignment",
+      sourceId: "openalex",
+      discoveryFamily: "bibliographic",
+      observed: 10_000,
+      discovered: 10_000,
+      deduplicated: 10_000,
+      triaged: 10_000,
+      assessed: 10_000,
+      outcome: "success",
+    });
+
+    expect(parsed.observed).toBe(10_000);
+  });
+
+  it("rejects diagnostics whose discovered count exceeds observed", () => {
+    expect(DiscoveryLaneDiagnosticSchema.safeParse({
+      laneId: "openalex:alignment",
+      sourceId: "openalex",
+      discoveryFamily: "bibliographic",
+      observed: 0,
+      discovered: 1,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "success",
+    }).success).toBe(false);
+  });
+
+  it("accepts unsupported media only as a fixed diagnostic outcome", () => {
+    const diagnostic = {
+      laneId: "openalex:alignment",
+      sourceId: "openalex",
+      discoveryFamily: "bibliographic" as const,
+      observed: 0,
+      discovered: 0,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+    };
+
+    expect(DiscoveryLaneDiagnosticSchema.parse({
+      ...diagnostic,
+      outcome: "unsupported_media",
+    }).outcome).toBe("unsupported_media");
+    expect(CollectionFailureKindSchema.parse("unsupported_media"))
+      .toBe("unsupported_media");
+    expect(DiscoveryLaneDiagnosticSchema.safeParse({
+      ...diagnostic,
+      outcome: "unsupported_media:text/html",
+    }).success).toBe(false);
   });
 
   it("accepts bounded fallback triage counts and treats omission as zero", () => {

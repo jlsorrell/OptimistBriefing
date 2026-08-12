@@ -12,7 +12,7 @@ import {
   type OutboundUrlPolicy,
 } from "./outbound-url";
 import {
-  settleCollectionBatch,
+  settleObservedCollectionBatch,
 } from "./collection-settlement";
 import {
   CollectionWindowSchema,
@@ -25,6 +25,7 @@ import {
   type RawItem,
   type ResearchSourceInput,
   type ResearchSourceRecord,
+  UnsupportedSourceMediaTypeError,
 } from "./types";
 
 const OutboundUrlPolicySchema = z.object({
@@ -64,8 +65,10 @@ function record(value: unknown): Record<string, unknown> | null {
 
 function feedEntries(value: unknown): unknown[] {
   const root = record(value);
-  const channel = record(record(root?.rss)?.channel);
-  if (channel) return asArray(channel.item);
+  const rss = record(root?.rss);
+  if (rss !== null && "channel" in rss) {
+    return asArray(record(rss.channel)?.item);
+  }
   const feed = record(root?.feed);
   if (feed) return asArray(feed.entry);
   throw new SyntaxError("Unsupported feed envelope.");
@@ -177,6 +180,9 @@ export function mapRssCollectionBatch<T>(
     candidates: batch.candidates.map(mapper),
     succeededSourceIds: [...batch.succeededSourceIds],
     failures: [...batch.failures],
+    ...(batch.sourceObservations === undefined
+      ? {}
+      : { sourceObservations: batch.sourceObservations }),
   };
 }
 
@@ -194,12 +200,12 @@ export class RssAdapter {
     window: CollectionWindow,
   ): Promise<CollectionBatch<RawItem>> {
     const validWindow = CollectionWindowSchema.parse(window);
-    return settleCollectionBatch(
+    return settleObservedCollectionBatch(
       this.feeds
         .filter((feed) => feed.source.enabled)
         .map((feed) => ({
           sourceId: feed.source.id,
-          collect: async (): Promise<RawItem[]> => {
+          collect: async (): Promise<{ candidates: RawItem[]; observed: number }> => {
             const source = ResearchSourceRecordSchema.parse(feed.source);
             const feedUrlPolicy: OutboundUrlPolicy =
               OutboundUrlPolicySchema.parse(
@@ -219,7 +225,18 @@ export class RssAdapter {
               { urlPolicy: feedUrlPolicy },
             );
             if (response.notModified || response.body === null) {
-              return [];
+              return { candidates: [], observed: 0 };
+            }
+            const mediaType = response.contentType?.split(";", 1)[0]
+              ?.trim()
+              .toLowerCase();
+            if (
+              mediaType !== "application/rss+xml" &&
+              mediaType !== "application/atom+xml" &&
+              mediaType !== "application/xml" &&
+              mediaType !== "text/xml"
+            ) {
+              throw new UnsupportedSourceMediaTypeError();
             }
             const parsedXml: unknown = new XMLParser({
               ignoreAttributes: false,
@@ -292,7 +309,10 @@ export class RssAdapter {
             if (entries.length > 0 && interpretableEntries === 0) {
               throw new SyntaxError("No interpretable feed entries.");
             }
-            return candidates;
+            return {
+              candidates: candidates.slice(0, 10_000),
+              observed: Math.min(10_000, interpretableEntries),
+            };
           },
         })),
     );

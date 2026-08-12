@@ -16,6 +16,7 @@ import {
   type CollectionWindow,
   type RawPublicationCandidate,
   type ResearchSourceRecord,
+  UnsupportedSourceMediaTypeError,
 } from "./types";
 
 const ListingConfigSchema = z.object({
@@ -152,16 +153,24 @@ export class PublicationPageAdapter {
   }
 
   async collect(window: CollectionWindow): Promise<RawPublicationCandidate[]> {
+    return (await this.collectWithStats(window)).candidates;
+  }
+
+  async collectWithStats(
+    window: CollectionWindow,
+  ): Promise<{ candidates: RawPublicationCandidate[]; observed: number }> {
     const validWindow = CollectionWindowSchema.parse(window);
-    if (!this.source.enabled) return [];
+    if (!this.source.enabled) return { candidates: [], observed: 0 };
     const response = await this.http.get(this.source, this.pageUrl, {
       headers: { accept: "text/html,application/xhtml+xml" },
       useValidators: false,
       urlPolicy: this.pageUrlPolicy,
     });
-    if (response.body === null) return [];
+    if (response.body === null) return { candidates: [], observed: 0 };
     const mediaType = response.contentType?.split(";", 1)[0]?.trim().toLowerCase();
-    if (mediaType !== "text/html" && mediaType !== "application/xhtml+xml") return [];
+    if (mediaType !== "text/html" && mediaType !== "application/xhtml+xml") {
+      throw new UnsupportedSourceMediaTypeError();
+    }
     const { document } = parseHTML(response.body);
     const jsonLd = [...document.querySelectorAll('script[type="application/ld+json"]')]
       .flatMap((script) => {
@@ -200,11 +209,12 @@ export class PublicationPageAdapter {
         return found === null ? [] : [found];
       });
     }
+    const observed = Math.min(10_000, discovered.length);
     const bounded = discovered
       .filter((item) => item.publishedAt >= validWindow.from && item.publishedAt <= validWindow.to)
       .slice(0, Math.min(20, this.listing?.maxItems ?? 20));
     const maxBodyFetches = Math.min(10, this.listing?.maxBodyFetches ?? 10);
-    return (await Promise.all(bounded.map(async (item, index) => {
+    const candidates = (await Promise.all(bounded.map(async (item, index) => {
       let extraction = noExtraction();
       let originalUrl = item.url;
       let retrievedAt = response.retrievedAt;
@@ -217,8 +227,24 @@ export class PublicationPageAdapter {
           });
           originalUrl = detail.finalUrl;
           retrievedAt = detail.retrievedAt;
-          if (detail.body !== null) extraction = extractReadableArticle(detail.body, detail.finalUrl, detail.contentType);
+          if (detail.body !== null) {
+            const detailMediaType = detail.contentType?.split(";", 1)[0]
+              ?.trim()
+              .toLowerCase();
+            if (
+              detailMediaType !== "text/html" &&
+              detailMediaType !== "application/xhtml+xml"
+            ) {
+              throw new UnsupportedSourceMediaTypeError();
+            }
+            extraction = extractReadableArticle(
+              detail.body,
+              detail.finalUrl,
+              detail.contentType,
+            );
+          }
         } catch (error) {
+          if (error instanceof UnsupportedSourceMediaTypeError) throw error;
           if (error instanceof SourceFetchError && error.failureKind === "policy") return null;
         }
       }
@@ -258,5 +284,6 @@ export class PublicationPageAdapter {
         },
       });
     }))).filter((candidate): candidate is RawPublicationCandidate => candidate !== null);
+    return { candidates, observed };
   }
 }
