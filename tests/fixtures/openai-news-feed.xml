@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0">
+  <channel>
+    <title>OpenAI News</title>
+    <item>
+      <title>AI safety research study for robust oversight</title>
+      <link>https://openai.com/index/ai-safety-research-study/</link>
+      <guid>openai-ai-safety-research-study</guid>
+      <pubDate>Sat, 01 Aug 2026 12:00:00 GMT</pubDate>
+      <description>We report a substantive method and results for AI safety oversight.</description>
+      <category>Research</category>
+      <category>AI safety</category>
+    </item>
+    <item>
+      <title>Policy update</title>
+      <link>https://openai.com/index/policy-update/</link>
+      <guid>openai-policy-update</guid>
+      <pubDate>Sat, 01 Aug 2026 11:00:00 GMT</pubDate>
+      <description>A short update from the policy team.</description>
+      <category>AI oversight</category>
+    </item>
+    <item>
+      <title>New product launch</title>
+      <link>https://openai.com/index/new-product-launch/</link>
+      <guid>openai-new-product-launch</guid>
+      <pubDate>Sat, 01 Aug 2026 10:00:00 GMT</pubDate>
+      <description>An update about a new product.</description>
+      <category>Product</category>
+    </item>
+    <item>
+      <title>Off-policy research study</title>
+      <link>https://example.com/off-policy-research/</link>
+      <guid>openai-off-policy</guid>
+      <pubDate>Sat, 01 Aug 2026 09:00:00 GMT</pubDate>
+      <description>AI safety research that must not be followed.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Invalid date research study</title>
+      <link>https://openai.com/index/invalid-date-research/</link>
+      <guid>openai-invalid-date</guid>
+      <pubDate>not a date</pubDate>
+      <description>AI safety research with an invalid structural date.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 01</title>
+      <link>https://openai.com/index/research-01/</link>
+      <guid>openai-research-01</guid>
+      <pubDate>Sat, 01 Aug 2026 08:01:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 02</title>
+      <link>https://openai.com/index/research-02/</link>
+      <guid>openai-research-02</guid>
+      <pubDate>Sat, 01 Aug 2026 08:02:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 03</title>
+      <link>https://openai.com/index/research-03/</link>
+      <guid>openai-research-03</guid>
+      <pubDate>Sat, 01 Aug 2026 08:03:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 04</title>
+      <link>https://openai.com/index/research-04/</link>
+      <guid>openai-research-04</guid>
+      <pubDate>Sat, 01 Aug 2026 08:04:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 05</title>
+      <link>https://openai.com/index/research-05/</link>
+      <guid>openai-research-05</guid>
+      <pubDate>Sat, 01 Aug 2026 08:05:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 06</title>
+      <link>https://openai.com/index/research-06/</link>
+      <guid>openai-research-06</guid>
+      <pubDate>Sat, 01 Aug 2026 08:06:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 07</title>
+      <link>https://openai.com/index/research-07/</link>
+      <guid>openai-research-07</guid>
+      <pubDate>Sat, 01 Aug 2026 08:07:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 08</title>
+      <link>https://openai.com/index/research-08/</link>
+      <guid>openai-research-08</guid>
+      <pubDate>Sat, 01 Aug 2026 08:08:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 09</title>
+      <link>https://openai.com/index/research-09/</link>
+      <guid>openai-research-09</guid>
+      <pubDate>Sat, 01 Aug 2026 08:09:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 10</title>
+      <link>https://openai.com/index/research-10/</link>
+      <guid>openai-research-10</guid>
+      <pubDate>Sat, 01 Aug 2026 08:10:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 11</title>
+      <link>https://openai.com/index/research-11/</link>
+      <guid>openai-research-11</guid>
+      <pubDate>Sat, 01 Aug 2026 08:11:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 12</title>
+      <link>https://openai.com/index/research-12/</link>
+      <guid>openai-research-12</guid>
+      <pubDate>Sat, 01 Aug 2026 08:12:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 13</title>
+      <link>https://openai.com/index/research-13/</link>
+      <guid>openai-research-13</guid>
+      <pubDate>Sat, 01 Aug 2026 08:13:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 14</title>
+      <link>https://openai.com/index/research-14/</link>
+      <guid>openai-research-14</guid>
+      <pubDate>Sat, 01 Aug 2026 08:14:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Mechanistic interpretability study 15</title>
+      <link>https://openai.com/index/research-15/</link>
+      <guid>openai-research-15</guid>
+      <pubDate>Sat, 01 Aug 2026 08:15:00 GMT</pubDate>
+      <description>Results from a mechanistic interpretability study.</description>
+      <category>Research</category>
+    </item>
+    <item>
+      <title>Ignored after the first twenty raw rows</title>
+      <link>https://openai.com/index/after-twenty/</link>
+      <guid>openai-after-twenty</guid>
+      <pubDate>Sat, 01 Aug 2026 08:16:00 GMT</pubDate>
+      <description>AI safety research that is outside the code-owned feed bound.</description>
+      <category>Research</category>
+    </item>
+  </channel>
+</rss>

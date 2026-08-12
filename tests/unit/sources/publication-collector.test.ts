@@ -1113,6 +1113,61 @@ describe("PublicationCollector", () => {
     expect(JSON.stringify(result)).not.toContain("blocked");
   });
 
+  it("uses the reviewed OpenAI RSS adapter without a page fallback and isolates a malformed OpenAI lane", async () => {
+    const openai = source({
+      id: "openai",
+      canonicalName: "OpenAI Research",
+      canonicalUrl: "https://openai.com/research/",
+      restrictions: {
+        bodyRetrieval: "permitted",
+        paywall: "none",
+        contentUse: "ephemeral-summarization",
+        feedUrl: "https://openai.com/catalog-supplied-wrong-feed.xml",
+        feedUrlPolicy: {
+          allowedHosts: ["openai.com"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/not-the-reviewed-feed/"],
+        },
+        articleUrlPolicy: {
+          allowedHosts: ["openai.com"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/index/"],
+        },
+      },
+      discoveryMechanism: "rss",
+    });
+    const healthy = rssSource({ id: "healthy-publication" });
+    const collector = createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async (input: string | URL | Request) => {
+          if (String(input).startsWith("https://openai.com/")) {
+            throw new Error("OpenAI must not use its generic page fallback");
+          }
+          return new Response(`<?xml version="1.0"?><rss><channel><item>
+            <title>Healthy publication</title>
+            <link>https://www.alignmentforum.org/posts/example/healthy-publication</link>
+            <pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate>
+          </item></channel></rss>`, {
+            headers: { "content-type": "application/rss+xml" },
+          });
+        }),
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [openai, healthy],
+    });
+
+    const result = await collector.collect(window);
+
+    expect(result.failures).toContainEqual({ sourceId: "openai", kind: "policy" });
+    expect(result.candidates).toEqual([
+      expect.objectContaining({ sourceId: "healthy-publication" }),
+    ]);
+    expect(result.discoveryDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ laneId: "openai:rss", outcome: "policy" }),
+    ]));
+  });
+
   it("records out-of-window RSS entries as healthy source observations", async () => {
     const result = await createPublicationCollectorFromCatalog({
       http: new SourceHttpClient({

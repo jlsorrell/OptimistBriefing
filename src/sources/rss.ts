@@ -41,6 +41,7 @@ export type ConfiguredFeed = {
   feedUrl: unknown;
   feedUrlPolicy?: unknown;
   articleUrlPolicy?: unknown;
+  maxEntries?: unknown;
 };
 
 type NormalizedFeedEntry = {
@@ -50,7 +51,11 @@ type NormalizedFeedEntry = {
   published?: string;
   author?: string;
   description?: string;
+  categories: string[];
 };
+
+const ConfiguredFeedMaxEntriesSchema = z.number().int().min(1).max(100);
+const MAX_FEED_CATEGORIES = 16;
 
 function asArray(value: unknown): unknown[] {
   if (value === undefined || value === null) return [];
@@ -89,6 +94,22 @@ function strings(value: unknown): string[] {
 
 function firstString(value: unknown): string | undefined {
   return strings(value).map((candidate) => candidate.trim()).find(Boolean);
+}
+
+function feedCategories(value: unknown): string[] {
+  return asArray(value).flatMap((category) => {
+    if (typeof category === "string") return [category];
+    const item = record(category);
+    if (item === null) return [];
+    const term = item["@_term"] ?? item.term;
+    if (typeof term === "string") return [term];
+    return typeof item["#text"] === "string" ? [item["#text"]] : [];
+  }).flatMap((category) => {
+    const bounded = boundProviderText(category, {
+      maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+    });
+    return bounded === null ? [] : [bounded];
+  }).slice(0, MAX_FEED_CATEGORIES);
 }
 
 type FeedLink = { href: string; rel?: string };
@@ -156,6 +177,7 @@ function normalizeFeedEntry(
     ...(published === undefined ? {} : { published }),
     ...(author === undefined ? {} : { author }),
     ...(description === undefined ? {} : { description }),
+    categories: feedCategories(entry.category),
   };
 }
 
@@ -215,6 +237,9 @@ export class RssAdapter {
               OutboundUrlPolicySchema.parse(
                 feed.articleUrlPolicy ?? {},
               ) as OutboundUrlPolicy;
+            const maxEntries = feed.maxEntries === undefined
+              ? undefined
+              : ConfiguredFeedMaxEntriesSchema.parse(feed.maxEntries);
             const feedUrl = assertSafeOutboundUrl(
               z.string().min(1).parse(feed.feedUrl),
               feedUrlPolicy,
@@ -244,7 +269,10 @@ export class RssAdapter {
               trimValues: true,
               parseTagValue: false,
             }).parse(response.body);
-            const entries = feedEntries(parsedXml);
+            const rawEntries = feedEntries(parsedXml);
+            const entries = maxEntries === undefined
+              ? rawEntries
+              : rawEntries.slice(0, maxEntries);
             let interpretableEntries = 0;
             const candidates = entries.flatMap((value) => {
               const entry = normalizeFeedEntry(value, articleUrlPolicy);
@@ -293,7 +321,10 @@ export class RssAdapter {
                   relatedPaperIds: relatedArxivIds(
                     `${originalUrl} ${rawDescription}`,
                   ),
-                  metadata: { feedUrl },
+                  metadata: {
+                    feedUrl,
+                    feedCategories: entry.categories,
+                  },
                 });
                 interpretableEntries += 1;
                 if (

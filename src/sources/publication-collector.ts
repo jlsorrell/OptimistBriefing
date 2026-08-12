@@ -6,6 +6,7 @@ import { SourceHttpClient } from "./http-client";
 import { type OutboundUrlPolicy } from "./outbound-url";
 import { PapersWithCodeAdapter } from "./papers-with-code";
 import { PublicationPageAdapter } from "./publication-page";
+import { OpenAiPublicationFeedAdapter } from "./reviewed-publication-feed";
 import { reviewedPublicationProfile } from "./reviewed-publication-profiles";
 import { mapRssCollectionBatch, RssAdapter } from "./rss";
 import {
@@ -60,7 +61,7 @@ export type PublicationCollectorOptions = {
   sourceOrder?: readonly string[];
 };
 
-type PublicationSourceAdapter = {
+export type PublicationSourceAdapter = {
   sourceId: string;
   laneId: string;
   discoveryFamily: DiscoveryFamily;
@@ -256,7 +257,14 @@ export function createPublicationCollectorFromCatalog(options: {
       const articleUrlPolicy = CatalogPolicySchema.parse(
         source.restrictions.articleUrlPolicy,
       ) as OutboundUrlPolicy;
-      if (source.discoveryMechanism === "rss") {
+      if (source.id === "openai" && source.discoveryMechanism === "rss") {
+        pageAdapters.push(new OpenAiPublicationFeedAdapter(
+          options.http,
+          collectionSource,
+          feedUrlPolicy,
+          articleUrlPolicy,
+        ));
+      } else if (source.discoveryMechanism === "rss") {
         const feedUrl = z.string().min(1).parse(source.restrictions.feedUrl);
         rssAdapters.push({
           source,
