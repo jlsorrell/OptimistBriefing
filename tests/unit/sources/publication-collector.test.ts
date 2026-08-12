@@ -328,7 +328,7 @@ describe("PublicationCollector", () => {
     expect(technical?.content).not.toContain("discard()");
   });
 
-  it("collects relevant entries from each reviewed lab profile and skips navigation, product, and off-policy siblings", async () => {
+  it("collects current Google Research list-category entries and skips navigation, product, and off-policy siblings", async () => {
     const anthropic = await loadFixture("anthropic-research-listing.html");
     const deepmind = await loadFixture("deepmind-blog-listing.html");
     const deepmindDetail = await loadFixture("deepmind-blog-detail.html");
@@ -394,6 +394,8 @@ describe("PublicationCollector", () => {
       expect.objectContaining({
         sourceId: "google-research",
         title: "Interpretable representations in neural networks",
+        originalUrl: "https://research.google/blog/interpretable-representations?ref=listing%2Faugust",
+        publishedAt: "2026-08-02T00:00:00.000Z",
       }),
     ]));
     expect(result.candidates).toHaveLength(4);

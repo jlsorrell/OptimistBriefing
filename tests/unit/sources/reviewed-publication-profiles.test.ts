@@ -213,6 +213,63 @@ describe("reviewed publication profiles", () => {
     ]);
   });
 
+  it("prefers an explicit Google category and otherwise takes the first reviewed list category", () => {
+    const profile = reviewedPublicationProfile("google-research")!;
+    const entries = profile.parseListing(documentFrom(`<!doctype html>
+      <a class="glue-card--blog" href="/blog/current">
+        <span class="js-gt-item-id">Current category contract</span>
+        <span class="glue-card__eyebrow">2026-08-02</span>
+        <ul class="glue-card__link-list">
+          <li class="glue-card__link-list__item">AI safety</li>
+          <li class="glue-card__link-list__item">Systems</li>
+        </ul>
+      </a>
+      <a class="glue-card--blog" href="/blog/legacy">
+        <span class="js-gt-item-id">Legacy category contract</span>
+        <span class="glue-card__eyebrow">2026-08-02</span>
+        <span class="glue-card__label">Research</span>
+        <ul class="glue-card__link-list">
+          <li class="glue-card__link-list__item">Ignored fallback</li>
+        </ul>
+      </a>`), "https://research.google/blog/");
+
+    expect(entries).toMatchObject([
+      {
+        url: "https://research.google/blog/current",
+        publishedAt: "2026-08-02T00:00:00.000Z",
+      },
+      {
+        url: "https://research.google/blog/legacy",
+        publishedAt: "2026-08-02T00:00:00.000Z",
+      },
+    ]);
+    expect(entries.map(({ category }) => category)).toEqual(["AI safety", "Research"]);
+  });
+
+  it("does not treat unrelated list items as Google Research categories", () => {
+    const profile = reviewedPublicationProfile("google-research")!;
+    const entries = profile.parseListing(documentFrom(`<!doctype html>
+      <a class="glue-card--blog" href="/blog/unrelated-list">
+        <span class="js-gt-item-id">Unrelated list item contract</span>
+        <span class="glue-card__eyebrow">2026-08-02</span>
+        <ul class="glue-card__link-list"><li>Research</li></ul>
+      </a>
+      <a class="glue-card--blog" href="/blog/healthy-sibling">
+        <span class="js-gt-item-id">Healthy sibling contract</span>
+        <span class="glue-card__eyebrow">2026-08-02</span>
+        <ul class="glue-card__link-list">
+          <li class="glue-card__link-list__item">Research</li>
+        </ul>
+      </a>`), "https://research.google/blog/");
+
+    expect(entries).toEqual([expect.objectContaining({
+      title: "Healthy sibling contract",
+      url: "https://research.google/blog/healthy-sibling",
+      publishedAt: "2026-08-02T00:00:00.000Z",
+      category: "Research",
+    })]);
+  });
+
   it("bounds provider-controlled display text before entries leave the profile", () => {
     const oversizedTitle = "ﬃ".repeat(500);
     const profile = reviewedPublicationProfile("anthropic")!;
