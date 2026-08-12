@@ -465,6 +465,71 @@ describe("PublicationCollector", () => {
     expect(result.candidates).toEqual([]);
   });
 
+  it("keeps exact boundary instants and drops out-of-window reviewed dates regardless of ISO spelling", async () => {
+    const listing = `<!doctype html>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/dated-lower"></a>
+        <h3 class="card__title">AI safety lower-bound research</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-08-01">August 1, 2026</time>
+      </article>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/dated-upper"></a>
+        <h3 class="card__title">AI safety upper-bound research</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-08-03">August 3, 2026</time>
+      </article>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/dated-outside"></a>
+        <h3 class="card__title">AI safety outside-window research</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-07-31">July 31, 2026</time>
+      </article>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/recovered-lower"></a>
+        <h3 class="card__title">AI safety recovered-bound research</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-08">August 2026</time>
+      </article>`;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://deepmind.google/blog/") {
+        return new Response(listing, { headers: { "content-type": "text/html" } });
+      }
+      if (url === "https://deepmind.google/blog/recovered-lower") {
+        return new Response(`<!doctype html><script type="application/ld+json">
+          {"@type":"BlogPosting","datePublished":"2026-08-01"}
+        </script><article><p>Recovered safety evidence.</p></article>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (url.startsWith("https://deepmind.google/blog/")) {
+        return new Response(article("Reviewed boundary detail"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [reviewedLabSource("google-deepmind")],
+    }).collect({
+      from: "2026-08-01T00:00:00Z",
+      to: "2026-08-03T00:00:00Z",
+    });
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates.map((candidate) => candidate.title)).toEqual([
+      "AI safety upper-bound research",
+      "AI safety lower-bound research",
+      "AI safety recovered-bound research",
+    ]);
+  });
+
   it("isolates non-HTML reviewed detail responses: dated rows stay metadata-only while undated rows drop", async () => {
     const listing = `<!doctype html>
       <article class="card__inner">

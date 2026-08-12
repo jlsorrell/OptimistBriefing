@@ -111,7 +111,8 @@ describe("reviewed publication profiles", () => {
     const profile = reviewedPublicationProfile("anthropic")!;
 
     expect(profile.parseListing(documentFrom(`<!doctype html><a href="/research/span-title">
-      <span>September 22, 2026</span>
+      <span>September
+        22, 2026</span>
       <span>Safety research</span>
       <span>Research</span>
       <time datetime="2026-09-22">September 22, 2026</time>

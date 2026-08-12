@@ -136,6 +136,22 @@ function restriction(source: ResearchSourceRecord, key: string, fallback: string
   return typeof value === "string" && value.length > 0 ? value : fallback;
 }
 
+function insideCollectionWindow(
+  publishedAt: string,
+  window: CollectionWindow,
+): boolean {
+  const timestamp = Date.parse(publishedAt);
+  const from = Date.parse(window.from);
+  const to = Date.parse(window.to);
+  return (
+    Number.isFinite(timestamp) &&
+    Number.isFinite(from) &&
+    Number.isFinite(to) &&
+    timestamp >= from &&
+    timestamp <= to
+  );
+}
+
 export class PublicationPageAdapter {
   readonly sourceId: string;
   readonly laneId: string;
@@ -258,7 +274,7 @@ export class PublicationPageAdapter {
         item.category ?? "",
       ]).length > 0 &&
       (item.publishedAt === null ||
-        (item.publishedAt >= validWindow.from && item.publishedAt <= validWindow.to)),
+        insideCollectionWindow(item.publishedAt, validWindow)),
     );
     const candidates = (await Promise.all(plausible.map(async (item, index) => {
       let extraction = noExtraction();
@@ -304,8 +320,7 @@ export class PublicationPageAdapter {
       if (
         detailFailedPolicy ||
         publishedAt === null ||
-        publishedAt < validWindow.from ||
-        publishedAt > validWindow.to
+        !insideCollectionWindow(publishedAt, validWindow)
       ) return null;
       return this.candidateFromReviewedItem({
         item: { ...item, publishedAt },
