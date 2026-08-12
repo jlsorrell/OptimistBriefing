@@ -613,7 +613,7 @@ describe("triageResearch", () => {
       ]);
     });
 
-    it("keeps item and admission order stable when input is reversed", () => {
+    it("keeps item, admission, and exclusion order stable when input is reversed", () => {
       const candidates = [
         researchItem("normal-a", { topicalFit: 0.8, domain: "normal-a.example" }),
         researchItem("normal-b", { topicalFit: 0.7, domain: "normal-b.example" }),
@@ -627,14 +627,93 @@ describe("triageResearch", () => {
           domain: "core.example",
           normalizedText: "Capability elicitation reveals hidden model abilities.",
         }),
+        researchItem("excluded-b", {
+          topicalFit: 0.36,
+          domain: "excluded-b.example",
+          normalizedText: "A broad framework for AI safety and governance.",
+        }),
+        researchItem("excluded-a", {
+          topicalFit: 0.35,
+          domain: "excluded-a.example",
+          normalizedText: "A broad framework for AI safety and governance.",
+        }),
       ];
+      const options = { ...fallbackOptions, maximum: 4 };
 
-      const forward = triageResearch(candidates, fallbackOptions);
-      const reversed = triageResearch([...candidates].reverse(), fallbackOptions);
+      const forward = triageResearch(candidates, options);
+      const reversed = triageResearch([...candidates].reverse(), options);
 
       expect(reversed.items.map(({ id }) => id))
         .toEqual(forward.items.map(({ id }) => id));
       expect(reversed.admissions).toEqual(forward.admissions);
+      expect(forward.exclusions).toEqual([
+        { itemId: "excluded-a", reason: "queue_capacity" },
+        { itemId: "excluded-b", reason: "queue_capacity" },
+      ]);
+      expect(reversed.exclusions).toEqual(forward.exclusions);
+    });
+
+    it("shares the family cap across normal and near-match passes", () => {
+      const normal = [
+        researchItem("normal-a", {
+          family: "bibliographic",
+          topicalFit: 0.8,
+          domain: "normal-a.example",
+        }),
+        researchItem("normal-b", {
+          family: "bibliographic",
+          topicalFit: 0.7,
+          domain: "normal-b.example",
+        }),
+      ];
+      const nearMatch = researchItem("near-match", {
+        family: "bibliographic",
+        topicalFit: 0.4,
+        domain: "near-match.example",
+        normalizedText: "Capability elicitation reveals hidden model abilities.",
+      });
+
+      const result = triageResearch([...normal, nearMatch], {
+        ...fallbackOptions,
+        maximum: 6,
+        maximumPerFamily: 2,
+      });
+
+      expect(result.items.map(({ id }) => id)).toEqual([
+        "normal-a",
+        "normal-b",
+      ]);
+      expect(result.exclusions).toContainEqual({
+        itemId: nearMatch.id,
+        reason: "family_cap",
+      });
+    });
+
+    it("shares the publisher-domain cap across normal and near-match passes", () => {
+      const normal = researchItem("normal", {
+        family: "bibliographic",
+        topicalFit: 0.8,
+        domain: "shared.example",
+      });
+      const nearMatch = researchItem("near-match", {
+        family: "bibliographic",
+        topicalFit: 0.4,
+        domain: "shared.example",
+        normalizedText: "Capability elicitation reveals hidden model abilities.",
+      });
+
+      const result = triageResearch([normal, nearMatch], {
+        ...fallbackOptions,
+        maximum: 6,
+        maximumPerFamily: 6,
+        maximumPerPublisherDomain: 1,
+      });
+
+      expect(result.items.map(({ id }) => id)).toEqual([normal.id]);
+      expect(result.exclusions).toContainEqual({
+        itemId: nearMatch.id,
+        reason: "publisher_domain_cap",
+      });
     });
   });
 

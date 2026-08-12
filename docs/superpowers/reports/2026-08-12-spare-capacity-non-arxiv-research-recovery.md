@@ -94,17 +94,19 @@ approved localhost access.
 | `npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "spare capacity|fallback priority|non-ArXiv|reviewed publication"` | sandbox `EPERM`; approved identical run exit `0`; 1 file, 5 passed / 132 skipped. |
 | `npx vitest run --config vitest.worker.config.ts tests/integration/workflow/manual-run.test.ts -t "uses relevance-first research triage before assessment"` | approved run exit `0`; 1 passed / 136 skipped. |
 | `npm run test:worker` | sandbox `EPERM`; post-correction approved run exit `0`; 13 files, 340/340 tests passed. |
+| `npm test` | sandbox run exit `1`; 46 files passed and the 13 listener-dependent managed-OAuth tests failed after metadata validation because the sandbox denied their `127.0.0.1` callback bind. The identical approved run exited `0`; 47 files, 1056/1056 tests passed. |
 | `npm run check` | exit `0`; `tsc --noEmit` had no diagnostics. |
 | `npm run evaluate` | exit `0`; precision@5 `1.00` (minimum `0.80`) and every listed assertion passed. |
 | `npm run build` | exit `0`; Vite transformed 53 modules and built successfully. |
 | `git diff --check a2f38f4..HEAD` and `git diff --check dca0aa36d27720fb9d7e1f2108a7f97ba13e4e1a..HEAD` | both exit `0`; no whitespace errors. |
 
-`npm test` exited `1`: 47 files, 1043 passed / 13 failed and one unhandled
-rejection, all in `tests/unit/config/preview-e2e-managed-oauth.test.ts`.
-Every failure stopped at authorization-server metadata before registration,
-callback, token, or authenticated-health stages. This is the pre-existing
-managed-OAuth fixture/environment failure recorded before Tasks 1–2; it is not
-a loopback-listener `EPERM` and this diff does not change that suite.
+The sandbox failure's last reported stage was authorization-server metadata
+because `authorizePreviewWithManagedOAuth` validates that metadata and then
+immediately opens its callback server on `127.0.0.1`, before reporting client
+registration. The sandbox-denied bind therefore surfaced as 13 downstream
+assertion failures plus one unhandled rejection rather than a raw top-level
+`listen EPERM`. The identical approved command proves this is a local-listener
+permission boundary, not a functional managed-OAuth failure.
 
 ## Mutation evidence
 
@@ -113,10 +115,14 @@ a loopback-listener `EPERM` and this diff does not change that suite.
    fail: the seven-normal case selected no near matches and the 20-normal case
    selected 20 rather than 24. The approved formula was restored and focused
    GREEN rerun.
-2. Resetting the shared family/domain maps made `shared fallback
-   diversity|family|publisher` fail: shared `perFamilyCounts` were lost and a
-   non-arXiv domain exceeded its cap. The shared maps were restored and focused
-   GREEN rerun.
+2. Final review found the original shared-map mutation evidence was not
+   load-bearing: clearing both maps still let `preserves legacy normal ordering
+   and shared fallback diversity` pass because one spare slot and prior topic
+   coverage already chose the same fallback. Separate regressions now leave
+   spare queue capacity while exhausting, respectively, a family cap and a
+   publisher-domain cap during the normal pass. Clearing the maps before the
+   fallback pass made both tests fail by admitting `near-match`; the shared maps
+   were restored and focused GREEN rerun.
 3. Ignoring the family override made `allows twelve arXiv|keeps every non-arXiv`
    fail because arXiv stopped at six; applying 12 globally made the non-arXiv
    assertion fail by admitting all seven bibliographic candidates. The
@@ -128,6 +134,18 @@ a loopback-listener `EPERM` and this diff does not change that suite.
    explicit Google category` fail: the legacy row became `Ignored fallback`
    rather than `Research`. Explicit-first behavior was restored and the full
    focused source suite, typecheck, and diff check passed.
+6. Removing deterministic exclusion sorting made the reversed-input regression
+   fail: forward exclusions were `excluded-b`, `excluded-a` instead of the
+   required stable `excluded-a`, `excluded-b`. Sorting was restored.
+
+Fix-round GREEN verification:
+
+- The four-file focused unit/source suite passed 139/139 tests.
+- `npm run check` and `git diff --check` exited `0`.
+- The final identical approved `npm test` run, now including the two added
+  regressions, passed 47 files and 1058/1058 tests. The earlier approved
+  1056/1056 result above is the exact rerun that corrected the original
+  sandbox-failure diagnosis before the new tests were added.
 
 ## Safety and privacy audit
 
@@ -152,19 +170,20 @@ a loopback-listener `EPERM` and this diff does not change that suite.
 
 ## Independent review
 
-Fresh read-only review of `a2f38f4..HEAD` plus the uncommitted integration-test
-correction found no Critical, Important, or Minor findings. It verified the
-allowance semantics, caps, ordering, diagnostics privacy, and narrow Google
-parser contract; its focused unit/source suite result was 137 passed and its
-approved Worker boundary checks passed.
-
-No findings.
+An initial read-only review verified the production allowance, cap, diagnostics,
+and Google parser behavior. Final whole-branch review found no production defect
+but identified inaccurate loopback evidence and two non-load-bearing test seams.
+Fix round 1 corrected the evidence, added explicit cross-pass cap regressions,
+and made reversed-input exclusions observable. Mutation runs above prove each
+new assertion detects its targeted break.
 
 ## Concerns and follow-up
 
 Correctness concerns for this scoped change: None.
 
 Approved Worker runs emit existing third-party `htmlparser2` missing-source-map
-warnings. The unrelated managed-OAuth full-unit failure remains recorded above.
+warnings. The full unit suite requires approved local-listener permission in the
+restricted sandbox. The exact diagnostic rerun passed 1056/1056 before the two
+new regressions; final verification passed 1058/1058.
 Georgia Tech, Stanford, and Johns Hopkins endpoint-policy work remains a
 separately scoped follow-up; this change deliberately does not alter it.
