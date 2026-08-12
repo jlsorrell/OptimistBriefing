@@ -184,6 +184,20 @@ function deepMindListing(
   });
 }
 
+function googleResearchCategory(row: Element): string | null {
+  const explicit = providerTitle(
+    row.querySelector(
+      ".glue-card__label, .glue-card__category, [data-category]",
+    )?.textContent,
+  );
+  if (explicit !== null) return explicit;
+  return Array.from(
+    row.querySelectorAll(".glue-card__link-list__item"),
+  )
+    .map((element) => providerTitle(element.textContent))
+    .find((value): value is string => value !== null) ?? null;
+}
+
 function googleResearchListing(
   document: Document,
   baseUrl: string,
@@ -196,10 +210,7 @@ function googleResearchListing(
     const title = providerTitle(row.querySelector(".js-gt-item-id")?.textContent);
     const eyebrow = row.querySelector(".glue-card__eyebrow");
     const dateText = eyebrow?.getAttribute("datetime") ?? eyebrow?.textContent;
-    const category = providerTitle(
-      row.querySelector(".glue-card__label, .glue-card__category, [data-category]")
-        ?.textContent,
-    );
+    const category = googleResearchCategory(row);
     if (href === null || title === null || eyebrow === null || category === null) return [];
     return [{
       title,

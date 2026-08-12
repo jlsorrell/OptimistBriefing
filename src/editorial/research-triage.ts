@@ -51,11 +51,20 @@ export type ResearchTriageOptions = {
   configuredTopics: readonly string[];
   now: string;
   minimumTopicalFit?: number;
-  fallbackTarget?: number;
+  nearMatchAllowance?: number;
   fallbackMinimumTopicalFit?: number;
+  maximumPerPublisherDomainByFamily?: Partial<
+    Record<DiscoveryFamily, number>
+  >;
 };
 
 const NonnegativeIntegerSchema = z.number().int().nonnegative().max(1_000);
+const PublisherDomainMaximumByFamilySchema = z.object({
+  arxiv: NonnegativeIntegerSchema.optional(),
+  bibliographic: NonnegativeIntegerSchema.optional(),
+  "official-publication": NonnegativeIntegerSchema.optional(),
+  commentary: NonnegativeIntegerSchema.optional(),
+}).strict();
 const TopicalFitSchema = z.number().finite().min(0).max(1);
 
 function stringArray(value: unknown): string[] {
@@ -333,15 +342,22 @@ export function triageResearch(
   const minimumTopicalFit = TopicalFitSchema.parse(
     options.minimumTopicalFit ?? 0.5,
   );
-  const fallbackTarget = validatedMaximum(
-    options.fallbackTarget ?? 0,
-    "fallbackTarget",
+  const nearMatchAllowance = validatedMaximum(
+    options.nearMatchAllowance ?? 0,
+    "nearMatchAllowance",
   );
+  const maximumPerPublisherDomainByFamily =
+    PublisherDomainMaximumByFamilySchema.parse(
+      options.maximumPerPublisherDomainByFamily ?? {},
+    );
+  const publisherDomainMaximum = (item: Item): number =>
+    maximumPerPublisherDomainByFamily[discoveryFamily(item)] ??
+    maximumPerPublisherDomain;
   const fallbackMinimumTopicalFit = TopicalFitSchema.parse(
     options.fallbackMinimumTopicalFit ?? 0.35,
   );
   if (
-    fallbackTarget > 0 &&
+    nearMatchAllowance > 0 &&
     fallbackMinimumTopicalFit >= minimumTopicalFit
   ) {
     throw new RangeError(
@@ -369,7 +385,7 @@ export function triageResearch(
       options.configuredTopics.includes(topic)
     );
     if (
-      fallbackTarget > 0 &&
+      nearMatchAllowance > 0 &&
       topicalFit !== null &&
       topicalFit >= fallbackMinimumTopicalFit &&
       hasConfiguredTopic
@@ -387,7 +403,7 @@ export function triageResearch(
   const canSelect = (item: Item): boolean =>
     selected.length < maximum &&
     (perFamily.get(discoveryFamily(item)) ?? 0) < maximumPerFamily &&
-    (perDomain.get(publisherDomain(item)) ?? 0) < maximumPerPublisherDomain;
+    (perDomain.get(publisherDomain(item)) ?? 0) < publisherDomainMaximum(item);
   const select = (item: Item): boolean => {
     if (selectedIds.has(item.id) || !canSelect(item)) return false;
     selected.push(item);
@@ -439,7 +455,7 @@ export function triageResearch(
   const normalCount = selected.length;
   const fallbackCapacity = Math.max(
     0,
-    Math.min(fallbackTarget - normalCount, maximum - normalCount),
+    Math.min(nearMatchAllowance, maximum - normalCount),
   );
   if (fallbackCapacity > 0) {
     const core = fallback
@@ -458,7 +474,7 @@ export function triageResearch(
       (perFamily.get(discoveryFamily(item)) ?? 0) >= maximumPerFamily
         ? "family_cap"
         : (perDomain.get(publisherDomain(item)) ?? 0) >=
-            maximumPerPublisherDomain
+            publisherDomainMaximum(item)
           ? "publisher_domain_cap"
           : "queue_capacity";
     exclusions.push({ itemId: item.id, reason });

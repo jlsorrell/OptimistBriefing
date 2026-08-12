@@ -123,6 +123,28 @@ const budgets: SectionBudgets = {
 };
 
 describe("shortlist", () => {
+  it("ranks non-arXiv research by editorial score without a source reservation", () => {
+    const arxiv = itemWithText("arxiv", "Mechanistic interpretability for transformers");
+    const nonArxiv = itemWithText("non-arxiv", "Mechanistic interpretability for transformers");
+    nonArxiv.metadata.discoveryFamily = "official-publication";
+
+    const winning = shortlist(
+      [arxiv, nonArxiv],
+      [researchScore(arxiv.id, 0.8), researchScore(nonArxiv.id, 0.9)],
+      preferences,
+      { ...budgets, featuredResearch: 1, researchRadar: 0 },
+    );
+    const losing = shortlist(
+      [arxiv, nonArxiv],
+      [researchScore(arxiv.id, 0.9), researchScore(nonArxiv.id, 0.8)],
+      preferences,
+      { ...budgets, featuredResearch: 1, researchRadar: 0 },
+    );
+
+    expect(winning.researchFeatured.map(({ id }) => id)).toEqual(["non-arxiv"]);
+    expect(losing.researchFeatured.map(({ id }) => id)).toEqual(["arxiv"]);
+  });
+
   it("selects a lower-scoring core paper before a higher-scoring adjacent paper", () => {
     const core = item(
       "core",

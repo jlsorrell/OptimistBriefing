@@ -177,7 +177,8 @@ import {
 export { PIPELINE_STEPS } from "./types";
 export type { PipelineContext, PipelineRun, PipelineStore } from "./types";
 
-const RESEARCH_FALLBACK_TARGET = 6;
+const RESEARCH_NEAR_MATCH_ALLOWANCE = 6;
+const RESEARCH_ARXIV_PUBLISHER_DOMAIN_MAXIMUM = 12;
 const RESEARCH_FALLBACK_MINIMUM_TOPICAL_FIT = 0.35;
 
 export class WorkflowRunAlreadyExistsError extends Error {
@@ -2735,9 +2736,12 @@ export function createProductionPipelineContext(
         now: options.now(),
         minimumTopicalFit:
           READER_PROFILE.researchQualityGates.minimumTopicalFit,
-        fallbackTarget: RESEARCH_FALLBACK_TARGET,
+        nearMatchAllowance: RESEARCH_NEAR_MATCH_ALLOWANCE,
         fallbackMinimumTopicalFit:
           RESEARCH_FALLBACK_MINIMUM_TOPICAL_FIT,
+        maximumPerPublisherDomainByFamily: {
+          arxiv: RESEARCH_ARXIV_PUBLISHER_DOMAIN_MAXIMUM,
+        },
       });
       const fallbackIds = new Set(
         triaged.admissions
