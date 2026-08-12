@@ -8,6 +8,7 @@ import {
   type CollectionFailureKind,
   CollectionFailureKindSchema,
   type SourceCollection,
+  UnsupportedSourceMediaTypeError,
 } from "./types";
 
 const VALID_SOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,199}$/;
@@ -19,6 +20,9 @@ function publicSourceId(value: string): string {
 }
 
 function collectionFailureKind(error: unknown): CollectionFailureKind {
+  if (error instanceof UnsupportedSourceMediaTypeError) {
+    return "unsupported_media";
+  }
   if (error instanceof ZodError || error instanceof SyntaxError) {
     return "parse";
   }
@@ -93,5 +97,47 @@ export async function settleCollectionBatch<T>(
         result.failures.length === 0 ? [sourceId] : [],
     ),
     failures: outcomes.flatMap(({ result }) => result.failures),
+  };
+}
+
+type ObservedCollectionResult<T> = {
+  candidates: readonly T[];
+  observed: number;
+};
+
+type ObservedSourceCollection<T> = {
+  sourceId: string;
+  collect(): Promise<ObservedCollectionResult<T>>;
+};
+
+export async function settleObservedCollectionBatch<T>(
+  operations: readonly ObservedSourceCollection<T>[],
+): Promise<CollectionBatch<T>> {
+  const outcomes = await Promise.all(
+    operations.map(async (operation) => ({
+      sourceId: operation.sourceId,
+      result: await settleSourceCollections([{
+        sourceId: operation.sourceId,
+        collect: async () => [await operation.collect()],
+      }]),
+    })),
+  );
+  return {
+    candidates: outcomes.flatMap(({ result }) =>
+      result.values.flatMap(({ candidates }) => candidates),
+    ),
+    succeededSourceIds: outcomes.flatMap(
+      ({ sourceId, result }) =>
+        result.failures.length === 0 ? [sourceId] : [],
+    ),
+    failures: outcomes.flatMap(({ result }) => result.failures),
+    sourceObservations: outcomes.flatMap(({ sourceId, result }) =>
+      result.failures.length === 0
+        ? result.values.map(({ observed }) => ({
+            sourceId,
+            observed: Math.min(10_000, observed),
+          }))
+        : [],
+    ),
   };
 }

@@ -11,6 +11,7 @@ import {
 import { routePublication } from "../../../src/editorial/route-publication";
 import { durableCollectedCandidate } from "../../../src/sources/durable-evidence";
 import { SourceHttpClient } from "../../../src/sources/http-client";
+import { UnsafeOutboundUrlError } from "../../../src/sources/outbound-url";
 import { PapersWithCodeAdapter } from "../../../src/sources/papers-with-code";
 import {
   createPublicationCollectorFromCatalog,
@@ -30,6 +31,19 @@ const loadFixture = (name: string) => readFile(fixturePath(name), "utf8");
 const window: CollectionWindow = {
   from: "2026-08-01T00:00:00.000Z",
   to: "2026-08-03T00:00:00.000Z",
+};
+
+const PAPERS_WITH_CODE_PAGE_URL =
+  "https://paperswithcode.co/papers/recent";
+const PAPERS_WITH_CODE_LISTING_POLICY = {
+  allowedHosts: ["paperswithcode.co"],
+  allowedPorts: [""],
+  allowedPathPrefixes: ["/"],
+};
+const PAPERS_WITH_CODE_ARTICLE_POLICY = {
+  allowedHosts: ["paperswithcode.co"],
+  allowedPorts: [""],
+  allowedPathPrefixes: ["/paper/"],
 };
 
 function source(overrides: Partial<SourceRecord> = {}): SourceRecord {
@@ -73,6 +87,63 @@ function article(title: string): string {
   return `<!doctype html><html><body><nav>Discard navigation</nav><article><h1>${title}</h1><p>We report a bounded study and method for interpretable AI debate.</p><script>discard()</script></article></body></html>`;
 }
 
+function reviewedLabSource(
+  id: "anthropic" | "google-deepmind" | "google-research",
+): SourceRecord {
+  const configuration = {
+    anthropic: {
+      canonicalName: "Anthropic Research",
+      canonicalUrl: "https://www.anthropic.com/research",
+      pageUrl: "https://www.anthropic.com/research",
+      host: "www.anthropic.com",
+      prefix: "/research/",
+    },
+    "google-deepmind": {
+      canonicalName: "Google DeepMind",
+      canonicalUrl: "https://deepmind.google/",
+      pageUrl: "https://deepmind.google/blog/",
+      host: "deepmind.google",
+      prefix: "/blog/",
+    },
+    "google-research": {
+      canonicalName: "Google Research",
+      canonicalUrl: "https://research.google/",
+      pageUrl: "https://research.google/blog/",
+      host: "research.google",
+      prefix: "/blog/",
+    },
+  }[id];
+  const pagePolicy = {
+    allowedHosts: [configuration.host],
+    allowedPorts: [""],
+    allowedPathPrefixes: [new URL(configuration.pageUrl).pathname],
+  };
+  const articlePolicy = {
+    allowedHosts: [configuration.host],
+    allowedPorts: [""],
+    allowedPathPrefixes: [configuration.prefix],
+  };
+  return source({
+    id,
+    canonicalName: configuration.canonicalName,
+    canonicalUrl: configuration.canonicalUrl,
+    restrictions: {
+      bodyRetrieval: "permitted",
+      paywall: "none",
+      contentUse: "ephemeral-summarization",
+      pageUrl: configuration.pageUrl,
+      urlPolicy: pagePolicy,
+      feedUrlPolicy: pagePolicy,
+      articleUrlPolicy: articlePolicy,
+      listing: {
+        itemSelector: ".catalog-controlled-selector-that-must-not-run",
+        linkSelector: "a[href]",
+        dateSelector: "time",
+      },
+    },
+  });
+}
+
 function rssSource(overrides: Partial<SourceRecord> = {}): SourceRecord {
   return source({
     id: "alignment-forum",
@@ -101,6 +172,56 @@ function rssSource(overrides: Partial<SourceRecord> = {}): SourceRecord {
     },
     discoveryMechanism: "rss",
     sectionEligibility: ["research", "research_radar"],
+    ...overrides,
+  });
+}
+
+function papersWithCodeSource(
+  overrides: Partial<SourceRecord> = {},
+): SourceRecord {
+  return source({
+    id: "papers-with-code-co",
+    canonicalName: "Papers with Code",
+    canonicalUrl: "https://paperswithcode.co/",
+    role: "analysis",
+    restrictions: {
+      bodyRetrieval: "permitted",
+      paywall: "none",
+      contentUse: "discovery-metadata-only",
+      pageUrl: PAPERS_WITH_CODE_PAGE_URL,
+      feedUrlPolicy: PAPERS_WITH_CODE_LISTING_POLICY,
+      articleUrlPolicy: PAPERS_WITH_CODE_ARTICLE_POLICY,
+    },
+    discoveryMechanism: "page",
+    sectionEligibility: ["research", "research_radar"],
+    ...overrides,
+  });
+}
+
+function openAiFeedSource(
+  overrides: Partial<SourceRecord> = {},
+): SourceRecord {
+  return source({
+    id: "openai",
+    canonicalName: "OpenAI Research",
+    canonicalUrl: "https://openai.com/research/",
+    restrictions: {
+      bodyRetrieval: "permitted",
+      paywall: "none",
+      contentUse: "ephemeral-summarization",
+      feedUrl: "https://openai.com/news/rss.xml",
+      feedUrlPolicy: {
+        allowedHosts: ["openai.com"],
+        allowedPorts: [""],
+        allowedPathPrefixes: ["/news/"],
+      },
+      articleUrlPolicy: {
+        allowedHosts: ["openai.com"],
+        allowedPorts: [""],
+        allowedPathPrefixes: ["/index/", "/research/"],
+      },
+    },
+    discoveryMechanism: "rss",
     ...overrides,
   });
 }
@@ -136,6 +257,16 @@ function rssHttp(articleUrl: string): SourceHttpClient {
     })),
     now: () => new Date("2026-08-02T12:00:00.000Z"),
   });
+}
+
+function responseWithUrl(
+  body: string,
+  url: string,
+  headers: HeadersInit = { "content-type": "text/html" },
+): Response {
+  const response = new Response(body, { headers });
+  Object.defineProperty(response, "url", { value: url });
+  return response;
 }
 
 describe("PublicationCollector", () => {
@@ -184,6 +315,7 @@ describe("PublicationCollector", () => {
       laneId: "example-lab:page",
       sourceId: "example-lab",
       discoveryFamily: "official-publication",
+      observed: 2,
       discovered: 2,
       deduplicated: 0,
       triaged: 0,
@@ -196,11 +328,358 @@ describe("PublicationCollector", () => {
     expect(technical?.content).not.toContain("discard()");
   });
 
-  it("maps Alignment Forum and LessWrong RSS without duplicating the RSS parser", async () => {
+  it("collects relevant entries from each reviewed lab profile and skips navigation, product, and off-policy siblings", async () => {
+    const anthropic = await loadFixture("anthropic-research-listing.html");
+    const deepmind = await loadFixture("deepmind-blog-listing.html");
+    const deepmindDetail = await loadFixture("deepmind-blog-detail.html");
+    const google = await loadFixture("google-research-blog-listing.html");
+    const listings = new Map([
+      ["https://www.anthropic.com/research", anthropic],
+      ["https://deepmind.google/blog/", deepmind],
+      ["https://research.google/blog/", google],
+    ]);
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      const listing = listings.get(url);
+      if (listing !== undefined) {
+        return new Response(listing, { headers: { "content-type": "text/html" } });
+      }
+      if (url.startsWith("https://deepmind.google/blog/evaluating-ai-systems")) {
+        return new Response(deepmindDetail, { headers: { "content-type": "text/html" } });
+      }
+      if (
+        url.startsWith("https://www.anthropic.com/research/") ||
+        url.startsWith("https://research.google/blog/")
+      ) {
+        return new Response(article("Reviewed detail"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [
+        reviewedLabSource("anthropic"),
+        reviewedLabSource("google-deepmind"),
+        reviewedLabSource("google-research"),
+      ],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.succeededSourceIds).toEqual([
+      "anthropic",
+      "google-deepmind",
+      "google-research",
+    ]);
+    expect(result.candidates).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        sourceId: "anthropic",
+        title: "Alignment through debate",
+        originalUrl: "https://www.anthropic.com/research/alignment-through-debate?ref=listing%2Faugust",
+      }),
+      expect.objectContaining({
+        sourceId: "anthropic",
+        title: "Mechanistic representations",
+      }),
+      expect.objectContaining({
+        sourceId: "google-deepmind",
+        title: "Evaluating AI systems for oversight",
+        publishedAt: "2026-08-02T00:00:00.000Z",
+      }),
+      expect.objectContaining({
+        sourceId: "google-research",
+        title: "Interpretable representations in neural networks",
+      }),
+    ]));
+    expect(result.candidates).toHaveLength(4);
+    expect(result.discoveryDiagnostics?.map(({ sourceId, observed }) => ({
+      sourceId,
+      observed,
+    }))).toEqual([
+      { sourceId: "anthropic", observed: 2 },
+      { sourceId: "google-deepmind", observed: 1 },
+      { sourceId: "google-research", observed: 1 },
+    ]);
+    expect(JSON.stringify(result.candidates)).not.toContain("Console product release");
+    expect(JSON.stringify(result.candidates)).not.toContain("Model launch product update");
+    expect(JSON.stringify(result.candidates)).not.toContain("AI Studio product announcement");
+    expect(JSON.stringify(result.candidates)).not.toContain("/products/");
+  });
+
+  it("fetches only the first five topical reviewed rows, leaving unrelated rows unfetched", async () => {
+    const unrelated = Array.from({ length: 6 }, (_, index) => `<a href="/research/product-${index}">
+      <h3>Console product release ${index}</h3><span>Product</span>
+      <time datetime="2026-08-02"></time></a>`).join("");
+    const relevant = Array.from({ length: 6 }, (_, index) => `<a href="/research/research-${index}">
+      <h3>AI safety oversight research ${index}</h3><span>Research</span>
+      <time datetime="2026-08-02"></time></a>`).join("");
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://www.anthropic.com/research") {
+        return new Response(`<!doctype html><html><body>${unrelated}${relevant}</body></html>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (url.startsWith("https://www.anthropic.com/research/research-")) {
+        return new Response(article("Reviewed detail"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unrelated reviewed row was fetched: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [reviewedLabSource("anthropic")],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates.map((candidate) => candidate.title)).toEqual([
+      "AI safety oversight research 0",
+      "AI safety oversight research 1",
+      "AI safety oversight research 2",
+      "AI safety oversight research 3",
+      "AI safety oversight research 4",
+      "AI safety oversight research 5",
+    ]);
+    expect(result.candidates[5]).toMatchObject({
+      accessLevel: "metadata",
+      content: null,
+    });
+    expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://www.anthropic.com/research",
+      "https://www.anthropic.com/research/research-0",
+      "https://www.anthropic.com/research/research-1",
+      "https://www.anthropic.com/research/research-2",
+      "https://www.anthropic.com/research/research-3",
+      "https://www.anthropic.com/research/research-4",
+    ]);
+  });
+
+  it("retains dated reviewed siblings when one detail fetch rejects", async () => {
+    const listing = await loadFixture("anthropic-research-listing.html");
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://www.anthropic.com/research") {
+        return new Response(listing, { headers: { "content-type": "text/html" } });
+      }
+      if (url.startsWith("https://www.anthropic.com/research/alignment-through-debate")) {
+        throw new TypeError("temporary detail failure");
+      }
+      if (url === "https://www.anthropic.com/research/representation-learning") {
+        return new Response(article("Healthy reviewed detail"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [reviewedLabSource("anthropic")],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates.map((candidate) => candidate.title)).toEqual([
+      "Alignment through debate",
+      "Mechanistic representations",
+    ]);
+    expect(result.candidates[0]).toMatchObject({
+      accessLevel: "metadata",
+      content: null,
+    });
+    expect(result.candidates[1]?.content).toContain("bounded study");
+  });
+
+  it("drops a month-only reviewed entry when its recovered detail date is outside the collection window", async () => {
+    const listing = `<!doctype html><article class="card__inner">
+      <a class="card__overlay-link" href="/blog/recovered-july"></a>
+      <h3 class="card__title">AI oversight evaluation research</h3>
+      <span class="meta__category">Governance</span>
+      <time datetime="2026-08">August 2026</time>
+    </article>`;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://deepmind.google/blog/") {
+        return new Response(listing, { headers: { "content-type": "text/html" } });
+      }
+      if (url === "https://deepmind.google/blog/recovered-july") {
+        return new Response(`<!doctype html><script type="application/ld+json">
+          {"@type":"BlogPosting","datePublished":"2026-07-31"}
+        </script><article><p>Oversight evaluation evidence.</p></article>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [reviewedLabSource("google-deepmind")],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.succeededSourceIds).toEqual(["google-deepmind"]);
+    expect(result.candidates).toEqual([]);
+  });
+
+  it("keeps exact boundary instants and drops out-of-window reviewed dates regardless of ISO spelling", async () => {
+    const listing = `<!doctype html>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/dated-lower"></a>
+        <h3 class="card__title">AI safety lower-bound research</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-08-01">August 1, 2026</time>
+      </article>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/dated-upper"></a>
+        <h3 class="card__title">AI safety upper-bound research</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-08-03">August 3, 2026</time>
+      </article>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/dated-outside"></a>
+        <h3 class="card__title">AI safety outside-window research</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-07-31">July 31, 2026</time>
+      </article>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/recovered-lower"></a>
+        <h3 class="card__title">AI safety recovered-bound research</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-08">August 2026</time>
+      </article>`;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://deepmind.google/blog/") {
+        return new Response(listing, { headers: { "content-type": "text/html" } });
+      }
+      if (url === "https://deepmind.google/blog/recovered-lower") {
+        return new Response(`<!doctype html><script type="application/ld+json">
+          {"@type":"BlogPosting","datePublished":"2026-08-01"}
+        </script><article><p>Recovered safety evidence.</p></article>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (url.startsWith("https://deepmind.google/blog/")) {
+        return new Response(article("Reviewed boundary detail"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [reviewedLabSource("google-deepmind")],
+    }).collect({
+      from: "2026-08-01T00:00:00Z",
+      to: "2026-08-03T00:00:00Z",
+    });
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates.map((candidate) => candidate.title)).toEqual([
+      "AI safety upper-bound research",
+      "AI safety lower-bound research",
+      "AI safety recovered-bound research",
+    ]);
+  });
+
+  it("isolates non-HTML reviewed detail responses: dated rows stay metadata-only while undated rows drop", async () => {
+    const listing = `<!doctype html>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/dated-non-html"></a>
+        <h3 class="card__title">AI safety oversight study</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-08-02">August 2, 2026</time>
+      </article>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/undated-non-html"></a>
+        <h3 class="card__title">AI safety evaluation study</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-08">August 2026</time>
+      </article>
+      <article class="card__inner">
+        <a class="card__overlay-link" href="/blog/healthy-dated"></a>
+        <h3 class="card__title">Mechanistic interpretability research</h3>
+        <span class="meta__category">Research</span>
+        <time datetime="2026-08-02">August 2, 2026</time>
+      </article>`;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://deepmind.google/blog/") {
+        return new Response(listing, { headers: { "content-type": "text/html" } });
+      }
+      if (
+        url === "https://deepmind.google/blog/dated-non-html" ||
+        url === "https://deepmind.google/blog/undated-non-html"
+      ) {
+        return new Response("not HTML", {
+          headers: { "content-type": "application/pdf" },
+        });
+      }
+      if (url === "https://deepmind.google/blog/healthy-dated") {
+        return new Response(article("Healthy reviewed detail"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [reviewedLabSource("google-deepmind")],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates).toEqual([
+      expect.objectContaining({
+        title: "AI safety oversight study",
+        publishedAt: "2026-08-02T00:00:00.000Z",
+        accessLevel: "metadata",
+        abstract: null,
+        content: null,
+      }),
+      expect.objectContaining({
+        title: "Mechanistic interpretability research",
+        content: expect.stringContaining("bounded study"),
+      }),
+    ]);
+  });
+
+  it("maps Alignment Forum, LessWrong Curated, and LessWrong Frontpage RSS without duplicating the RSS parser", async () => {
+    const frontpage = await loadFixture("lesswrong-frontpage-feed.xml");
     const rss = (host: string) => `<?xml version="1.0"?><rss><channel><item><title>Original alignment study</title><link>https://${host}/posts/example/original-study</link><guid>${host}-example</guid><pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate><author>Researcher Example</author><description><![CDATA[We present a result related to https://arxiv.org/abs/2608.00001v2.]]></description></item></channel></rss>`;
+    const curated = `<?xml version="1.0"?><rss><channel><item><title>Curated post also on Frontpage</title><link>https://www.lesswrong.com/posts/shared-curated-post</link><guid>lesswrong:shared-curated-post</guid><pubDate>Sat, 02 Aug 2026 12:00:00 GMT</pubDate><author>Ada Example</author><description><![CDATA[An interpretation of a bounded oversight result.]]></description></item></channel></rss>`;
     const fetch = vi.fn(async (input: string | URL | Request) => {
       const url = new URL(String(input));
-      return new Response(rss(url.host), {
+      const body = url.host === "www.lesswrong.com" &&
+          url.searchParams.get("view") === "frontpage"
+        ? frontpage
+        : url.host === "www.lesswrong.com"
+          ? curated
+          : rss(url.host);
+      return new Response(body, {
         headers: { "content-type": "application/rss+xml" },
       });
     });
@@ -236,29 +715,57 @@ describe("PublicationCollector", () => {
       discoveryMechanism: "rss",
       sectionEligibility: ["research", "research_radar"],
     });
+    const frontpageSource = source({
+      id: "lesswrong-frontpage",
+      canonicalName: "LessWrong Frontpage",
+      canonicalUrl: "https://www.lesswrong.com/",
+      restrictions: {
+        bodyRetrieval: "permitted",
+        paywall: "none",
+        contentUse: "ephemeral-summarization",
+        feedUrl: "https://www.lesswrong.com/feed.xml?view=frontpage",
+        urlPolicy: { allowedHosts: ["www.lesswrong.com"], allowedPorts: [""], allowedPathPrefixes: ["/feed.xml", "/posts/"] },
+        feedUrlPolicy: { allowedHosts: ["www.lesswrong.com"], allowedPorts: [""], allowedPathPrefixes: ["/feed.xml"] },
+        articleUrlPolicy: { allowedHosts: ["www.lesswrong.com"], allowedPorts: [""], allowedPathPrefixes: ["/posts/"] },
+      },
+      discoveryMechanism: "rss",
+      sectionEligibility: ["research", "research_radar"],
+    });
     const collector = createPublicationCollectorFromCatalog({
       http: new SourceHttpClient({ fetch, now: () => new Date("2026-08-02T12:00:00.000Z") }),
-      sources: [forum, lesswrong],
+      sources: [forum, lesswrong, frontpageSource],
     });
 
     const result = await collector.collect(window);
 
-    expect(result.candidates).toHaveLength(2);
+    expect(result.candidates).toHaveLength(4);
     expect(result.candidates).toEqual(expect.arrayContaining([
       expect.objectContaining({ sourceId: "alignment-forum", discoveryFamily: "commentary", relatedPaperIds: ["arXiv:2608.00001"], metadata: expect.objectContaining({ canCorroborateFacts: false, discoveryLaneIds: ["alignment-forum:rss"] }) }),
-      expect.objectContaining({ sourceId: "lesswrong-curated", discoveryFamily: "commentary", relatedPaperIds: ["arXiv:2608.00001"], metadata: expect.objectContaining({ canCorroborateFacts: false, discoveryLaneIds: ["lesswrong-curated:rss"] }) }),
+      expect.objectContaining({ sourceId: "lesswrong-curated", discoveryFamily: "commentary", metadata: expect.objectContaining({ canCorroborateFacts: false, discoveryLaneIds: ["lesswrong-curated:rss"] }) }),
+      expect.objectContaining({ sourceId: "lesswrong-frontpage", originalUrl: "https://www.lesswrong.com/posts/shared-curated-post", discoveryFamily: "commentary", metadata: expect.objectContaining({ canCorroborateFacts: false, discoveryLaneIds: ["lesswrong-frontpage:rss"] }) }),
+      expect.objectContaining({ sourceId: "lesswrong-frontpage", originalUrl: "https://www.lesswrong.com/posts/frontpage-only-post", discoveryFamily: "commentary", metadata: expect.objectContaining({ canCorroborateFacts: false, discoveryLaneIds: ["lesswrong-frontpage:rss"] }) }),
     ]));
     expect(result.discoveryDiagnostics).toEqual([
       expect.objectContaining({
         laneId: "alignment-forum:rss",
         sourceId: "alignment-forum",
+        observed: 1,
         discovered: 1,
         outcome: "success",
       }),
       expect.objectContaining({
         laneId: "lesswrong-curated:rss",
         sourceId: "lesswrong-curated",
+        observed: 1,
         discovered: 1,
+        outcome: "success",
+      }),
+      expect.objectContaining({
+        laneId: "lesswrong-frontpage:rss",
+        sourceId: "lesswrong-frontpage",
+        discoveryFamily: "commentary",
+        observed: 2,
+        discovered: 2,
         outcome: "success",
       }),
     ]);
@@ -617,33 +1124,8 @@ describe("PublicationCollector", () => {
     }]);
   });
 
-  it("fails open when the OpenAI listing receives a 403 while a healthy publication RSS lane survives", async () => {
-    const openai = source({
-      id: "openai",
-      canonicalName: "OpenAI Research",
-      canonicalUrl: "https://openai.com/research/",
-      restrictions: {
-        bodyRetrieval: "permitted",
-        paywall: "none",
-        contentUse: "ephemeral-summarization",
-        pageUrl: "https://openai.com/research/index/publication/",
-        urlPolicy: {
-          allowedHosts: ["openai.com"],
-          allowedPorts: [""],
-          allowedPathPrefixes: ["/research/index/publication/", "/index/", "/research/"],
-        },
-        feedUrlPolicy: {
-          allowedHosts: ["openai.com"],
-          allowedPorts: [""],
-          allowedPathPrefixes: ["/research/index/publication/"],
-        },
-        articleUrlPolicy: {
-          allowedHosts: ["openai.com"],
-          allowedPorts: [""],
-          allowedPathPrefixes: ["/index/", "/research/"],
-        },
-      },
-    });
+  it("fails open when the OpenAI feed receives a 403 while a healthy publication RSS lane survives", async () => {
+    const openai = openAiFeedSource();
     const healthy = rssSource({ id: "healthy-publication" });
     const healthyFeed = `<?xml version="1.0"?><rss><channel><item>
       <title>Healthy publication</title>
@@ -653,7 +1135,7 @@ describe("PublicationCollector", () => {
       <description>Healthy RSS evidence.</description>
     </item></channel></rss>`;
     const fetch = vi.fn(async (input: string | URL | Request) => {
-      if (String(input) === "https://openai.com/research/index/publication/") {
+      if (String(input) === "https://openai.com/news/rss.xml") {
         return new Response("blocked", { status: 403 });
       }
       return new Response(healthyFeed, {
@@ -678,6 +1160,572 @@ describe("PublicationCollector", () => {
     expect(JSON.stringify(result)).not.toContain("blocked");
   });
 
+  it("uses the reviewed OpenAI RSS adapter without a page fallback and isolates a malformed OpenAI lane", async () => {
+    const openai = source({
+      id: "openai",
+      canonicalName: "OpenAI Research",
+      canonicalUrl: "https://openai.com/research/",
+      restrictions: {
+        bodyRetrieval: "permitted",
+        paywall: "none",
+        contentUse: "ephemeral-summarization",
+        feedUrl: "https://openai.com/catalog-supplied-wrong-feed.xml",
+        feedUrlPolicy: {
+          allowedHosts: ["openai.com"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/not-the-reviewed-feed/"],
+        },
+        articleUrlPolicy: {
+          allowedHosts: ["openai.com"],
+          allowedPorts: [""],
+          allowedPathPrefixes: ["/index/"],
+        },
+      },
+      discoveryMechanism: "rss",
+    });
+    const healthy = rssSource({ id: "healthy-publication" });
+    const collector = createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async (input: string | URL | Request) => {
+          if (String(input).startsWith("https://openai.com/")) {
+            throw new Error("OpenAI must not use its generic page fallback");
+          }
+          return new Response(`<?xml version="1.0"?><rss><channel><item>
+            <title>Healthy publication</title>
+            <link>https://www.alignmentforum.org/posts/example/healthy-publication</link>
+            <pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate>
+          </item></channel></rss>`, {
+            headers: { "content-type": "application/rss+xml" },
+          });
+        }),
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [openai, healthy],
+    });
+
+    const result = await collector.collect(window);
+
+    expect(result.failures).toContainEqual({ sourceId: "openai", kind: "policy" });
+    expect(result.candidates).toEqual([
+      expect.objectContaining({ sourceId: "healthy-publication" }),
+    ]);
+    expect(result.discoveryDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({ laneId: "openai:rss", outcome: "policy" }),
+    ]));
+  });
+
+  it.each([
+    {
+      label: "Papers with Code endpoint",
+      drifted: papersWithCodeSource({
+        restrictions: {
+          ...papersWithCodeSource().restrictions,
+          pageUrl: "https://paperswithcode.co/papers/alternate",
+        },
+      }),
+      expectedLaneId: "papers-with-code-co:page",
+      expectedKind: "policy" as const,
+    },
+    {
+      label: "OpenAI endpoint",
+      drifted: openAiFeedSource({
+        restrictions: {
+          ...openAiFeedSource().restrictions,
+          feedUrl: "https://openai.com/news/alternate.xml",
+        },
+      }),
+      expectedLaneId: "openai:rss",
+      expectedKind: "policy" as const,
+    },
+    {
+      label: "Papers with Code mechanism",
+      drifted: papersWithCodeSource({ discoveryMechanism: "rss" }),
+      expectedLaneId: "papers-with-code-co:rss",
+      expectedKind: "parse" as const,
+    },
+    {
+      label: "OpenAI mechanism",
+      drifted: openAiFeedSource({
+        discoveryMechanism: "page",
+        restrictions: {
+          ...openAiFeedSource().restrictions,
+          pageUrl: "https://openai.com/research/index/publication/",
+        },
+      }),
+      expectedLaneId: "openai:page",
+      expectedKind: "parse" as const,
+    },
+    {
+      label: "Papers with Code split policies",
+      drifted: papersWithCodeSource({
+        restrictions: {
+          bodyRetrieval: "permitted",
+          paywall: "none",
+          contentUse: "discovery-metadata-only",
+          pageUrl: "https://paperswithcode.co/papers/recent",
+        },
+      }),
+      expectedLaneId: "papers-with-code-co:page",
+      expectedKind: "parse" as const,
+    },
+    {
+      label: "Papers with Code catalog listing policy",
+      drifted: papersWithCodeSource({
+        restrictions: {
+          ...papersWithCodeSource().restrictions,
+          feedUrlPolicy: {
+            allowedHosts: ["paperswithcode.co"],
+            allowedPorts: [""],
+            allowedPathPrefixes: ["/not-the-reviewed-listing/"],
+          },
+        },
+      }),
+      expectedLaneId: "papers-with-code-co:page",
+      expectedKind: "policy" as const,
+    },
+  ])("isolates $label catalog drift without fetching the dedicated lane", async ({
+    drifted,
+    expectedLaneId,
+    expectedKind,
+  }) => {
+    const healthy = rssSource({ id: "healthy-publication" });
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === healthy.restrictions.feedUrl) {
+        return new Response(`<?xml version="1.0"?><rss><channel><item>
+          <title>Healthy publication</title>
+          <link>https://www.alignmentforum.org/posts/example/healthy-publication</link>
+          <pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate>
+        </item></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        });
+      }
+      if (url === "https://paperswithcode.co/papers/recent") {
+        return new Response(`<!doctype html><html><body><ul><li>
+          <a href="/paper/2608.12345">Interpretability result</a>
+          <time datetime="2026-08-02">2 August 2026</time>
+        </li></ul></body></html>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (url === "https://openai.com/news/rss.xml") {
+        return new Response(`<?xml version="1.0"?><rss><channel><item>
+          <title>OpenAI research result</title>
+          <link>https://openai.com/index/research-result/</link>
+          <pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate>
+          <description>We report a substantive AI safety study.</description>
+        </item></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        });
+      }
+      if (url === "https://openai.com/research/index/publication/") {
+        return new Response("<!doctype html><html><body></body></html>", {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [drifted, healthy],
+    }).collect(window);
+
+    expect(result.failures).toEqual([
+      { sourceId: drifted.id, kind: expectedKind },
+    ]);
+    expect(result.candidates).toEqual([
+      expect.objectContaining({ sourceId: healthy.id }),
+    ]);
+    expect(result.discoveryDiagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        laneId: expectedLaneId,
+        outcome: expectedKind,
+      }),
+    ]));
+    expect(result.discoveryDiagnostics?.find(({ sourceId }) =>
+      sourceId === drifted.id
+    )).not.toHaveProperty("observed");
+    expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
+      healthy.restrictions.feedUrl,
+    ]);
+  });
+
+  it.each([
+    {
+      label: "Papers with Code path drift",
+      dedicated: papersWithCodeSource(),
+      endpoint: PAPERS_WITH_CODE_PAGE_URL,
+      redirectedTo: "https://paperswithcode.co/",
+      body: `<!doctype html><html><body><ul><li>
+        <a href="/paper/2608.12345">Interpretability result</a>
+        <time datetime="2026-08-02">2 August 2026</time>
+      </li></ul></body></html>`,
+      contentType: "text/html",
+      expectedLaneId: "papers-with-code-co:page",
+    },
+    {
+      label: "Papers with Code query drift",
+      dedicated: papersWithCodeSource(),
+      endpoint: PAPERS_WITH_CODE_PAGE_URL,
+      redirectedTo:
+        "https://paperswithcode.co/papers/recent?unexpected=1",
+      body: `<!doctype html><html><body><ul><li>
+        <a href="/paper/2608.12345">Interpretability result</a>
+        <time datetime="2026-08-02">2 August 2026</time>
+      </li></ul></body></html>`,
+      contentType: "text/html",
+      expectedLaneId: "papers-with-code-co:page",
+    },
+    {
+      label: "OpenAI path drift",
+      dedicated: openAiFeedSource(),
+      endpoint: "https://openai.com/news/rss.xml",
+      redirectedTo: "https://openai.com/news/rss.xml/alternate",
+      body: `<?xml version="1.0"?><rss><channel><item>
+        <title>OpenAI research result</title>
+        <link>https://openai.com/index/research-result/</link>
+        <pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate>
+        <description>We report a substantive AI safety study.</description>
+      </item></channel></rss>`,
+      contentType: "application/rss+xml",
+      expectedLaneId: "openai:rss",
+    },
+    {
+      label: "OpenAI query drift",
+      dedicated: openAiFeedSource(),
+      endpoint: "https://openai.com/news/rss.xml",
+      redirectedTo: "https://openai.com/news/rss.xml?unexpected=1",
+      body: `<?xml version="1.0"?><rss><channel><item>
+        <title>OpenAI research result</title>
+        <link>https://openai.com/index/research-result/</link>
+        <pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate>
+        <description>We report a substantive AI safety study.</description>
+      </item></channel></rss>`,
+      contentType: "application/rss+xml",
+      expectedLaneId: "openai:rss",
+    },
+  ])("rejects $label after redirects without recording an observation", async ({
+    dedicated,
+    endpoint,
+    redirectedTo,
+    body,
+    contentType,
+    expectedLaneId,
+  }) => {
+    const healthy = rssSource({ id: "healthy-publication" });
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === endpoint) {
+        return new Response(null, {
+          status: 302,
+          headers: { location: redirectedTo },
+        });
+      }
+      if (url === redirectedTo) {
+        return new Response(body, {
+          headers: { "content-type": contentType },
+        });
+      }
+      if (url === healthy.restrictions.feedUrl) {
+        return new Response(`<?xml version="1.0"?><rss><channel><item>
+          <title>Healthy publication</title>
+          <link>https://www.alignmentforum.org/posts/example/healthy-publication</link>
+          <pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate>
+        </item></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [dedicated, healthy],
+    }).collect(window);
+
+    expect(result.failures).toEqual([
+      { sourceId: dedicated.id, kind: "policy" },
+    ]);
+    expect(result.candidates).toEqual([
+      expect.objectContaining({ sourceId: healthy.id }),
+    ]);
+    const diagnostic = result.discoveryDiagnostics?.find(({ sourceId }) =>
+      sourceId === dedicated.id
+    );
+    expect(diagnostic).toEqual(expect.objectContaining({
+      laneId: expectedLaneId,
+      outcome: "policy",
+      discovered: 0,
+    }));
+    expect(diagnostic).not.toHaveProperty("observed");
+    expect(fetch).toHaveBeenCalledWith(redirectedTo, expect.any(Object));
+  });
+
+  it("records out-of-window RSS entries as healthy source observations", async () => {
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          "<?xml version=\"1.0\"?><rss><channel><item><title>Older result</title><link>https://www.alignmentforum.org/posts/example/older-result</link><pubDate>Sat, 01 Aug 2020 12:00:00 GMT</pubDate></item></channel></rss>",
+          { headers: { "content-type": "application/rss+xml" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [rssSource()],
+    }).collect(window);
+
+    expect(result.candidates).toEqual([]);
+    expect(result.discoveryDiagnostics).toEqual([{
+      laneId: "alignment-forum:rss",
+      sourceId: "alignment-forum",
+      discoveryFamily: "commentary",
+      observed: 1,
+      discovered: 0,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "success",
+      rejectionCounts: {},
+    }]);
+  });
+
+  it("records an empty valid RSS feed as a healthy zero observation", async () => {
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          "<?xml version=\"1.0\"?><rss><channel></channel></rss>",
+          { headers: { "content-type": "application/rss+xml" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [rssSource()],
+    }).collect(window);
+
+    expect(result.discoveryDiagnostics).toEqual([{
+      laneId: "alignment-forum:rss",
+      sourceId: "alignment-forum",
+      discoveryFamily: "commentary",
+      observed: 0,
+      discovered: 0,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "success",
+      rejectionCounts: {},
+    }]);
+  });
+
+  it("reports malformed RSS as parse without inventing an observation", async () => {
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          "<?xml version=\"1.0\"?><rss><channel><item><title>Malformed</title><link>javascript:alert(1)</link></item></channel></rss>",
+          { headers: { "content-type": "application/rss+xml" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [rssSource()],
+    }).collect(window);
+
+    expect(result.failures).toEqual([
+      { sourceId: "alignment-forum", kind: "parse" },
+    ]);
+    expect(result.discoveryDiagnostics).toEqual([{
+      laneId: "alignment-forum:rss",
+      sourceId: "alignment-forum",
+      discoveryFamily: "commentary",
+      discovered: 0,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "parse",
+      rejectionCounts: {},
+    }]);
+  });
+
+  it("reports an RSS envelope without a channel as parse", async () => {
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          "<?xml version=\"1.0\"?><rss><version>2.0</version></rss>",
+          { headers: { "content-type": "application/rss+xml" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [rssSource()],
+    }).collect(window);
+
+    expect(result.failures).toEqual([
+      { sourceId: "alignment-forum", kind: "parse" },
+    ]);
+    expect(result.discoveryDiagnostics).toEqual([{
+      laneId: "alignment-forum:rss",
+      sourceId: "alignment-forum",
+      discoveryFamily: "commentary",
+      discovered: 0,
+      deduplicated: 0,
+      triaged: 0,
+      assessed: 0,
+      outcome: "parse",
+      rejectionCounts: {},
+    }]);
+  });
+
+  it.each([
+    {
+      label: "truncated XML",
+      body: `<?xml version="1.0"?><rss><channel><item>
+        <title>SECRET_TRUNCATED_PAYLOAD</title>
+        <link>https://www.alignmentforum.org/posts/example/truncated</link>
+        <pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate>
+      </item>`,
+    },
+    {
+      label: "unbalanced XML",
+      body: `<?xml version="1.0"?><rss><channel><item>
+        <title>SECRET_UNBALANCED_PAYLOAD</title>
+        <link>https://www.alignmentforum.org/posts/example/unbalanced</link>
+        <pubDate>Sat, 01 Aug 2026 18:00:00 GMT</pubDate>
+      </channel></rss>`,
+    },
+    {
+      label: "parser-error XML",
+      body: `<?xml version="1.0"?><rss><channel><constructor>
+        SECRET_CONSTRUCTOR_PAYLOAD
+      </constructor></channel></rss>`,
+    },
+  ])("sanitizes $label as parse with no candidate or observation", async ({
+    body,
+  }) => {
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(body, {
+          headers: { "content-type": "application/rss+xml" },
+        })),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [rssSource()],
+    }).collect(window);
+
+    expect(result.candidates).toEqual([]);
+    expect(result.failures).toEqual([
+      { sourceId: "alignment-forum", kind: "parse" },
+    ]);
+    expect(result.discoveryDiagnostics).toEqual([
+      expect.objectContaining({
+        laneId: "alignment-forum:rss",
+        outcome: "parse",
+        discovered: 0,
+      }),
+    ]);
+    expect(result.discoveryDiagnostics?.[0]).not.toHaveProperty("observed");
+    expect(JSON.stringify(result)).not.toMatch(
+      /SECRET_|constructor|Expected closing|InvalidXml/i,
+    );
+  });
+
+  it("reports unsupported RSS and publication-page media without marking lanes healthy", async () => {
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response("not a source listing", {
+          headers: { "content-type": "text/plain" },
+        })),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [rssSource({ id: "plain-rss" }), source({ id: "plain-page" })],
+    }).collect(window);
+
+    expect(result.failures).toEqual([
+      { sourceId: "plain-rss", kind: "unsupported_media" },
+      { sourceId: "plain-page", kind: "unsupported_media" },
+    ]);
+    expect(result.discoveryDiagnostics).toEqual([
+      expect.objectContaining({
+        laneId: "plain-rss:rss",
+        discovered: 0,
+        outcome: "unsupported_media",
+      }),
+      expect.objectContaining({
+        laneId: "plain-page:page",
+        discovered: 0,
+        outcome: "unsupported_media",
+      }),
+    ]);
+    expect(result.discoveryDiagnostics?.every((diagnostic) =>
+      "observed" in diagnostic
+    )).toBe(false);
+  });
+
+  it("does not hide unsupported publication detail media as an empty source", async () => {
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async (input: string | URL | Request) =>
+          String(input) === "https://lab.example.org/research/"
+            ? new Response(`<!doctype html><html><body><article>
+                <h2>Detail media check</h2>
+                <a href="/research/detail-media-check">Read</a>
+                <time datetime="2026-08-02T12:00:00Z"></time>
+              </article></body></html>`, {
+                headers: { "content-type": "text/html" },
+              })
+            : new Response("not HTML", {
+                headers: { "content-type": "text/plain" },
+              }),
+        ),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [source()],
+    }).collect(window);
+
+    expect(result.failures).toEqual([
+      { sourceId: "example-lab", kind: "unsupported_media" },
+    ]);
+    expect(result.discoveryDiagnostics).toEqual([
+      expect.objectContaining({
+        laneId: "example-lab:page",
+        outcome: "unsupported_media",
+      }),
+    ]);
+    expect(result.discoveryDiagnostics?.[0]).not.toHaveProperty("observed");
+  });
+
+  it("preserves parsed publication diagnostics when downstream routing excludes the candidate", async () => {
+    const papersWithCode = papersWithCodeSource();
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(`<!doctype html><html><body>
+          <ul><li>
+            <a href="/paper/2608.12345">Ordinary research item</a>
+            <time datetime="2026-08-02"></time>
+          </li></ul>
+        </body></html>`, { headers: { "content-type": "text/html" } })),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [papersWithCode],
+    }).collect(window);
+
+    expect(result.discoveryDiagnostics).toEqual([
+      expect.objectContaining({
+        laneId: "papers-with-code-co:page",
+        observed: 1,
+        discovered: 1,
+        outcome: "success",
+      }),
+    ]);
+    expect(routePublication(
+      RawPublicationCandidateSchema.parse(
+        prepareRawCandidateForPipeline(result.candidates[0]),
+      ),
+    )).toBeNull();
+  });
+
   it("retains a real page lane when collection succeeds with zero results", async () => {
     const collector = createPublicationCollectorFromCatalog({
       http: new SourceHttpClient({
@@ -697,6 +1745,7 @@ describe("PublicationCollector", () => {
       laneId: "example-lab:page",
       sourceId: "example-lab",
       discoveryFamily: "official-publication",
+      observed: 0,
       discovered: 0,
       deduplicated: 0,
       triaged: 0,
@@ -1105,23 +2154,23 @@ describe("RssAdapter feed normalization", () => {
 });
 
 describe("PapersWithCodeAdapter", () => {
-  it("decodes topical provider text before publication routing", async () => {
+  it("fetches the reviewed recent-paper list and decodes its topical provider text before routing", async () => {
+    const fetch = vi.fn(async () => new Response(
+      `<!doctype html><html><body><ul>
+        <li>
+          <a href="/paper/2608.12345">&amp;#105;nterpretability study results</a>
+          <time datetime="2026-08-02">August 2, 2026</time>
+        </li>
+        <li>
+          <a href="/paper/2608.12346">&#65308;interpretability&#65310;Ordinary study results&#65308;/interpretability&#65310;</a>
+          <time datetime="2026-08-02">August 2, 2026</time>
+        </li>
+      </ul></body></html>`,
+      { headers: { "content-type": "text/html" } },
+    ));
     const adapter = new PapersWithCodeAdapter(
       new SourceHttpClient({
-        fetch: vi.fn(async () => new Response(
-          `<!doctype html><html><body><section>
-            <h2>Relevant papers</h2>
-            <article>
-              <a href="/paper/2608.12345">&amp;#105;nterpretability study results</a>
-              <time datetime="2026-08-02">August 2, 2026</time>
-            </article>
-            <article>
-              <a href="/paper/2608.12346">&#65308;interpretability&#65310;Ordinary study results&#65308;/interpretability&#65310;</a>
-              <time datetime="2026-08-02">August 2, 2026</time>
-            </article>
-          </section></body></html>`,
-          { headers: { "content-type": "text/html" } },
-        )),
+        fetch,
         now: () => new Date("2026-08-02T12:00:00.000Z"),
       }),
       ResearchSourceRecordSchema.parse(rssSource({
@@ -1136,6 +2185,9 @@ describe("PapersWithCodeAdapter", () => {
         },
         sectionEligibility: ["research", "research_radar"],
       })),
+      PAPERS_WITH_CODE_PAGE_URL,
+      PAPERS_WITH_CODE_LISTING_POLICY,
+      PAPERS_WITH_CODE_ARTICLE_POLICY,
     );
 
     const candidates = await adapter.collect(window);
@@ -1159,13 +2211,21 @@ describe("PapersWithCodeAdapter", () => {
         prepareRawCandidateForPipeline(candidates[1]),
       ),
     )).toBeNull();
+    expect(fetch).toHaveBeenCalledWith(
+      "https://paperswithcode.co/papers/recent",
+      expect.any(Object),
+    );
   });
 
   it("parses only on-origin paper links into discovery-only identifiers and code metadata", async () => {
     const fixture = await loadFixture("papers-with-code-recent.html");
+    const fetch = vi.fn(async (_input: string | URL | Request) => new Response(
+      fixture,
+      { headers: { "content-type": "text/html" } },
+    ));
     const adapter = new PapersWithCodeAdapter(
       new SourceHttpClient({
-        fetch: vi.fn(async () => new Response(fixture, { headers: { "content-type": "text/html" } })),
+        fetch,
         now: () => new Date("2026-08-02T12:00:00.000Z"),
       }),
       ResearchSourceRecordSchema.parse(source({
@@ -1177,23 +2237,28 @@ describe("PapersWithCodeAdapter", () => {
           bodyRetrieval: "permitted",
           paywall: "none",
           contentUse: "discovery-metadata-only",
-          pageUrl: "https://paperswithcode.co/?order_by=date_published",
+          pageUrl: "https://paperswithcode.co/papers/recent",
           urlPolicy: { allowedHosts: ["paperswithcode.co"], allowedPorts: [""], allowedPathPrefixes: ["/"] },
         },
         discoveryMechanism: "page",
         sectionEligibility: ["research", "research_radar"],
       })),
+      PAPERS_WITH_CODE_PAGE_URL,
+      PAPERS_WITH_CODE_LISTING_POLICY,
+      PAPERS_WITH_CODE_ARTICLE_POLICY,
     );
 
-    const candidates = await adapter.collect(window);
+    const { candidates, observed } = await adapter.collectWithStats(window);
 
     expect(adapter.laneId).toBe("papers-with-code-co:page");
+    expect(fetch.mock.calls[0]?.[0]).toBe("https://paperswithcode.co/papers/recent");
+    expect(observed).toBe(3);
     expect(candidates).toHaveLength(2);
     expect(candidates[0]).toMatchObject({
       externalId: "arXiv:2608.00001",
       externalIds: ["arXiv:2608.00001"],
       relatedPaperIds: ["arXiv:2608.00001"],
-      discoveryFamily: "commentary",
+      discoveryFamily: "official-publication",
       accessLevel: "metadata",
       abstract: null,
       content: null,
@@ -1204,11 +2269,173 @@ describe("PapersWithCodeAdapter", () => {
       },
     });
     expect(candidates[1]).toMatchObject({
-      externalId: "papers-with-code:98456",
-      relatedPaperIds: ["papers-with-code:98456"],
+      externalId: "papers-with-code:opaque-provider-paper",
+      relatedPaperIds: ["papers-with-code:opaque-provider-paper"],
       metadata: { implementationAvailable: false },
     });
-    expect(JSON.stringify(candidates)).not.toContain("98.7");
     expect(JSON.stringify(candidates)).not.toContain("2608.99999");
+    expect(JSON.stringify(candidates)).not.toContain("Older Paper");
+    expect(JSON.stringify(candidates)).not.toContain("Invalid Date Paper");
+  });
+
+  it("rejects impossible recent-paper dates and parses exact calendar formats in UTC", async () => {
+    const rows = [
+      ["invalid-iso", "Impossible ISO date", "2026-02-30"],
+      ["invalid-natural", "Impossible natural date", "February 30 2026"],
+      ["valid-leap-iso", "Leap ISO date", "2024-02-29"],
+      ["valid-leap-natural", "Leap natural date", "February 29 2024"],
+      ["valid-year-end", "Year end date", "December 31 2026"],
+      ["valid-year-start", "Year start date", "January 1, 2027"],
+    ].map(([id, title, date]) => `<li>
+      <a href="/paper/${id}">${title}</a>
+      <time datetime="${date}">${date}</time>
+    </li>`).join("");
+    const adapter = new PapersWithCodeAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          `<!doctype html><html><body><ul>${rows}</ul></body></html>`,
+          { headers: { "content-type": "text/html" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      ResearchSourceRecordSchema.parse(papersWithCodeSource()),
+      PAPERS_WITH_CODE_PAGE_URL,
+      PAPERS_WITH_CODE_LISTING_POLICY,
+      PAPERS_WITH_CODE_ARTICLE_POLICY,
+    );
+
+    const result = await adapter.collectWithStats({
+      from: "2024-01-01T00:00:00.000Z",
+      to: "2027-02-01T00:00:00.000Z",
+    });
+
+    expect(result.observed).toBe(4);
+    expect(result.candidates.map(({ title, publishedAt }) => [
+      title,
+      publishedAt,
+    ])).toEqual([
+      ["Leap ISO date", "2024-02-29T00:00:00.000Z"],
+      ["Leap natural date", "2024-02-29T00:00:00.000Z"],
+      ["Year end date", "2026-12-31T00:00:00.000Z"],
+      ["Year start date", "2027-01-01T00:00:00.000Z"],
+    ]);
+  });
+
+  it("rejects any final path other than the exact reviewed endpoint", async () => {
+    const adapter = new PapersWithCodeAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => responseWithUrl(
+          `<!doctype html><html><body><ul><li>
+            <a href="/paper/2608.12345">Interpretability result</a>
+            <time datetime="2026-08-02">2 August 2026</time>
+          </li></ul></body></html>`,
+          "https://paperswithcode.co/",
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      ResearchSourceRecordSchema.parse(source({
+        id: "papers-with-code-co",
+        canonicalName: "Papers with Code",
+        canonicalUrl: "https://paperswithcode.co/",
+        role: "analysis",
+        restrictions: { bodyRetrieval: "permitted", paywall: "none", contentUse: "discovery-metadata-only" },
+        discoveryMechanism: "page",
+        sectionEligibility: ["research", "research_radar"],
+      })),
+      PAPERS_WITH_CODE_PAGE_URL,
+      PAPERS_WITH_CODE_LISTING_POLICY,
+      PAPERS_WITH_CODE_ARTICLE_POLICY,
+    );
+
+    await expect(adapter.collect(window)).rejects.toThrow(
+      UnsafeOutboundUrlError,
+    );
+  });
+
+  it("examines at most the first one hundred reviewed list rows", async () => {
+    const olderRows = Array.from({ length: 100 }, (_, index) => `<li>
+      <a href="/paper/2607.${String(index).padStart(5, "0")}">Older ${index}</a>
+      <time datetime="2026-07-01">1 July 2026</time>
+    </li>`).join("");
+    const adapter = new PapersWithCodeAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          `<!doctype html><html><body><ul>${olderRows}<li>
+            <a href="/paper/2608.99999">One-hundred-first result</a>
+            <time datetime="2026-08-02">2 August 2026</time>
+          </li></ul></body></html>`,
+          { headers: { "content-type": "text/html" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      ResearchSourceRecordSchema.parse(source({
+        id: "papers-with-code-co",
+        canonicalName: "Papers with Code",
+        canonicalUrl: "https://paperswithcode.co/",
+        role: "analysis",
+        restrictions: { bodyRetrieval: "permitted", paywall: "none", contentUse: "discovery-metadata-only" },
+        discoveryMechanism: "page",
+        sectionEligibility: ["research", "research_radar"],
+      })),
+      PAPERS_WITH_CODE_PAGE_URL,
+      PAPERS_WITH_CODE_LISTING_POLICY,
+      PAPERS_WITH_CODE_ARTICLE_POLICY,
+    );
+
+    await expect(adapter.collect(window)).resolves.toEqual([]);
+  });
+
+  it("surfaces reviewed-list parser drift instead of falling back to homepage paper links", async () => {
+    const adapter = new PapersWithCodeAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(
+          `<!doctype html><html><body><section><h2>Relevant papers</h2>
+            <article><a href="/paper/2608.12345">Homepage-only result</a>
+              <time datetime="2026-08-02">2 August 2026</time></article>
+          </section></body></html>`,
+          { headers: { "content-type": "text/html" } },
+        )),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      ResearchSourceRecordSchema.parse(source({
+        id: "papers-with-code-co",
+        canonicalName: "Papers with Code",
+        canonicalUrl: "https://paperswithcode.co/",
+        role: "analysis",
+        restrictions: { bodyRetrieval: "permitted", paywall: "none", contentUse: "discovery-metadata-only" },
+        discoveryMechanism: "page",
+        sectionEligibility: ["research", "research_radar"],
+      })),
+      PAPERS_WITH_CODE_PAGE_URL,
+      PAPERS_WITH_CODE_LISTING_POLICY,
+      PAPERS_WITH_CODE_ARTICLE_POLICY,
+    );
+
+    await expect(adapter.collect(window)).rejects.toThrow(SyntaxError);
+  });
+
+  it("treats a whitespace-only HTML response as reviewed-list parser drift", async () => {
+    const adapter = new PapersWithCodeAdapter(
+      new SourceHttpClient({
+        fetch: vi.fn(async () => new Response(" \n\t ", {
+          headers: { "content-type": "text/html" },
+        })),
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      ResearchSourceRecordSchema.parse(source({
+        id: "papers-with-code-co",
+        canonicalName: "Papers with Code",
+        canonicalUrl: "https://paperswithcode.co/",
+        role: "analysis",
+        restrictions: { bodyRetrieval: "permitted", paywall: "none", contentUse: "discovery-metadata-only" },
+        discoveryMechanism: "page",
+        sectionEligibility: ["research", "research_radar"],
+      })),
+      PAPERS_WITH_CODE_PAGE_URL,
+      PAPERS_WITH_CODE_LISTING_POLICY,
+      PAPERS_WITH_CODE_ARTICLE_POLICY,
+    );
+
+    await expect(adapter.collect(window)).rejects.toThrow(SyntaxError);
   });
 });

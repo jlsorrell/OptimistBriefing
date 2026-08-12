@@ -588,6 +588,146 @@ class GroundedProductionProvider implements ModelProvider {
   }
 }
 
+class NonArxivAcceptanceProvider implements ModelProvider {
+  readonly embedRequests: string[][] = [];
+  readonly generateRequests: GenerateObjectRequest[] = [];
+
+  async embed(
+    texts: readonly string[],
+  ): Promise<readonly (readonly number[])[]> {
+    this.embedRequests.push([...texts]);
+    return texts.map(() => [1, 0]);
+  }
+
+  async generateObject(input: GenerateObjectRequest): Promise<unknown> {
+    this.generateRequests.push(structuredClone(input));
+    if (input.schemaName === "research_assessment") {
+      return {
+        technicalQuality: 0.9,
+        novelty: 0.8,
+        strengths: ["The supplied evidence describes a concrete method."],
+        limitations: ["The assessment is limited to the supplied evidence."],
+        rationale: "The supplied evidence supports ordinary assessment.",
+        accessLevel: packetAccessLevel(input.sourcePacket),
+      };
+    }
+    if (input.schemaName !== "structured_summary") {
+      throw new Error(`Unexpected schema: ${input.schemaName}`);
+    }
+    const sourceId = packetValue(input.sourcePacket, "source_id");
+    const title = packetValue(input.sourcePacket, "title");
+    const evidence = packetExcerpt(input.sourcePacket);
+    const accessLevel = packetAccessLevel(input.sourcePacket);
+    const provenance = { sourceIds: [sourceId], evidenceExcerpt: evidence };
+    return {
+      title,
+      oneSentence: evidence,
+      whyItMatters: evidence,
+      uncertainty: evidence,
+      claims: [{
+        text: evidence,
+        sourceIds: [sourceId],
+        evidenceExcerpt: evidence,
+      }],
+      accessLevel,
+      provenance: {
+        title: { sourceIds: [sourceId], evidenceExcerpt: title },
+        oneSentence: provenance,
+        whyItMatters: provenance,
+        uncertainty: provenance,
+      },
+    };
+  }
+}
+
+async function enableOnlySources(sourceIds: readonly string[]): Promise<void> {
+  await env.DB.prepare(
+    `UPDATE sources
+     SET enabled = CASE
+       WHEN id IN (${sourceIds.map(() => "?").join(", ")}) THEN 1
+       ELSE 0
+     END`,
+  ).bind(...sourceIds).run();
+}
+
+async function productionAcceptanceContext(
+  runId: string,
+  sourceIds: readonly string[],
+  summary: ModelProvider = new NonArxivAcceptanceProvider(),
+  assessment: ModelProvider = new NonArxivAcceptanceProvider(),
+): Promise<PipelineContext> {
+  await enableOnlySources(sourceIds);
+  const store = createD1PipelineStore(env.DB);
+  const createdAt = new Date().toISOString();
+  await store.createRun({
+    id: runId,
+    editionDate: "2035-08-12",
+    status: "running",
+    currentStep: "collect",
+    retryable: false,
+    attemptCount: 1,
+    estimatedCostUsd: 0,
+    createdAt,
+    updatedAt: createdAt,
+  });
+  return createD1ProductionPipelineContext(
+    store,
+    "2035-08-12",
+    runId,
+    { summary, assessment },
+  );
+}
+
+async function runProductionAcceptanceStages(context: PipelineContext) {
+  const collected = await context.collect();
+  const normalized = await context.normalize(collected);
+  const enriched = await context.enrich(normalized);
+  const triaged = await context.prefilter(enriched);
+  const assessed = await context.assess(triaged);
+  const scored = await context.score(assessed);
+  const clustered = await context.cluster(scored);
+  const shortlisted = await context.shortlist(clustered);
+  const synthesized = await context.synthesize(shortlisted);
+  const validated = await context.validate(synthesized);
+  return {
+    collected,
+    normalized,
+    enriched,
+    triaged,
+    assessed,
+    scored,
+    clustered,
+    shortlisted,
+    synthesized,
+    validated,
+  };
+}
+
+async function expectSanitizedAuditArtifacts(
+  runId: string,
+  forbidden: readonly string[] = [],
+): Promise<void> {
+  const audit = await env.DB.prepare(
+    `SELECT event_type, event_json
+     FROM audit_events
+     WHERE run_id = ?
+     ORDER BY event_type`,
+  ).bind(runId).all<{ event_type: string; event_json: string }>();
+  const serialized = JSON.stringify(audit.results);
+  for (const value of [
+    "PRIVATE_RESPONSE_BODY",
+    "PRIVATE_PROVIDER_EXCERPT",
+    "view=frontpage",
+    "karmaThreshold=20",
+    ".card__inner",
+    "Reviewed publication listing was not interpretable",
+    "Unsupported source media type",
+    ...forbidden,
+  ]) {
+    expect(serialized).not.toContain(value);
+  }
+}
+
 class SparseResearchEmbeddingProvider extends GroundedProductionProvider {
   override async embed(
     texts: readonly string[],
@@ -8559,6 +8699,728 @@ describe("manual editorial run", () => {
     }
   });
 
+  it("carries a relevant non-arXiv reviewed publication through ordinary triage, assessment, synthesis, and grounding", async () => {
+    const publishedAt = new Date(Date.now() - 24 * 60 * 60 * 1_000)
+      .toISOString();
+    const sourceFetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://www.anthropic.com/research") {
+        return new Response(`<!doctype html><html><body>
+          <a href="/research/bounded-oversight">
+            <span>Research</span>
+            <h3>Mechanistic interpretability study for scalable oversight</h3>
+            <time datetime="${publishedAt}">${publishedAt}</time>
+            <p>A substantive experiment reports a new alignment result.</p>
+          </a>
+        </body></html>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (url === "https://www.anthropic.com/research/bounded-oversight") {
+        return new Response(`<!doctype html><html><body><article>
+          <h1>Mechanistic interpretability study for scalable oversight</h1>
+          <p>Anthropic Research notes a concrete interpretability method and a bounded oversight result.</p>
+        </article></body></html>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected non-Arxiv acceptance URL: ${url}`);
+    });
+    vi.stubGlobal("fetch", sourceFetch);
+    try {
+      const runId = "run-relevant-non-arxiv-reviewed-publication";
+      const summary = new NonArxivAcceptanceProvider();
+      const assessment = new NonArxivAcceptanceProvider();
+      const context = await productionAcceptanceContext(
+        runId,
+        ["anthropic"],
+        summary,
+        assessment,
+      );
+
+      const result = await runProductionAcceptanceStages(context);
+
+      expect(result.collected).toEqual([
+        expect.objectContaining({
+          kind: "publication",
+          sourceId: "anthropic",
+          discoveryFamily: "official-publication",
+          metadata: expect.objectContaining({
+            discoveryLaneIds: ["anthropic:page"],
+          }),
+        }),
+      ]);
+      expect(result.triaged).toEqual([
+        expect.objectContaining({
+          kind: "blog",
+          sourceRefs: [expect.objectContaining({ id: "anthropic" })],
+          metadata: expect.objectContaining({
+            discoveryLaneIds: ["anthropic:page"],
+          }),
+        }),
+      ]);
+      expect(assessment.generateRequests.map(({ schemaName }) => schemaName))
+        .toEqual(["research_assessment"]);
+      expect(result.shortlisted).toHaveLength(1);
+      expect(summary.generateRequests.map(({ schemaName }) => schemaName))
+        .toEqual(["structured_summary"]);
+      expect(result.validated).toEqual([
+        expect.objectContaining({ valid: true }),
+      ]);
+      const detail = await new D1BriefingRepository(env.DB)
+        .getWorkflowRunDetail(runId);
+      expect(detail?.discoveryDiagnostics).toEqual([{
+          laneId: "anthropic:page",
+          sourceId: "anthropic",
+          discoveryFamily: "official-publication",
+          observed: 1,
+          discovered: 1,
+          deduplicated: 1,
+          triaged: 1,
+          fallbackTriaged: 0,
+          assessed: 1,
+          outcome: "success",
+          rejectionCounts: {},
+      }]);
+      await expectSanitizedAuditArtifacts(runId);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a quiet source healthy when reviewed rows are outside the research window and selects no filler", async () => {
+    const runId = "run-quiet-source-reviewed-publication";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `<!doctype html><html><body>
+        <a href="/research/old-interpretability-result">
+          <span>Research</span>
+          <h3>Mechanistic interpretability study for scalable oversight</h3>
+          <time datetime="2020-08-01T12:00:00.000Z">August 1, 2020</time>
+          <p>A substantive experiment reports an alignment result.</p>
+        </a>
+      </body></html>`,
+      { headers: { "content-type": "text/html" } },
+    )));
+    try {
+      const summary = new NonArxivAcceptanceProvider();
+      const assessment = new NonArxivAcceptanceProvider();
+      const result = await runProductionAcceptanceStages(
+        await productionAcceptanceContext(
+          runId,
+          ["anthropic"],
+          summary,
+          assessment,
+        ),
+      );
+
+      expect(result.collected).toEqual([]);
+      expect(result.shortlisted).toEqual([]);
+      expect(result.synthesized).toEqual([]);
+      expect(summary.embedRequests).toEqual([]);
+      expect(summary.generateRequests).toEqual([]);
+      expect(assessment.generateRequests).toEqual([]);
+      const detail = await new D1BriefingRepository(env.DB)
+        .getWorkflowRunDetail(runId);
+      expect(detail?.sourceFailures).toEqual([]);
+      expect(detail?.discoveryDiagnostics).toEqual([{
+          laneId: "anthropic:page",
+          sourceId: "anthropic",
+          discoveryFamily: "official-publication",
+          observed: 1,
+          discovered: 0,
+          deduplicated: 0,
+          triaged: 0,
+          fallbackTriaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: {},
+      }]);
+      await expectSanitizedAuditArtifacts(runId);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("records a parsed non-arXiv broad mention as route_excluded rather than a source failure", async () => {
+    const publishedAt = new Date(Date.now() - 24 * 60 * 60 * 1_000)
+      .toUTCString();
+    const runId = "run-non-arxiv-route-excluded";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `<?xml version="1.0"?><rss><channel><item>
+        <title>Some thoughts about AI alignment</title>
+        <link>https://www.lesswrong.com/posts/broad-alignment-mention</link>
+        <guid>lesswrong:broad-alignment-mention</guid>
+        <pubDate>${publishedAt}</pubDate>
+        <description>A broad mention of alignment and safety from this week.</description>
+      </item></channel></rss>`,
+      { headers: { "content-type": "application/rss+xml" } },
+    )));
+    try {
+      const result = await runProductionAcceptanceStages(
+        await productionAcceptanceContext(runId, ["lesswrong-frontpage"]),
+      );
+
+      expect(result.collected).toHaveLength(1);
+      expect(result.normalized).toEqual([]);
+      expect(result.shortlisted).toEqual([]);
+      const detail = await new D1BriefingRepository(env.DB)
+        .getWorkflowRunDetail(runId);
+      expect(detail?.sourceFailures).toEqual([]);
+      expect(detail?.discoveryDiagnostics).toEqual([{
+          laneId: "lesswrong-frontpage:rss",
+          sourceId: "lesswrong-frontpage",
+          discoveryFamily: "commentary",
+          observed: 1,
+          discovered: 1,
+          deduplicated: 0,
+          triaged: 0,
+          fallbackTriaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: { route_excluded: 1 },
+      }]);
+      await expectSanitizedAuditArtifacts(runId);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("isolates reviewed publication parser drift without persisting private response text or stopping another lane", async () => {
+    const publishedAt = new Date(Date.now() - 24 * 60 * 60 * 1_000)
+      .toUTCString();
+    const runId = "run-reviewed-publication-parser-drift";
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://www.anthropic.com/research") {
+        return new Response(
+          "<html><body>PRIVATE_RESPONSE_BODY PRIVATE_PROVIDER_EXCERPT .card__inner</body></html>",
+          { headers: { "content-type": "text/html" } },
+        );
+      }
+      if (url.includes("lesswrong.com/feed.xml")) {
+        return new Response(`<?xml version="1.0"?><rss><channel><item>
+          <title>Mechanistic interpretability study for bounded oversight</title>
+          <link>https://www.lesswrong.com/posts/healthy-sibling-result</link>
+          <guid>lesswrong:healthy-sibling-result</guid>
+          <pubDate>${publishedAt}</pubDate>
+          <description>LessWrong Frontpage notes a substantive experiment and alignment result.</description>
+        </item></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        });
+      }
+      throw new Error(`Unexpected parser-drift URL: ${url}`);
+    }));
+    try {
+      const result = await runProductionAcceptanceStages(
+        await productionAcceptanceContext(
+          runId,
+          ["anthropic", "lesswrong-frontpage"],
+        ),
+      );
+
+      expect(result.collected).toEqual([
+        expect.objectContaining({ sourceId: "lesswrong-frontpage" }),
+      ]);
+      expect(result.validated).toEqual([
+        expect.objectContaining({ valid: true }),
+      ]);
+      const detail = await new D1BriefingRepository(env.DB)
+        .getWorkflowRunDetail(runId);
+      expect(detail?.sourceFailures).toEqual([]);
+      expect(detail?.discoveryDiagnostics).toEqual([
+          {
+            laneId: "anthropic:page",
+            sourceId: "anthropic",
+            discoveryFamily: "official-publication",
+            discovered: 0,
+            deduplicated: 0,
+            triaged: 0,
+            fallbackTriaged: 0,
+            assessed: 0,
+            outcome: "parse",
+            rejectionCounts: {},
+          },
+          {
+            laneId: "lesswrong-frontpage:rss",
+            sourceId: "lesswrong-frontpage",
+            discoveryFamily: "commentary",
+            observed: 1,
+            discovered: 1,
+            deduplicated: 1,
+            triaged: 1,
+            fallbackTriaged: 0,
+            assessed: 1,
+            outcome: "success",
+            rejectionCounts: {},
+          },
+      ]);
+      await expect(createD1PipelineStore(env.DB).readCollectionSourceFailures(
+        runId,
+      )).resolves.toEqual(["anthropic:parse"]);
+      await expectSanitizedAuditArtifacts(runId);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("isolates unsupported media from a reviewed publication lane and continues another lane", async () => {
+    const publishedAt = new Date(Date.now() - 24 * 60 * 60 * 1_000)
+      .toUTCString();
+    const runId = "run-unsupported-media-reviewed-publication";
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://www.anthropic.com/research") {
+        return new Response("PRIVATE_RESPONSE_BODY PRIVATE_PROVIDER_EXCERPT", {
+          headers: { "content-type": "application/pdf" },
+        });
+      }
+      if (url.includes("lesswrong.com/feed.xml")) {
+        return new Response(`<?xml version="1.0"?><rss><channel><item>
+          <title>Some thoughts about AI alignment</title>
+          <link>https://www.lesswrong.com/posts/healthy-unroutable-sibling</link>
+          <guid>lesswrong:healthy-unroutable-sibling</guid>
+          <pubDate>${publishedAt}</pubDate>
+          <description>A broad mention of alignment and safety from this week.</description>
+        </item></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        });
+      }
+      throw new Error(`Unexpected unsupported-media URL: ${url}`);
+    }));
+    try {
+      const result = await runProductionAcceptanceStages(
+        await productionAcceptanceContext(
+          runId,
+          ["anthropic", "lesswrong-frontpage"],
+        ),
+      );
+
+      expect(result.collected).toEqual([
+        expect.objectContaining({ sourceId: "lesswrong-frontpage" }),
+      ]);
+      expect(result.normalized).toEqual([]);
+      const detail = await new D1BriefingRepository(env.DB)
+        .getWorkflowRunDetail(runId);
+      expect(detail?.sourceFailures).toEqual([]);
+      expect(detail?.discoveryDiagnostics).toEqual([
+          {
+            laneId: "anthropic:page",
+            sourceId: "anthropic",
+            discoveryFamily: "official-publication",
+            discovered: 0,
+            deduplicated: 0,
+            triaged: 0,
+            fallbackTriaged: 0,
+            assessed: 0,
+            outcome: "unsupported_media",
+            rejectionCounts: {},
+          },
+          {
+            laneId: "lesswrong-frontpage:rss",
+            sourceId: "lesswrong-frontpage",
+            discoveryFamily: "commentary",
+            observed: 1,
+            discovered: 1,
+            deduplicated: 0,
+            triaged: 0,
+            fallbackTriaged: 0,
+            assessed: 0,
+            outcome: "success",
+            rejectionCounts: { route_excluded: 1 },
+          },
+      ]);
+      await expect(createD1PipelineStore(env.DB).readCollectionSourceFailures(
+        runId,
+      )).resolves.toEqual(["anthropic:unsupported_media"]);
+      await expectSanitizedAuditArtifacts(runId);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("consolidates duplicate commentary from Curated and Frontpage once in the production identity path", async () => {
+    const publishedAt = new Date(Date.now() - 24 * 60 * 60 * 1_000)
+      .toUTCString();
+    const runId = "run-duplicate-commentary-production-identity";
+    vi.stubGlobal("fetch", vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      const curated = url.searchParams.get("view") === "curated";
+      const sourceName = curated
+        ? "LessWrong Curated"
+        : "LessWrong Frontpage";
+      return new Response(`<?xml version="1.0"?><rss><channel><item>
+        <title>Mechanistic interpretability study for bounded oversight</title>
+        <link>https://www.lesswrong.com/posts/shared-production-commentary</link>
+        <guid>${curated ? "lesswrong-curated" : "lesswrong-frontpage"}:shared-production-commentary</guid>
+        <pubDate>${publishedAt}</pubDate>
+        <description>${sourceName} notes a substantive experiment and alignment result.</description>
+      </item></channel></rss>`, {
+        headers: { "content-type": "application/rss+xml" },
+      });
+    }));
+    try {
+      const result = await runProductionAcceptanceStages(
+        await productionAcceptanceContext(
+          runId,
+          ["lesswrong-curated", "lesswrong-frontpage"],
+        ),
+      );
+
+      expect(result.collected).toHaveLength(2);
+      expect(result.normalized).toEqual([
+        expect.objectContaining({
+          kind: "blog",
+          sourceRefs: expect.arrayContaining([
+            expect.objectContaining({ id: "lesswrong-curated" }),
+            expect.objectContaining({ id: "lesswrong-frontpage" }),
+          ]),
+          metadata: expect.objectContaining({
+            discoveryLaneIds: [
+              "lesswrong-curated:rss",
+              "lesswrong-frontpage:rss",
+            ],
+          }),
+        }),
+      ]);
+      expect(result.triaged).toHaveLength(1);
+      expect(result.shortlisted).toHaveLength(1);
+      expect(result.synthesized).toEqual([]);
+      expect(result.validated).toEqual([]);
+      const detail = await new D1BriefingRepository(env.DB)
+        .getWorkflowRunDetail(runId);
+      expect(detail?.discoveryDiagnostics).toEqual([
+          {
+            laneId: "lesswrong-curated:rss",
+            sourceId: "lesswrong-curated",
+            discoveryFamily: "commentary",
+            observed: 1,
+            discovered: 1,
+            deduplicated: 1,
+            triaged: 1,
+            fallbackTriaged: 0,
+            assessed: 1,
+            outcome: "success",
+            rejectionCounts: { identity_merged: 1 },
+          },
+          {
+            laneId: "lesswrong-frontpage:rss",
+            sourceId: "lesswrong-frontpage",
+            discoveryFamily: "commentary",
+            observed: 1,
+            discovered: 1,
+            deduplicated: 1,
+            triaged: 1,
+            fallbackTriaged: 0,
+            assessed: 1,
+            outcome: "success",
+            rejectionCounts: {},
+          },
+      ]);
+      expect(detail?.discoveryDiagnostics.reduce(
+        (total, diagnostic) =>
+          total + (diagnostic.rejectionCounts.identity_merged ?? 0),
+        0,
+      )).toBe(1);
+      await expectSanitizedAuditArtifacts(runId);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps a non-arXiv metadata index non-primary until the ordinary grounding path supplies the paper", async () => {
+    const publishedDate = new Date(Date.now() - 24 * 60 * 60 * 1_000)
+      .toISOString()
+      .slice(0, 10);
+    const runId = "run-non-arxiv-metadata-index-grounding";
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(
+      `<!doctype html><html><body><ul><li>
+        <a href="/paper/2608.11223">Interpretability method for scalable oversight</a>
+        <time datetime="${publishedDate}">${publishedDate}</time>
+        <a href="https://github.com/example/indexed-method">Code</a>
+      </li></ul></body></html>`,
+      { headers: { "content-type": "text/html" } },
+    )));
+    try {
+      const summary = new NonArxivAcceptanceProvider();
+      const assessment = new NonArxivAcceptanceProvider();
+      const result = await runProductionAcceptanceStages(
+        await productionAcceptanceContext(
+          runId,
+          ["papers-with-code-co"],
+          summary,
+          assessment,
+        ),
+      );
+
+      expect(result.collected).toEqual([
+        expect.objectContaining({
+          sourceId: "papers-with-code-co",
+          externalId: "arXiv:2608.11223",
+          accessLevel: "metadata",
+        }),
+      ]);
+      expect(result.normalized).toEqual([
+        expect.objectContaining({
+          metadata: expect.objectContaining({
+            externalIds: expect.arrayContaining(["arXiv:2608.11223"]),
+            primaryResearchSourceIds: [],
+          }),
+        }),
+      ]);
+      expect(result.triaged).toHaveLength(1);
+      expect(assessment.generateRequests).toHaveLength(1);
+      expect(result.shortlisted).toHaveLength(1);
+      expect(summary.generateRequests).toHaveLength(2);
+      expect(result.synthesized).toEqual([]);
+      expect(result.validated).toEqual([]);
+      const detail = await new D1BriefingRepository(env.DB)
+        .getWorkflowRunDetail(runId);
+      expect(detail?.discoveryDiagnostics).toEqual([{
+        laneId: "papers-with-code-co:page",
+        sourceId: "papers-with-code-co",
+        discoveryFamily: "official-publication",
+        observed: 1,
+        discovered: 1,
+        deduplicated: 1,
+        triaged: 1,
+        fallbackTriaged: 0,
+        assessed: 1,
+        outcome: "success",
+        rejectionCounts: {},
+      }]);
+      const rejection = await env.DB.prepare(
+        `SELECT event_json FROM audit_events
+         WHERE run_id = ? AND event_type = 'summary_rejected'`,
+      ).bind(runId).first<{ event_json: string }>();
+      expect(rejection?.event_json).toContain(
+        "PRIMARY_RESEARCH_SOURCE_REQUIRED:0",
+      );
+      await expectSanitizedAuditArtifacts(runId);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("uses no non-arXiv quota, filler, or model calls when every migrated lane is healthy but quiet", async () => {
+    const runId = "run-non-arxiv-no-quota-quiet-lanes";
+    const oldIso = "2020-08-01T12:00:00.000Z";
+    const oldRss = "Sat, 01 Aug 2020 12:00:00 GMT";
+    const sourceFetch = vi.fn(async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.hostname === "www.alignmentforum.org" ||
+        url.hostname === "www.lesswrong.com") {
+        return new Response(`<?xml version="1.0"?><rss><channel><item>
+          <title>Mechanistic interpretability study outside the window</title>
+          <link>https://${url.hostname}/posts/old-research-result</link>
+          <guid>${url.hostname}:old-research-result</guid>
+          <pubDate>${oldRss}</pubDate>
+          <description>A substantive alignment result outside the window.</description>
+        </item></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        });
+      }
+      if (url.hostname === "paperswithcode.co") {
+        return new Response(`<!doctype html><html><body><ul><li>
+          <a href="/paper/2601.00001">Interpretability method outside the window</a>
+          <time datetime="2020-08-01">August 1, 2020</time>
+        </li></ul></body></html>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (url.hostname === "www.anthropic.com") {
+        return new Response(`<!doctype html><html><body>
+          <a href="/research/old-result"><span>Research</span>
+            <h3>Mechanistic interpretability study outside the window</h3>
+            <time datetime="${oldIso}">August 1, 2020</time>
+            <p>A substantive alignment result.</p>
+          </a>
+        </body></html>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (url.hostname === "deepmind.google") {
+        return new Response(`<!doctype html><html><body>
+          <div class="card__inner">
+            <a class="card__overlay-link" href="/blog/old-result"></a>
+            <h3 class="card__title">Mechanistic interpretability study outside the window</h3>
+            <span class="meta__category">Research</span>
+            <time datetime="${oldIso}">August 1, 2020</time>
+            <p>A substantive alignment result.</p>
+          </div>
+        </body></html>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (url.hostname === "research.google") {
+        return new Response(`<!doctype html><html><body>
+          <a class="glue-card--blog" href="/blog/old-result">
+            <span class="js-gt-item-id">Mechanistic interpretability study outside the window</span>
+            <span class="glue-card__eyebrow" datetime="${oldIso}">August 1, 2020</span>
+            <span class="glue-card__category">Research</span>
+            <p>A substantive alignment result.</p>
+          </a>
+        </body></html>`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (url.hostname === "openai.com") {
+        return new Response(`<?xml version="1.0"?><rss><channel><item>
+          <title>Mechanistic interpretability study outside the window</title>
+          <link>https://openai.com/research/old-result</link>
+          <guid>openai:old-result</guid>
+          <pubDate>${oldRss}</pubDate>
+          <description>A substantive alignment result outside the window.</description>
+        </item></channel></rss>`, {
+          headers: { "content-type": "application/rss+xml" },
+        });
+      }
+      throw new Error(`Unexpected no-quota URL: ${url.toString()}`);
+    });
+    vi.stubGlobal("fetch", sourceFetch);
+    try {
+      const summary = new NonArxivAcceptanceProvider();
+      const assessment = new NonArxivAcceptanceProvider();
+      const result = await runProductionAcceptanceStages(
+        await productionAcceptanceContext(
+          runId,
+          [
+            "alignment-forum",
+            "anthropic",
+            "google-deepmind",
+            "google-research",
+            "lesswrong-curated",
+            "lesswrong-frontpage",
+            "openai",
+            "papers-with-code-co",
+          ],
+          summary,
+          assessment,
+        ),
+      );
+
+      expect(sourceFetch).toHaveBeenCalledTimes(8);
+      expect(result.collected).toEqual([]);
+      expect(result.normalized).toEqual([]);
+      expect(result.triaged).toEqual([]);
+      expect(result.shortlisted).toEqual([]);
+      expect(result.synthesized).toEqual([]);
+      expect(summary.embedRequests).toEqual([]);
+      expect(summary.generateRequests).toEqual([]);
+      expect(assessment.generateRequests).toEqual([]);
+      const detail = await new D1BriefingRepository(env.DB)
+        .getWorkflowRunDetail(runId);
+      expect(detail?.discoveryDiagnostics).toEqual([
+        {
+          laneId: "alignment-forum:rss",
+          sourceId: "alignment-forum",
+          discoveryFamily: "commentary",
+          observed: 1,
+          discovered: 0,
+          deduplicated: 0,
+          triaged: 0,
+          fallbackTriaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: {},
+        },
+        {
+          laneId: "anthropic:page",
+          sourceId: "anthropic",
+          discoveryFamily: "official-publication",
+          observed: 1,
+          discovered: 0,
+          deduplicated: 0,
+          triaged: 0,
+          fallbackTriaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: {},
+        },
+        {
+          laneId: "google-deepmind:page",
+          sourceId: "google-deepmind",
+          discoveryFamily: "official-publication",
+          observed: 1,
+          discovered: 0,
+          deduplicated: 0,
+          triaged: 0,
+          fallbackTriaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: {},
+        },
+        {
+          laneId: "google-research:page",
+          sourceId: "google-research",
+          discoveryFamily: "official-publication",
+          observed: 1,
+          discovered: 0,
+          deduplicated: 0,
+          triaged: 0,
+          fallbackTriaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: {},
+        },
+        {
+          laneId: "lesswrong-curated:rss",
+          sourceId: "lesswrong-curated",
+          discoveryFamily: "commentary",
+          observed: 1,
+          discovered: 0,
+          deduplicated: 0,
+          triaged: 0,
+          fallbackTriaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: {},
+        },
+        {
+          laneId: "lesswrong-frontpage:rss",
+          sourceId: "lesswrong-frontpage",
+          discoveryFamily: "commentary",
+          observed: 1,
+          discovered: 0,
+          deduplicated: 0,
+          triaged: 0,
+          fallbackTriaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: {},
+        },
+        {
+          laneId: "openai:rss",
+          sourceId: "openai",
+          discoveryFamily: "official-publication",
+          observed: 1,
+          discovered: 0,
+          deduplicated: 0,
+          triaged: 0,
+          fallbackTriaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: {},
+        },
+        {
+          laneId: "papers-with-code-co:page",
+          sourceId: "papers-with-code-co",
+          discoveryFamily: "official-publication",
+          observed: 1,
+          discovered: 0,
+          deduplicated: 0,
+          triaged: 0,
+          fallbackTriaged: 0,
+          assessed: 0,
+          outcome: "success",
+          rejectionCounts: {},
+        },
+      ]);
+      await expectSanitizedAuditArtifacts(runId);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("collects the enabled PapersWithCode catalog source through the production context", async () => {
     await env.DB.prepare(
       `UPDATE sources
@@ -8578,16 +9440,20 @@ describe("manual editorial run", () => {
       .slice(0, 10);
     const sourceFetch = vi.fn(async (input: string | URL | Request) => {
       expect(String(input)).toBe(
-        "https://paperswithcode.co/?order_by=date_published",
+        "https://paperswithcode.co/papers/recent",
       );
       return new Response(
-        `<!doctype html><html><body><section><h2>Relevant papers</h2>
-          <article>
-            <a href="/paper/2608.01234">Production PapersWithCode result</a>
+        `<!doctype html><html><body><ul>
+          <li>
+            <a href="/paper/2608.01234">Interpretability method for scalable oversight</a>
             <time datetime="${publishedDate}">${publishedDate}</time>
             <a href="https://github.com/example/production-result">Code</a>
-          </article>
-        </section></body></html>`,
+          </li>
+          <li>
+            <a href="/paper/2608.01235">Image compression benchmark update</a>
+            <time datetime="${publishedDate}">${publishedDate}</time>
+          </li>
+        </ul></body></html>`,
         { headers: { "content-type": "text/html" } },
       );
     });
@@ -8613,7 +9479,9 @@ describe("manual editorial run", () => {
         editionDate,
         runId,
         {
-          summary: new FakeModelProvider(),
+          summary: new FakeModelProvider({
+            embeddingBatches: [[[1, 0], [1, 0], [1, 0], [1, 0]]],
+          }),
           assessment: new FakeModelProvider(),
         },
       );
@@ -8621,26 +9489,37 @@ describe("manual editorial run", () => {
       const collected = await context.collect();
 
       expect(sourceFetch).toHaveBeenCalledOnce();
-      expect(collected).toEqual([
+      expect(collected).toEqual(expect.arrayContaining([
         expect.objectContaining({
           kind: "publication",
           sourceId: "papers-with-code-co",
           externalId: "arXiv:2608.01234",
-          discoveryFamily: "commentary",
+          discoveryFamily: "official-publication",
           metadata: expect.objectContaining({
             implementationAvailable: true,
             discoveryLaneIds: ["papers-with-code-co:page"],
           }),
         }),
+        expect.objectContaining({
+          externalId: "arXiv:2608.01235",
+          metadata: expect.objectContaining({ implementationAvailable: false }),
+        }),
+      ]));
+      const normalized = await context.normalize(collected);
+      const triaged = await context.prefilter(await context.enrich(normalized));
+      expect(normalized).toEqual([
+        expect.objectContaining({ title: "Interpretability method for scalable oversight" }),
       ]);
+      expect(triaged).toHaveLength(1);
       await expect(store.repository.getWorkflowRunDetail(runId)).resolves
         .toMatchObject({
           discoveryDiagnostics: [{
             laneId: "papers-with-code-co:page",
             sourceId: "papers-with-code-co",
-            discoveryFamily: "commentary",
-            discovered: 1,
+            discoveryFamily: "official-publication",
+            discovered: 2,
             outcome: "success",
+            rejectionCounts: { route_excluded: 1 },
           }],
         });
       expect((await store.repository.listSources()).find(

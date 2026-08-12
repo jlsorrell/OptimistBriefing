@@ -66,7 +66,7 @@ describe("research discovery source migration", () => {
       "https://www.lesswrong.com/feed.xml?view=curated",
     );
     expect((await source("papers-with-code-co")).restrictions.pageUrl).toBe(
-      "https://paperswithcode.co/?order_by=date_published",
+      "https://paperswithcode.co/papers/recent",
     );
 
     for (const [id, [host, pathPrefix]] of Object.entries(

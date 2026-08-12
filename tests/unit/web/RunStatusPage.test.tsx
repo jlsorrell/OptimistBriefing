@@ -226,6 +226,7 @@ describe("RunStatusPage", () => {
         laneId: "arxiv:oversight-governance",
         sourceId: "arxiv",
         discoveryFamily: "arxiv",
+        observed: 9,
         discovered: 7,
         deduplicated: 5,
         triaged: 3,
@@ -246,6 +247,20 @@ describe("RunStatusPage", () => {
         assessed: 1,
         outcome: "success",
         rejectionCounts: {},
+      }, {
+        laneId: "anthropic:page",
+        sourceId: "anthropic",
+        discoveryFamily: "official-publication",
+        observed: 3,
+        discovered: 0,
+        deduplicated: 0,
+        triaged: 0,
+        assessed: 0,
+        outcome: "unsupported_media",
+        rejectionCounts: {
+          identity_merged: 1,
+          route_excluded: 1,
+        },
       }],
       rejectedSummaryReasons: [],
       publishedAt: null,
@@ -269,6 +284,7 @@ describe("RunStatusPage", () => {
       (header) => header.textContent,
     )).toEqual([
       "Lane",
+      "Observed",
       "Discovered",
       "Deduplicated",
       "Triaged",
@@ -287,21 +303,40 @@ describe("RunStatusPage", () => {
       (cell) => cell.textContent,
     )).toEqual([
       "arxiv:oversight-governance",
+      "9",
       "7",
       "5",
       "3",
       "2",
       "2",
       "Unchanged observation: 2; Capacity limited: 1",
-      "success",
+      "Success",
     ]);
     const historicalLaneRow = within(table).getByText("arxiv:empty")
       .closest("tr");
     expect(historicalLaneRow).not.toBeNull();
-    expect(within(historicalLaneRow!).getAllByRole("cell")[4]?.textContent)
+    expect(within(historicalLaneRow!).getAllByRole("cell")[1]?.textContent)
+      .toBe("—");
+    expect(within(historicalLaneRow!).getAllByRole("cell")[5]?.textContent)
       .toBe("0");
+    const unsupportedRow = within(table).getByText("anthropic:page")
+      .closest("tr");
+    expect(unsupportedRow).not.toBeNull();
+    expect(within(unsupportedRow!).getAllByRole("cell").map(
+      (cell) => cell.textContent,
+    )).toEqual([
+      "anthropic:page",
+      "3",
+      "0",
+      "0",
+      "0",
+      "0",
+      "0",
+      "Identity merged: 1; Route excluded: 1",
+      "Unsupported media",
+    ]);
     expect(within(table).getByText("None")).toBeTruthy();
-    for (const value of ["7", "5", "3", "success"]) {
+    for (const value of ["9", "7", "5", "3", "Success"]) {
       expect(within(laneRow!).getByText(value)).toBeTruthy();
     }
     await waitFor(() => {

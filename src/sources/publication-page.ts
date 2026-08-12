@@ -2,12 +2,21 @@ import { parseHTML } from "linkedom";
 import { z } from "zod";
 
 import type { AccessLevel } from "../contracts/editorial";
+import { mapResearchTopicIds } from "../editorial/research-topics";
 import { extractReadableArticle, type ExtractedArticle } from "./article-extractor";
-import { SourceFetchError, SourceHttpClient } from "./http-client";
+import {
+  SourceFetchError,
+  SourceHttpClient,
+  type SourceHttpResponse,
+} from "./http-client";
 import { transientExtractionPermitted } from "./news-collector";
 import { assertSafeOutboundUrl, type OutboundUrlPolicy } from "./outbound-url";
 import { relatedArxivIds } from "./rss";
 import { boundProviderText } from "./provider-text";
+import {
+  type ReviewedPublicationListingEntry,
+  type ReviewedPublicationProfile,
+} from "./reviewed-publication-profiles";
 import {
   CollectionWindowSchema,
   MAX_PROVIDER_EVIDENCE_CHARACTERS,
@@ -16,6 +25,7 @@ import {
   type CollectionWindow,
   type RawPublicationCandidate,
   type ResearchSourceRecord,
+  UnsupportedSourceMediaTypeError,
 } from "./types";
 
 const ListingConfigSchema = z.object({
@@ -37,6 +47,10 @@ type ListingItem = {
   publishedAt: string;
   authors: string[];
   summary: string | null;
+};
+
+type ReviewedListingItem = ReviewedPublicationListingEntry & {
+  url: string;
 };
 
 function text(
@@ -122,12 +136,29 @@ function restriction(source: ResearchSourceRecord, key: string, fallback: string
   return typeof value === "string" && value.length > 0 ? value : fallback;
 }
 
+function insideCollectionWindow(
+  publishedAt: string,
+  window: CollectionWindow,
+): boolean {
+  const timestamp = Date.parse(publishedAt);
+  const from = Date.parse(window.from);
+  const to = Date.parse(window.to);
+  return (
+    Number.isFinite(timestamp) &&
+    Number.isFinite(from) &&
+    Number.isFinite(to) &&
+    timestamp >= from &&
+    timestamp <= to
+  );
+}
+
 export class PublicationPageAdapter {
   readonly sourceId: string;
   readonly laneId: string;
   readonly discoveryFamily = "official-publication" as const;
   private readonly pageUrl: string;
   private readonly listing: ListingConfig | null;
+  private readonly reviewedProfile: ReviewedPublicationProfile | null;
 
   constructor(
     private readonly http: SourceHttpClient,
@@ -136,11 +167,13 @@ export class PublicationPageAdapter {
     private readonly pageUrlPolicy: OutboundUrlPolicy,
     private readonly articleUrlPolicy: OutboundUrlPolicy,
     listing?: unknown,
+    reviewedProfile?: ReviewedPublicationProfile | null,
   ) {
     this.sourceId = source.id;
     this.laneId = `${source.id}:page`;
     this.pageUrl = assertSafeOutboundUrl(pageUrl, pageUrlPolicy).toString();
     this.listing = listing === undefined ? null : ListingConfigSchema.parse(listing);
+    this.reviewedProfile = reviewedProfile ?? null;
   }
 
   private permittedItem(input: Omit<ListingItem, "url"> & { url: string }, baseUrl: string): ListingItem | null {
@@ -152,17 +185,173 @@ export class PublicationPageAdapter {
   }
 
   async collect(window: CollectionWindow): Promise<RawPublicationCandidate[]> {
+    return (await this.collectWithStats(window)).candidates;
+  }
+
+  private reviewedItem(
+    item: ReviewedPublicationListingEntry,
+    baseUrl: string,
+  ): ReviewedListingItem | null {
+    try {
+      return {
+        ...item,
+        url: assertSafeOutboundUrl(
+          new URL(item.url, baseUrl),
+          this.articleUrlPolicy,
+        ).toString(),
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  private candidateFromReviewedItem(input: {
+    item: ReviewedListingItem;
+    extraction: ExtractedArticle;
+    originalUrl: string;
+    retrievedAt: string;
+    listingUrl: string;
+  }): RawPublicationCandidate {
+    const { item, extraction, originalUrl, retrievedAt, listingUrl } = input;
+    const abstract = extraction.excerpt ?? item.summary;
+    const content = extraction.text;
+    return RawPublicationCandidateSchema.parse({
+      kind: "publication",
+      sourceId: this.source.id,
+      sourceName: this.source.canonicalName,
+      sourceRole: this.source.role,
+      title: item.title,
+      originalUrl,
+      externalId: originalUrl,
+      externalIds: [originalUrl],
+      publishedAt: item.publishedAt,
+      retrievedAt,
+      accessLevel: accessLevel(extraction),
+      authors: extraction.byline === null ? item.authors : [extraction.byline],
+      institutions: [],
+      abstract,
+      content,
+      relatedPaperIds: relatedArxivIds(
+        [originalUrl, item.summary, abstract, content].filter(Boolean).join(" "),
+      ).slice(0, 16),
+      sectionEligibility: this.source.sectionEligibility ?? [],
+      discoveryFamily: "official-publication",
+      metadata: {
+        canCorroborateFacts: false,
+        extractionLevel: extraction.extractionLevel,
+        contentUse: restriction(this.source, "contentUse", "metadata-only"),
+        paywall: restriction(this.source, "paywall", "unknown"),
+        retention:
+          abstract === null && content === null
+            ? "metadata-only"
+            : "ephemeral-only",
+        discoveryMechanism: "page",
+        discoveryLaneIds: [this.laneId],
+        listingUrl,
+      },
+    });
+  }
+
+  private async collectReviewed(
+    validWindow: CollectionWindow,
+    response: SourceHttpResponse,
+    document: Document,
+  ): Promise<{ candidates: RawPublicationCandidate[]; observed: number }> {
+    const profile = this.reviewedProfile!;
+    const parsed = profile.parseListing(document, response.finalUrl)
+      .slice(0, profile.maxListingEntries);
+    if (response.body !== null && response.body.length > 0 && parsed.length === 0) {
+      throw new SyntaxError("Reviewed publication listing was not interpretable.");
+    }
+    const validated = parsed.flatMap((item): ReviewedListingItem[] => {
+      const found = this.reviewedItem(item, response.finalUrl);
+      return found === null ? [] : [found];
+    });
+    const plausible = validated.filter((item) =>
+      mapResearchTopicIds([
+        item.title,
+        item.summary ?? "",
+        item.category ?? "",
+      ]).length > 0 &&
+      (item.publishedAt === null ||
+        insideCollectionWindow(item.publishedAt, validWindow)),
+    );
+    const candidates = (await Promise.all(plausible.map(async (item, index) => {
+      let extraction = noExtraction();
+      let originalUrl = item.url;
+      let retrievedAt = response.retrievedAt;
+      let publishedAt = item.publishedAt;
+      let detailFailedPolicy = false;
+      if (
+        index < profile.maxDetailFetches &&
+        transientExtractionPermitted(this.source)
+      ) {
+        try {
+          const detail = await this.http.get(this.source, item.url, {
+            headers: { accept: "text/html,application/xhtml+xml" },
+            useValidators: false,
+            urlPolicy: this.articleUrlPolicy,
+          });
+          originalUrl = detail.finalUrl;
+          retrievedAt = detail.retrievedAt;
+          if (detail.body !== null) {
+            const detailMediaType = detail.contentType?.split(";", 1)[0]
+              ?.trim()
+              .toLowerCase();
+            if (
+              detailMediaType === "text/html" ||
+              detailMediaType === "application/xhtml+xml"
+            ) {
+              const detailDocument = parseHTML(detail.body).document;
+              publishedAt = publishedAt ?? profile.parseDetailPublishedAt(detailDocument);
+              extraction = extractReadableArticle(
+                detail.body,
+                detail.finalUrl,
+                detail.contentType,
+              );
+            }
+          }
+        } catch (error) {
+          if (error instanceof SourceFetchError && error.failureKind === "policy") {
+            detailFailedPolicy = true;
+          }
+        }
+      }
+      if (
+        detailFailedPolicy ||
+        publishedAt === null ||
+        !insideCollectionWindow(publishedAt, validWindow)
+      ) return null;
+      return this.candidateFromReviewedItem({
+        item: { ...item, publishedAt },
+        extraction,
+        originalUrl,
+        retrievedAt,
+        listingUrl: response.finalUrl,
+      });
+    }))).filter((candidate): candidate is RawPublicationCandidate => candidate !== null);
+    return { candidates, observed: validated.length };
+  }
+
+  async collectWithStats(
+    window: CollectionWindow,
+  ): Promise<{ candidates: RawPublicationCandidate[]; observed: number }> {
     const validWindow = CollectionWindowSchema.parse(window);
-    if (!this.source.enabled) return [];
+    if (!this.source.enabled) return { candidates: [], observed: 0 };
     const response = await this.http.get(this.source, this.pageUrl, {
       headers: { accept: "text/html,application/xhtml+xml" },
       useValidators: false,
       urlPolicy: this.pageUrlPolicy,
     });
-    if (response.body === null) return [];
+    if (response.body === null) return { candidates: [], observed: 0 };
     const mediaType = response.contentType?.split(";", 1)[0]?.trim().toLowerCase();
-    if (mediaType !== "text/html" && mediaType !== "application/xhtml+xml") return [];
+    if (mediaType !== "text/html" && mediaType !== "application/xhtml+xml") {
+      throw new UnsupportedSourceMediaTypeError();
+    }
     const { document } = parseHTML(response.body);
+    if (this.reviewedProfile !== null) {
+      return this.collectReviewed(validWindow, response, document);
+    }
     const jsonLd = [...document.querySelectorAll('script[type="application/ld+json"]')]
       .flatMap((script) => {
         try { return schemaArticles(JSON.parse(script.textContent)); } catch { return []; }
@@ -200,11 +389,12 @@ export class PublicationPageAdapter {
         return found === null ? [] : [found];
       });
     }
+    const observed = Math.min(10_000, discovered.length);
     const bounded = discovered
       .filter((item) => item.publishedAt >= validWindow.from && item.publishedAt <= validWindow.to)
       .slice(0, Math.min(20, this.listing?.maxItems ?? 20));
     const maxBodyFetches = Math.min(10, this.listing?.maxBodyFetches ?? 10);
-    return (await Promise.all(bounded.map(async (item, index) => {
+    const candidates = (await Promise.all(bounded.map(async (item, index) => {
       let extraction = noExtraction();
       let originalUrl = item.url;
       let retrievedAt = response.retrievedAt;
@@ -217,8 +407,24 @@ export class PublicationPageAdapter {
           });
           originalUrl = detail.finalUrl;
           retrievedAt = detail.retrievedAt;
-          if (detail.body !== null) extraction = extractReadableArticle(detail.body, detail.finalUrl, detail.contentType);
+          if (detail.body !== null) {
+            const detailMediaType = detail.contentType?.split(";", 1)[0]
+              ?.trim()
+              .toLowerCase();
+            if (
+              detailMediaType !== "text/html" &&
+              detailMediaType !== "application/xhtml+xml"
+            ) {
+              throw new UnsupportedSourceMediaTypeError();
+            }
+            extraction = extractReadableArticle(
+              detail.body,
+              detail.finalUrl,
+              detail.contentType,
+            );
+          }
         } catch (error) {
+          if (error instanceof UnsupportedSourceMediaTypeError) throw error;
           if (error instanceof SourceFetchError && error.failureKind === "policy") return null;
         }
       }
@@ -258,5 +464,6 @@ export class PublicationPageAdapter {
         },
       });
     }))).filter((candidate): candidate is RawPublicationCandidate => candidate !== null);
+    return { candidates, observed };
   }
 }

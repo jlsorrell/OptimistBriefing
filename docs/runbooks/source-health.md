@@ -13,14 +13,15 @@ Every research lane belongs to one of four diagnostic families:
 - `bibliographic`: Semantic Scholar search/recommendations and OpenAlex topic
   and institution queries;
 - `official-publication`: cataloged university and laboratory feeds or listing
-  pages; and
-- `commentary`: Alignment Forum, LessWrong Curated, and PapersWithCode.co.
+  pages, plus metadata indexes such as Papers with Code; and
+- `commentary`: Alignment Forum, LessWrong Curated, and LessWrong Frontpage.
 
 The authenticated source catalog is the operational control plane. `enabled`
 turns collection on or off; `discoveryMechanism` selects API, RSS, or page
 collection; `sectionEligibility` is only a routing ceiling; and
 `bodyRetrieval`, `contentUse`, `paywall`, `canCorroborateFacts`, and the pinned
-host/port/path `urlPolicy` constrain retrieval and evidence use. Do not treat a
+host/port/path feed and article URL policies constrain retrieval and evidence
+use. Do not treat a
 catalog role, institution, publisher, or section eligibility as item-level
 proof of relevance or section placement. Apply source changes through the
 audited source endpoint described below, not by editing remote D1 directly.
@@ -32,9 +33,10 @@ contributes zero new candidates. It does not erase candidates from healthy
 lanes, cached unchanged candidates, or valid cached assessments. An unpinned or
 malformed outbound URL is a `policy` failure before fetch. API throttling and
 transient fetch errors use bounded retries and finish with the sanitized
-`fetch`, `parse`, `policy`, `timeout`, or `unknown` outcome. These are fail-open
-collection semantics only: failures never lower topical, technical-quality,
-grounding, coverage, or publication thresholds and never authorize filler.
+`fetch`, `parse`, `policy`, `timeout`, `unsupported_media`, or `unknown`
+outcome. These are fail-open collection semantics only: failures never lower
+topical, technical-quality, grounding, coverage, or publication thresholds and
+never authorize filler.
 
 OpenAlex uses the optional encrypted `OPENALEX_API_KEY`. When the binding is
 unset and an adapter has no credential, that lane records a sanitized `policy`
@@ -62,10 +64,15 @@ normal budget state, four in degraded state, and zero in hard-stop state.
 Hard-stop may reuse a valid cached assessment but must not start a paid call.
 
 For every lane, run detail records `discovered`, `deduplicated`, `triaged`, and
-`assessed` counts plus the sanitized outcome. Counts must be monotone through
-the funnel (`discovered >= deduplicated >= triaged >= assessed`) for that lane.
-If they are not, preserve the run ID and escalate as a diagnostics defect; do
-not infer missing bodies or provider responses from the count mismatch.
+`assessed` counts plus the sanitized outcome. Reviewed feed and page lanes also
+record optional `observed`: the bounded number of structurally interpretable,
+policy-approved entries before collection-window filtering. A successful lane
+with `observed > 0` and `discovered = 0` is healthy but quiet for that window;
+a missing `observed` remains valid for historical diagnostics. Counts must be
+monotone through the funnel (`observed >= discovered >= deduplicated >= triaged
+>= assessed`) whenever `observed` is present. If they are not, preserve the run
+ID and escalate as a diagnostics defect; do not infer missing bodies or
+provider responses from the count mismatch.
 
 Run Status also reports bounded aggregate rejection counts using exactly these
 fixed reasons:

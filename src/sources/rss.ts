@@ -9,10 +9,11 @@ import {
 } from "./provider-text";
 import {
   assertSafeOutboundUrl,
+  UnsafeOutboundUrlError,
   type OutboundUrlPolicy,
 } from "./outbound-url";
 import {
-  settleCollectionBatch,
+  settleObservedCollectionBatch,
 } from "./collection-settlement";
 import {
   CollectionWindowSchema,
@@ -25,6 +26,7 @@ import {
   type RawItem,
   type ResearchSourceInput,
   type ResearchSourceRecord,
+  UnsupportedSourceMediaTypeError,
 } from "./types";
 
 const OutboundUrlPolicySchema = z.object({
@@ -40,6 +42,8 @@ export type ConfiguredFeed = {
   feedUrl: unknown;
   feedUrlPolicy?: unknown;
   articleUrlPolicy?: unknown;
+  maxEntries?: unknown;
+  requireExactEndpoint?: unknown;
 };
 
 type NormalizedFeedEntry = {
@@ -49,7 +53,11 @@ type NormalizedFeedEntry = {
   published?: string;
   author?: string;
   description?: string;
+  categories: string[];
 };
+
+const ConfiguredFeedMaxEntriesSchema = z.number().int().min(1).max(100);
+const MAX_FEED_CATEGORIES = 16;
 
 function asArray(value: unknown): unknown[] {
   if (value === undefined || value === null) return [];
@@ -64,11 +72,26 @@ function record(value: unknown): Record<string, unknown> | null {
 
 function feedEntries(value: unknown): unknown[] {
   const root = record(value);
-  const channel = record(record(root?.rss)?.channel);
-  if (channel) return asArray(channel.item);
+  const rss = record(root?.rss);
+  if (rss !== null && "channel" in rss) {
+    return asArray(record(rss.channel)?.item);
+  }
   const feed = record(root?.feed);
   if (feed) return asArray(feed.entry);
   throw new SyntaxError("Unsupported feed envelope.");
+}
+
+function parseFeedXml(value: string): unknown {
+  try {
+    return new XMLParser({
+      ignoreAttributes: false,
+      removeNSPrefix: true,
+      trimValues: true,
+      parseTagValue: false,
+    }).parse(value, true);
+  } catch {
+    throw new SyntaxError("Feed XML was not interpretable.");
+  }
 }
 
 function strings(value: unknown): string[] {
@@ -86,6 +109,22 @@ function strings(value: unknown): string[] {
 
 function firstString(value: unknown): string | undefined {
   return strings(value).map((candidate) => candidate.trim()).find(Boolean);
+}
+
+function feedCategories(value: unknown): string[] {
+  return asArray(value).flatMap((category) => {
+    if (typeof category === "string") return [category];
+    const item = record(category);
+    if (item === null) return [];
+    const term = item["@_term"] ?? item.term;
+    if (typeof term === "string") return [term];
+    return typeof item["#text"] === "string" ? [item["#text"]] : [];
+  }).flatMap((category) => {
+    const bounded = boundProviderText(category, {
+      maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
+    });
+    return bounded === null ? [] : [bounded];
+  }).slice(0, MAX_FEED_CATEGORIES);
 }
 
 type FeedLink = { href: string; rel?: string };
@@ -153,6 +192,7 @@ function normalizeFeedEntry(
     ...(published === undefined ? {} : { published }),
     ...(author === undefined ? {} : { author }),
     ...(description === undefined ? {} : { description }),
+    categories: feedCategories(entry.category),
   };
 }
 
@@ -177,6 +217,9 @@ export function mapRssCollectionBatch<T>(
     candidates: batch.candidates.map(mapper),
     succeededSourceIds: [...batch.succeededSourceIds],
     failures: [...batch.failures],
+    ...(batch.sourceObservations === undefined
+      ? {}
+      : { sourceObservations: batch.sourceObservations }),
   };
 }
 
@@ -194,12 +237,12 @@ export class RssAdapter {
     window: CollectionWindow,
   ): Promise<CollectionBatch<RawItem>> {
     const validWindow = CollectionWindowSchema.parse(window);
-    return settleCollectionBatch(
+    return settleObservedCollectionBatch(
       this.feeds
         .filter((feed) => feed.source.enabled)
         .map((feed) => ({
           sourceId: feed.source.id,
-          collect: async (): Promise<RawItem[]> => {
+          collect: async (): Promise<{ candidates: RawItem[]; observed: number }> => {
             const source = ResearchSourceRecordSchema.parse(feed.source);
             const feedUrlPolicy: OutboundUrlPolicy =
               OutboundUrlPolicySchema.parse(
@@ -209,6 +252,12 @@ export class RssAdapter {
               OutboundUrlPolicySchema.parse(
                 feed.articleUrlPolicy ?? {},
               ) as OutboundUrlPolicy;
+            const maxEntries = feed.maxEntries === undefined
+              ? undefined
+              : ConfiguredFeedMaxEntriesSchema.parse(feed.maxEntries);
+            const requireExactEndpoint = z.literal(true).optional().parse(
+              feed.requireExactEndpoint,
+            ) === true;
             const feedUrl = assertSafeOutboundUrl(
               z.string().min(1).parse(feed.feedUrl),
               feedUrlPolicy,
@@ -218,16 +267,36 @@ export class RssAdapter {
               feedUrl,
               { urlPolicy: feedUrlPolicy },
             );
-            if (response.notModified || response.body === null) {
-              return [];
+            if (
+              requireExactEndpoint &&
+              assertSafeOutboundUrl(
+                response.finalUrl,
+                feedUrlPolicy,
+              ).toString() !== feedUrl
+            ) {
+              throw new UnsafeOutboundUrlError(
+                "final feed endpoint is not the reviewed endpoint",
+              );
             }
-            const parsedXml: unknown = new XMLParser({
-              ignoreAttributes: false,
-              removeNSPrefix: true,
-              trimValues: true,
-              parseTagValue: false,
-            }).parse(response.body);
-            const entries = feedEntries(parsedXml);
+            if (response.notModified || response.body === null) {
+              return { candidates: [], observed: 0 };
+            }
+            const mediaType = response.contentType?.split(";", 1)[0]
+              ?.trim()
+              .toLowerCase();
+            if (
+              mediaType !== "application/rss+xml" &&
+              mediaType !== "application/atom+xml" &&
+              mediaType !== "application/xml" &&
+              mediaType !== "text/xml"
+            ) {
+              throw new UnsupportedSourceMediaTypeError();
+            }
+            const parsedXml = parseFeedXml(response.body);
+            const rawEntries = feedEntries(parsedXml);
+            const entries = maxEntries === undefined
+              ? rawEntries
+              : rawEntries.slice(0, maxEntries);
             let interpretableEntries = 0;
             const candidates = entries.flatMap((value) => {
               const entry = normalizeFeedEntry(value, articleUrlPolicy);
@@ -276,7 +345,10 @@ export class RssAdapter {
                   relatedPaperIds: relatedArxivIds(
                     `${originalUrl} ${rawDescription}`,
                   ),
-                  metadata: { feedUrl },
+                  metadata: {
+                    feedUrl,
+                    feedCategories: entry.categories,
+                  },
                 });
                 interpretableEntries += 1;
                 if (
@@ -292,7 +364,10 @@ export class RssAdapter {
             if (entries.length > 0 && interpretableEntries === 0) {
               throw new SyntaxError("No interpretable feed entries.");
             }
-            return candidates;
+            return {
+              candidates: candidates.slice(0, 10_000),
+              observed: Math.min(10_000, interpretableEntries),
+            };
           },
         })),
     );

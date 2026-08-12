@@ -128,20 +128,51 @@ function intersects(
   return false;
 }
 
+function providerIdentityConflict(
+  left: ReadonlySet<string>,
+  right: ReadonlySet<string>,
+): boolean {
+  const leftByProvider = new Map<string, Set<string>>();
+  for (const identity of left) {
+    const separator = identity.indexOf(":");
+    const provider = identity.slice(0, separator);
+    leftByProvider.set(provider, new Set([
+      ...(leftByProvider.get(provider) ?? []),
+      identity,
+    ]));
+  }
+  const rightByProvider = new Map<string, Set<string>>();
+  for (const identity of right) {
+    const separator = identity.indexOf(":");
+    const provider = identity.slice(0, separator);
+    rightByProvider.set(provider, new Set([
+      ...(rightByProvider.get(provider) ?? []),
+      identity,
+    ]));
+  }
+  return [...leftByProvider].some(([provider, leftIdentities]) => {
+    const rightIdentities = rightByProvider.get(provider);
+    return rightIdentities !== undefined &&
+      !intersects(leftIdentities, rightIdentities);
+  });
+}
+
 function durableIdentityConflict(
   left: DurableIdentities,
   right: DurableIdentities,
 ): boolean {
-  if (left.arxiv.size > 0 && right.arxiv.size > 0) {
-    return !intersects(left.arxiv, right.arxiv);
-  }
-  if (left.doi.size > 0 && right.doi.size > 0) {
-    return !intersects(left.doi, right.doi);
-  }
-  if (left.provider.size > 0 && right.provider.size > 0) {
-    return !intersects(left.provider, right.provider);
-  }
-  return false;
+  const families: readonly (readonly [
+    ReadonlySet<string>,
+    ReadonlySet<string>,
+  ])[] = [
+    [left.arxiv, right.arxiv],
+    [left.doi, right.doi],
+  ];
+  return families.some(([leftFamily, rightFamily]) =>
+    leftFamily.size > 0 &&
+    rightFamily.size > 0 &&
+    !intersects(leftFamily, rightFamily)
+  ) || providerIdentityConflict(left.provider, right.provider);
 }
 
 function mergeDurableIdentities(
@@ -183,6 +214,21 @@ function researchMatchReason(
   if (leftIds.provider.size > 0 && rightIds.provider.size > 0) return null;
   if (left.canonicalUrl === right.canonicalUrl) return "canonical_url";
   return titleAndAuthorMatch(left, right) ? "title_author" : null;
+}
+
+function commentaryConsolidationReason(
+  left: Item,
+  right: Item,
+): ResearchIdentityMergeReason | null {
+  const leftIds = itemDurableIdentities(left);
+  const rightIds = itemDurableIdentities(right);
+  if (intersects(leftIds.arxiv, rightIds.arxiv)) return "arxiv";
+  if (leftIds.arxiv.size > 0 && rightIds.arxiv.size > 0) return null;
+  if (intersects(leftIds.doi, rightIds.doi)) return "doi";
+  if (leftIds.doi.size > 0 && rightIds.doi.size > 0) return null;
+  if (intersects(leftIds.provider, rightIds.provider)) return "provider_id";
+  if (leftIds.provider.size > 0 && rightIds.provider.size > 0) return null;
+  return left.canonicalUrl === right.canonicalUrl ? "canonical_url" : null;
 }
 
 function sourceRefKey(source: SourceRef): string {
@@ -412,23 +458,26 @@ export function canonicalResearchIdentity(candidate: Item): string {
   return provider ?? item.canonicalUrl;
 }
 
-export function consolidateResearchCandidates(
+type ResearchIdentityGroup = {
+  members: Item[];
+  retainedItem: Item;
+  mergedItem: Item;
+};
+
+function groupByResearchIdentity(
   candidates: readonly Item[],
-): ConsolidatedResearchCandidates {
-  const input = candidates
-    .map((candidate) => ItemSchema.parse(candidate))
-    .sort((left, right) => stableItemKey(left).localeCompare(stableItemKey(right)));
-  const paperCandidates = input.filter((candidate) => !isCommentary(candidate));
-  const commentaryCandidates = input.filter(isCommentary);
-  const parent = paperCandidates.map((_, index) => index);
-  const componentIdentities = paperCandidates.map(itemDurableIdentities);
+  matchReason: (left: Item, right: Item) => ResearchIdentityMergeReason | null,
+  fallbackReason: ResearchIdentityMergeReason,
+): { groups: ResearchIdentityGroup[]; merges: ResearchIdentityMerge[] } {
+  const parent = candidates.map((_, index) => index);
+  const componentIdentities = candidates.map(itemDurableIdentities);
   const pairReasons = new Map<string, ResearchIdentityMergeReason>();
-  for (let left = 0; left < paperCandidates.length; left += 1) {
-    for (let right = left + 1; right < paperCandidates.length; right += 1) {
-      const leftItem = paperCandidates[left];
-      const rightItem = paperCandidates[right];
+  for (let left = 0; left < candidates.length; left += 1) {
+    for (let right = left + 1; right < candidates.length; right += 1) {
+      const leftItem = candidates[left];
+      const rightItem = candidates[right];
       if (leftItem === undefined || rightItem === undefined) continue;
-      const reason = researchMatchReason(leftItem, rightItem);
+      const reason = matchReason(leftItem, rightItem);
       if (reason === null) continue;
       const leftRoot = find(parent, left);
       const rightRoot = find(parent, right);
@@ -452,37 +501,67 @@ export function consolidateResearchCandidates(
   }
 
   const grouped = new Map<number, Item[]>();
-  paperCandidates.forEach((candidate, index) => {
+  candidates.forEach((candidate, index) => {
     const root = find(parent, index);
     grouped.set(root, [...(grouped.get(root) ?? []), candidate]);
   });
-  const paperGroups = [...grouped.values()].map((members) => ({
+  const groups = [...grouped.values()].map((members) => ({
     members,
     retainedItem: members.reduce(preferredItem),
-    attachedCommentary: [] as Item[],
-    paper: mergeItemGroup(members),
+    mergedItem: mergeItemGroup(members),
   }));
-  const merges: ResearchIdentityMerge[] = [];
-  for (const { members, paper, retainedItem } of paperGroups) {
-    members.forEach((member) => {
-      if (member === retainedItem) return;
-      const memberIndex = paperCandidates.indexOf(member);
-      const reason = members.flatMap((other) => {
-        const otherIndex = paperCandidates.indexOf(other);
+  const merges = groups.flatMap(({ members, mergedItem, retainedItem }) =>
+    members.flatMap((member): ResearchIdentityMerge[] => {
+      if (member === retainedItem) return [];
+      const memberIndex = candidates.indexOf(member);
+      const reasons = members.flatMap((other) => {
+        const otherIndex = candidates.indexOf(other);
         const lower = Math.min(memberIndex, otherIndex);
         const upper = Math.max(memberIndex, otherIndex);
-        return pairReasons.get(`${lower}:${upper}`) ?? [];
-      }).sort()[0] ?? "title_author";
-      merges.push({
-        keptItemId: paper.id,
-        mergedItemId: member.id,
-        reason,
+        const reason = pairReasons.get(`${lower}:${upper}`);
+        return reason === undefined ? [] : [reason];
       });
-    });
-  }
+      return [{
+        keptItemId: mergedItem.id,
+        mergedItemId: member.id,
+        reason: reasons.sort()[0] ?? fallbackReason,
+      }];
+    })
+  );
+  return { groups, merges };
+}
+
+export function consolidateResearchCandidates(
+  candidates: readonly Item[],
+): ConsolidatedResearchCandidates {
+  const input = candidates
+    .map((candidate) => ItemSchema.parse(candidate))
+    .sort((left, right) => stableItemKey(left).localeCompare(stableItemKey(right)));
+  const paperCandidates = input.filter((candidate) => !isCommentary(candidate));
+  const commentaryCandidates = input.filter(isCommentary);
+  const consolidatedPapers = groupByResearchIdentity(
+    paperCandidates,
+    researchMatchReason,
+    "title_author",
+  );
+  const consolidatedCommentary = groupByResearchIdentity(
+    commentaryCandidates,
+    commentaryConsolidationReason,
+    "canonical_url",
+  );
+  const paperGroups = consolidatedPapers.groups.map((group) => ({
+    members: group.members,
+    retainedItem: group.retainedItem,
+    attachedCommentary: [] as Item[],
+    paper: group.mergedItem,
+  }));
+  const merges: ResearchIdentityMerge[] = [
+    ...consolidatedPapers.merges,
+    ...consolidatedCommentary.merges,
+  ];
 
   const standaloneCommentary: Item[] = [];
-  for (const commentary of commentaryCandidates) {
+  for (const { mergedItem: commentary } of consolidatedCommentary.groups) {
     const matches = paperGroups.flatMap((group, index) => {
       const reason = commentaryMatchReason(commentary, group.members);
       return reason === null ? [] : [{ index, reason }];
@@ -518,9 +597,21 @@ export function consolidateResearchCandidates(
       left.mergedItemId.localeCompare(right.mergedItemId) ||
       left.reason.localeCompare(right.reason),
     ),
-    mergeGroups: paperGroups.map((group) => ({
-      retainedItem: group.retainedItem,
-      inputItems: [...group.members, ...group.attachedCommentary],
-    })),
+    mergeGroups: [
+      ...paperGroups.map((group) => ({
+        retainedItem: group.retainedItem,
+        inputItems: [...group.members, ...group.attachedCommentary],
+      })),
+      ...consolidatedCommentary.groups
+        .filter(({ members }) => members.length > 1)
+        .map(({ retainedItem, members }) => ({
+          retainedItem,
+          inputItems: members,
+        })),
+    ].sort((left, right) =>
+      stableItemKey(left.retainedItem).localeCompare(
+        stableItemKey(right.retainedItem),
+      )
+    ),
   };
 }

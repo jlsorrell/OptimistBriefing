@@ -65,8 +65,16 @@ export const CollectionFailureKindSchema = z.enum([
   "parse",
   "policy",
   "timeout",
+  "unsupported_media",
   "unknown",
 ]);
+
+export class UnsupportedSourceMediaTypeError extends Error {
+  constructor() {
+    super("Unsupported source media type.");
+    this.name = "UnsupportedSourceMediaTypeError";
+  }
+}
 
 export const DiscoveryFamilySchema = z.enum([
   "arxiv",
@@ -192,16 +200,35 @@ export const DiscoveryLaneDiagnosticSchema = z
     laneId: z.string().min(1).max(200),
     sourceId: ProviderIdSchema,
     discoveryFamily: DiscoveryFamilySchema,
+    observed: DiscoveryRejectionCountSchema.optional(),
     discovered: z.number().int().nonnegative().max(10_000),
     deduplicated: z.number().int().nonnegative().max(10_000),
     triaged: z.number().int().nonnegative().max(10_000),
     fallbackTriaged: z.number().int().nonnegative().max(10_000).optional(),
     assessed: z.number().int().nonnegative().max(10_000),
-    outcome: z.enum(["success", "fetch", "parse", "policy", "timeout", "unknown"]),
+    outcome: z.enum([
+      "success",
+      "fetch",
+      "parse",
+      "policy",
+      "timeout",
+      "unsupported_media",
+      "unknown",
+    ]),
     rejectionCounts: DiscoveryRejectionCountsSchema.default({}),
   })
   .strict()
   .superRefine((diagnostic, context) => {
+    if (
+      diagnostic.observed !== undefined &&
+      diagnostic.discovered > diagnostic.observed
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "discovered cannot exceed observed.",
+        path: ["discovered"],
+      });
+    }
     const stages = [
       ["deduplicated", diagnostic.deduplicated, diagnostic.discovered],
       ["triaged", diagnostic.triaged, diagnostic.deduplicated],
@@ -436,6 +463,10 @@ export type CollectionFailure = {
   sourceId: string;
   kind: CollectionFailureKind;
 };
+export type CollectionSourceObservation = {
+  sourceId: string;
+  observed: number;
+};
 export type SourceCollection<T> = {
   sourceId: string;
   collect(): Promise<readonly T[]>;
@@ -444,6 +475,7 @@ export type CollectionBatch<T> = {
   candidates: readonly T[];
   succeededSourceIds: readonly string[];
   failures: readonly CollectionFailure[];
+  sourceObservations?: readonly CollectionSourceObservation[];
   discoveryDiagnostics?: readonly DiscoveryLaneDiagnostic[];
 };
 export type ResearchSourceRecord = z.infer<

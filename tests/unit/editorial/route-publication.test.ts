@@ -176,6 +176,104 @@ describe("routePublication", () => {
     expect(routePublication(ambiguousIndependentPost)).toBeNull();
   });
 
+  it.each([
+    {
+      label: "relevant commentary",
+      candidate: publication({
+        sourceId: "lesswrong-frontpage",
+        sourceName: "LessWrong Frontpage",
+        sourceRole: "blog",
+        originalUrl: "https://www.lesswrong.com/posts/example/bounded-oversight",
+        externalId: "lesswrong:bounded-oversight",
+        externalIds: ["lesswrong:bounded-oversight"],
+        title: "Mechanistic interpretability study for scalable oversight",
+        abstract: "We report a substantive experiment and a new alignment result.",
+        sectionEligibility: ["research", "research_radar"],
+        discoveryFamily: "commentary",
+      }),
+      expected: {
+        kind: "blog",
+        topics: ["alignment-interpretability", "oversight-governance"],
+        metadata: {
+          discoveryFamily: "commentary",
+          primarySection: "research",
+        },
+      },
+    },
+    {
+      label: "generic alignment mention",
+      candidate: publication({
+        sourceId: "lesswrong-frontpage",
+        sourceName: "LessWrong Frontpage",
+        sourceRole: "blog",
+        originalUrl: "https://www.lesswrong.com/posts/example/alignment-thoughts",
+        externalId: "lesswrong:alignment-thoughts",
+        externalIds: ["lesswrong:alignment-thoughts"],
+        title: "Some thoughts about AI alignment",
+        abstract: "A broad mention of alignment and safety from this week.",
+        sectionEligibility: ["research", "research_radar"],
+        discoveryFamily: "commentary",
+      }),
+      expected: null,
+    },
+    {
+      label: "relevant official-lab result",
+      candidate: publication({
+        title: "Mechanistic interpretability study for scalable oversight",
+        abstract: "We report a substantive experiment and a new alignment result.",
+      }),
+      expected: {
+        kind: "blog",
+        topics: ["alignment-interpretability", "oversight-governance"],
+        metadata: {
+          discoveryFamily: "official-publication",
+          primarySection: "research",
+        },
+      },
+    },
+    {
+      label: "official product post",
+      candidate: publication({
+        title: "We launch a new AI assistant product",
+        abstract: "The deployment adds a software capability for customers.",
+      }),
+      expected: {
+        kind: "article",
+        metadata: { primarySection: "technology" },
+      },
+    },
+    {
+      label: "metadata-only Papers with Code identity",
+      candidate: publication({
+        sourceId: "papers-with-code-co",
+        sourceName: "Papers with Code",
+        sourceRole: "analysis",
+        title: "Interpretability method for scalable oversight",
+        originalUrl: "https://paperswithcode.co/paper/2608.01234",
+        externalId: "arXiv:2608.01234",
+        externalIds: ["arXiv:2608.01234"],
+        accessLevel: "metadata",
+        abstract: null,
+        relatedPaperIds: ["arXiv:2608.01234"],
+        sectionEligibility: ["research", "research_radar"],
+      }),
+      expected: {
+        kind: "paper",
+        externalId: "arXiv:2608.01234",
+        accessLevel: "metadata",
+        topics: ["alignment-interpretability", "oversight-governance"],
+        metadata: { primarySection: "research" },
+      },
+    },
+  ] as const)("preserves the existing $label routing threshold", ({ candidate, expected }) => {
+    const routed = routePublication(candidate);
+    if (expected === null) {
+      expect(routed).toBeNull();
+    } else {
+      expect(routed).toMatchObject(expected);
+    }
+  });
+
   it("does not let catalog eligibility alone route a governance post", () => {
     const disallowed = publication({
       title: "AI regulation and legal enforcement update",

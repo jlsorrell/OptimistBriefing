@@ -6,6 +6,8 @@ import { SourceHttpClient } from "./http-client";
 import { type OutboundUrlPolicy } from "./outbound-url";
 import { PapersWithCodeAdapter } from "./papers-with-code";
 import { PublicationPageAdapter } from "./publication-page";
+import { OpenAiPublicationFeedAdapter } from "./reviewed-publication-feed";
+import { reviewedPublicationProfile } from "./reviewed-publication-profiles";
 import { mapRssCollectionBatch, RssAdapter } from "./rss";
 import {
   DiscoveryLaneDiagnosticSchema,
@@ -25,13 +27,20 @@ const CatalogPolicySchema = z.object({
   allowedPathPrefixes: z.array(z.string().startsWith("/")).min(1),
 });
 const ELIGIBLE_SECTIONS = new Set(["research", "research_radar", "technology", "ai_policy"]);
+const COMMENTARY_SOURCE_IDS = new Set([
+  "alignment-forum",
+  "lesswrong-curated",
+  "lesswrong-frontpage",
+]);
 
 function publicationFromRss(item: RawItem, source: SourceRecord): RawPublicationCandidate {
   return RawPublicationCandidateSchema.parse({
     ...item,
     kind: "publication",
     sectionEligibility: source.sectionEligibility,
-    discoveryFamily: source.id === "alignment-forum" || source.id === "lesswrong-curated" ? "commentary" : "official-publication",
+    discoveryFamily: COMMENTARY_SOURCE_IDS.has(source.id)
+      ? "commentary"
+      : "official-publication",
     metadata: {
       ...item.metadata,
       canCorroborateFacts: false,
@@ -52,17 +61,18 @@ export type PublicationCollectorOptions = {
   sourceOrder?: readonly string[];
 };
 
-type PublicationSourceAdapter = {
+export type PublicationSourceAdapter = {
   sourceId: string;
   laneId: string;
   discoveryFamily: DiscoveryFamily;
-  collect(window: CollectionWindow): Promise<readonly RawPublicationCandidate[]>;
+  collectWithStats(window: CollectionWindow): Promise<{
+    candidates: readonly RawPublicationCandidate[];
+    observed: number;
+  }>;
 };
 
 function publicationFamily(source: SourceRecord): DiscoveryFamily {
-  return source.id === "alignment-forum" ||
-      source.id === "lesswrong-curated" ||
-      source.id === "papers-with-code-co"
+  return COMMENTARY_SOURCE_IDS.has(source.id)
     ? "commentary"
     : "official-publication";
 }
@@ -72,6 +82,7 @@ function publicationDiagnostic(
   sourceId: string,
   discoveryFamily: DiscoveryFamily,
   batch: CollectionBatch<RawPublicationCandidate>,
+  observed?: number,
 ): DiscoveryLaneDiagnostic {
   return DiscoveryLaneDiagnosticSchema.parse({
     laneId,
@@ -82,6 +93,9 @@ function publicationDiagnostic(
     triaged: 0,
     assessed: 0,
     outcome: batch.failures[0]?.kind ?? "success",
+    ...(batch.failures.length === 0 && observed !== undefined
+      ? { observed }
+      : {}),
   });
 }
 
@@ -109,6 +123,9 @@ export class PublicationCollector {
             await adapter.collect(window),
             (item) => publicationFromRss(item, source),
           );
+          const observed = batch.sourceObservations
+            ?.find((observation) => observation.sourceId === source.id)
+            ?.observed;
           return {
             batch,
             diagnostic: publicationDiagnostic(
@@ -116,6 +133,7 @@ export class PublicationCollector {
               source.id,
               discoveryFamily,
               batch,
+              observed,
             ),
           };
         } catch {
@@ -138,9 +156,13 @@ export class PublicationCollector {
     );
     const pageOutcomes = await Promise.all(this.pageAdapters.map(
       async (adapter) => {
+        let observed: number | undefined;
         const batch = await settleCollectionBatch([{
           sourceId: adapter.sourceId,
-          collect: async () => (await adapter.collect(window)).map((candidate) =>
+          collect: async () => {
+            const result = await adapter.collectWithStats(window);
+            observed = result.observed;
+            return result.candidates.map((candidate) =>
             RawPublicationCandidateSchema.parse({
               ...candidate,
               metadata: {
@@ -148,7 +170,8 @@ export class PublicationCollector {
                 discoveryLaneIds: [adapter.laneId],
               },
             })
-          ),
+            );
+          },
         }]);
         return {
           batch,
@@ -157,6 +180,7 @@ export class PublicationCollector {
             adapter.sourceId,
             adapter.discoveryFamily,
             batch,
+            observed,
           ),
         };
       }
@@ -199,7 +223,7 @@ function failedAdapter(
     sourceId: source.id,
     laneId: `${source.id}:${source.discoveryMechanism}`,
     discoveryFamily: publicationFamily(source),
-    collect: async (_window) => { throw failure; },
+    collectWithStats: async (_window) => { throw failure; },
   };
 }
 
@@ -223,24 +247,55 @@ export function createPublicationCollectorFromCatalog(options: {
     try {
       const source = SourceRecordSchema.parse(input);
       const collectionSource = ResearchSourceRecordSchema.parse(source);
-      if (papersWithCode) {
-        pageAdapters.push(new PapersWithCodeAdapter(options.http, collectionSource));
-        continue;
-      }
       const feedUrlPolicy = CatalogPolicySchema.parse(
         source.restrictions.feedUrlPolicy,
       ) as OutboundUrlPolicy;
       const articleUrlPolicy = CatalogPolicySchema.parse(
         source.restrictions.articleUrlPolicy,
       ) as OutboundUrlPolicy;
-      if (source.discoveryMechanism === "rss") {
+      if (papersWithCode) {
+        if (source.discoveryMechanism !== "page") {
+          throw new SyntaxError(
+            "Papers with Code requires page discovery.",
+          );
+        }
+        pageAdapters.push(new PapersWithCodeAdapter(
+          options.http,
+          collectionSource,
+          z.string().min(1).parse(source.restrictions.pageUrl),
+          feedUrlPolicy,
+          articleUrlPolicy,
+        ));
+        continue;
+      }
+      if (source.id === "openai") {
+        if (source.discoveryMechanism !== "rss") {
+          throw new SyntaxError("OpenAI requires RSS discovery.");
+        }
+        pageAdapters.push(new OpenAiPublicationFeedAdapter(
+          options.http,
+          collectionSource,
+          z.string().min(1).parse(source.restrictions.feedUrl),
+          feedUrlPolicy,
+          articleUrlPolicy,
+        ));
+      } else if (source.discoveryMechanism === "rss") {
         const feedUrl = z.string().min(1).parse(source.restrictions.feedUrl);
         rssAdapters.push({
           source,
           adapter: new RssAdapter(options.http, [{ source: collectionSource, feedUrl, feedUrlPolicy, articleUrlPolicy }]),
         });
       } else if (source.discoveryMechanism === "page") {
-        pageAdapters.push(new PublicationPageAdapter(options.http, collectionSource, z.string().min(1).parse(source.restrictions.pageUrl), feedUrlPolicy, articleUrlPolicy, source.restrictions.listing));
+        const reviewedProfile = reviewedPublicationProfile(source.id);
+        pageAdapters.push(new PublicationPageAdapter(
+          options.http,
+          collectionSource,
+          z.string().min(1).parse(source.restrictions.pageUrl),
+          feedUrlPolicy,
+          articleUrlPolicy,
+          reviewedProfile === null ? source.restrictions.listing : undefined,
+          reviewedProfile,
+        ));
       } else {
         throw new SyntaxError("Unsupported publication discovery mechanism.");
       }

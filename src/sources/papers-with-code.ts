@@ -1,8 +1,13 @@
 import { parseHTML } from "linkedom";
 
+import { exactCalendarTimestamp } from "./calendar-date";
 import { SourceHttpClient } from "./http-client";
 import { normalizeArxivIdentifier } from "./identifiers";
-import { assertSafeOutboundUrl, type OutboundUrlPolicy } from "./outbound-url";
+import {
+  assertSafeOutboundUrl,
+  UnsafeOutboundUrlError,
+  type OutboundUrlPolicy,
+} from "./outbound-url";
 import { boundProviderText } from "./provider-text";
 import {
   CollectionWindowSchema,
@@ -13,15 +18,11 @@ import {
   type ResearchSourceInput,
   type ResearchSourceRecord,
   ResearchSourceRecordSchema,
+  UnsupportedSourceMediaTypeError,
 } from "./types";
 
 const PAPERS_WITH_CODE_ORIGIN = "https://paperswithcode.co";
-const PAPERS_WITH_CODE_URL = `${PAPERS_WITH_CODE_ORIGIN}/?order_by=date_published`;
-const PAPERS_WITH_CODE_POLICY: OutboundUrlPolicy = {
-  allowedHosts: ["paperswithcode.co"],
-  allowedPorts: [""],
-  allowedPathPrefixes: ["/"],
-};
+const PAPERS_WITH_CODE_URL = `${PAPERS_WITH_CODE_ORIGIN}/papers/recent`;
 
 function normalizedText(value: string | null | undefined): string | null {
   const normalized = value?.replace(/\s+/g, " ").trim() ?? "";
@@ -30,24 +31,7 @@ function normalizedText(value: string | null | undefined): string | null {
 
 function publishedAt(value: string | null | undefined): string | null {
   const normalized = normalizedText(value);
-  if (normalized === null) return null;
-  const timestamp = Date.parse(/^\d{4}-\d{2}-\d{2}$/.test(normalized) ? `${normalized}T00:00:00Z` : normalized);
-  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : null;
-}
-
-function articlePublishedAt(article: Element): string | null {
-  const time = article.querySelector("time");
-  const structured = publishedAt(
-    time?.getAttribute("datetime") ?? time?.textContent,
-  );
-  if (structured !== null) return structured;
-  for (const paragraph of article.querySelectorAll("p")) {
-    const match = /^Trending research\s*·\s*(\d{4}-\d{2}-\d{2})$/i.exec(
-      normalizedText(paragraph.textContent) ?? "",
-    );
-    if (match?.[1] !== undefined) return publishedAt(match[1]);
-  }
-  return null;
+  return normalized === null ? null : exactCalendarTimestamp(normalized);
 }
 
 function paperIdentity(pathname: string): string | null {
@@ -59,16 +43,8 @@ function paperIdentity(pathname: string): string | null {
   return normalizeArxivIdentifier(decoded) ?? `papers-with-code:${decoded}`;
 }
 
-function relevantPaperArticles(document: Document): Element[] {
-  const heading = [...document.querySelectorAll("h1,h2,h3")].find((element) =>
-    normalizedText(element.textContent)?.toLocaleLowerCase("en-US") === "relevant papers",
-  );
-  const region = heading?.parentElement ?? document.body;
-  return [...region.querySelectorAll("article")];
-}
-
-function identifiableCodeLink(article: Element): boolean {
-  return [...article.querySelectorAll("a[href]")].some((link) => {
+function identifiableCodeLink(row: Element): boolean {
+  return [...row.querySelectorAll("a[href]")].some((link) => {
     const href = link.getAttribute("href") ?? "";
     return /^https:\/\/(?:www\.)?(?:github\.com|gitlab\.com|codeberg\.org)\//i.test(href);
   });
@@ -77,36 +53,64 @@ function identifiableCodeLink(article: Element): boolean {
 export class PapersWithCodeAdapter {
   readonly sourceId: string;
   readonly laneId: string;
-  readonly discoveryFamily = "commentary" as const;
+  readonly discoveryFamily = "official-publication" as const;
   private readonly source: ResearchSourceRecord;
 
   constructor(
     private readonly http: SourceHttpClient,
     source: ResearchSourceInput,
+    private readonly listingUrl: string,
+    private readonly listingUrlPolicy: OutboundUrlPolicy,
+    private readonly articleUrlPolicy: OutboundUrlPolicy,
   ) {
     this.source = ResearchSourceRecordSchema.parse(source);
     this.sourceId = this.source.id;
     this.laneId = `${this.source.id}:page`;
+    const endpoint = assertSafeOutboundUrl(listingUrl, listingUrlPolicy);
+    if (endpoint.toString() !== PAPERS_WITH_CODE_URL) {
+      throw new UnsafeOutboundUrlError(
+        "Papers with Code endpoint is not the reviewed endpoint",
+      );
+    }
   }
 
   async collect(window: CollectionWindow): Promise<RawPublicationCandidate[]> {
+    return (await this.collectWithStats(window)).candidates;
+  }
+
+  async collectWithStats(
+    window: CollectionWindow,
+  ): Promise<{ candidates: RawPublicationCandidate[]; observed: number }> {
     const validWindow = CollectionWindowSchema.parse(window);
-    if (!this.source.enabled) return [];
-    const response = await this.http.get(this.source, PAPERS_WITH_CODE_URL, {
+    if (!this.source.enabled) return { candidates: [], observed: 0 };
+    const response = await this.http.get(this.source, this.listingUrl, {
       headers: { accept: "text/html,application/xhtml+xml" },
       useValidators: false,
-      urlPolicy: PAPERS_WITH_CODE_POLICY,
+      urlPolicy: this.listingUrlPolicy,
     });
-    if (response.body === null) return [];
+    const finalUrl = assertSafeOutboundUrl(
+      response.finalUrl,
+      this.listingUrlPolicy,
+    );
+    if (finalUrl.toString() !== PAPERS_WITH_CODE_URL) {
+      throw new UnsafeOutboundUrlError(
+        "Papers with Code final endpoint is not the reviewed endpoint",
+      );
+    }
+    if (response.body === null) return { candidates: [], observed: 0 };
     const mediaType = response.contentType?.split(";", 1)[0]?.trim().toLowerCase();
-    if (mediaType !== "text/html" && mediaType !== "application/xhtml+xml") return [];
-    const finalUrl = assertSafeOutboundUrl(response.finalUrl, PAPERS_WITH_CODE_POLICY);
-    if (finalUrl.origin !== PAPERS_WITH_CODE_ORIGIN || finalUrl.pathname !== "/") return [];
+    if (mediaType !== "text/html" && mediaType !== "application/xhtml+xml") {
+      throw new UnsupportedSourceMediaTypeError();
+    }
     const { document } = parseHTML(response.body);
-    return relevantPaperArticles(document).flatMap((article): RawPublicationCandidate[] => {
-      const paperLink = [...article.querySelectorAll("a[href]")].find((link) => {
+    const rows = [...document.querySelectorAll("li")].slice(0, 100);
+    const discovered = rows.flatMap((row): RawPublicationCandidate[] => {
+      const paperLink = [...row.querySelectorAll("a[href]")].find((link) => {
         try {
-          const url = assertSafeOutboundUrl(new URL(link.getAttribute("href") ?? "", finalUrl), PAPERS_WITH_CODE_POLICY);
+          const url = assertSafeOutboundUrl(
+            new URL(link.getAttribute("href") ?? "", finalUrl),
+            this.articleUrlPolicy,
+          );
           return url.origin === PAPERS_WITH_CODE_ORIGIN && paperIdentity(url.pathname) !== null;
         } catch { return false; }
       });
@@ -115,15 +119,21 @@ export class PapersWithCodeAdapter {
         maxCharacters: MAX_PROVIDER_TITLE_CHARACTERS,
       });
       let paperUrl: URL;
-      try { paperUrl = assertSafeOutboundUrl(new URL(paperLink.getAttribute("href") ?? "", finalUrl), PAPERS_WITH_CODE_POLICY); } catch { return []; }
+      try {
+        paperUrl = assertSafeOutboundUrl(
+          new URL(paperLink.getAttribute("href") ?? "", finalUrl),
+          this.articleUrlPolicy,
+        );
+      } catch { return []; }
       const identifier = paperIdentity(paperUrl.pathname);
-      const date = articlePublishedAt(article);
-      if (title === null || identifier === null || date === null || date < validWindow.from || date > validWindow.to) return [];
+      const time = row.querySelector("time");
+      const date = publishedAt(time?.getAttribute("datetime") ?? time?.textContent);
+      if (title === null || identifier === null || date === null) return [];
       return [RawPublicationCandidateSchema.parse({
         kind: "publication",
         sourceId: this.source.id,
         sourceName: this.source.canonicalName,
-        sourceRole: this.source.role,
+        sourceRole: "blog",
         title,
         originalUrl: paperUrl.toString(),
         externalId: identifier,
@@ -137,9 +147,9 @@ export class PapersWithCodeAdapter {
         content: null,
         relatedPaperIds: [identifier],
         sectionEligibility: this.source.sectionEligibility ?? ["research", "research_radar"],
-        discoveryFamily: "commentary",
+        discoveryFamily: "official-publication",
         metadata: {
-          implementationAvailable: identifiableCodeLink(article),
+          implementationAvailable: identifiableCodeLink(row),
           canCorroborateFacts: false,
           contentUse: "discovery-metadata-only",
           retention: "metadata-only",
@@ -147,6 +157,19 @@ export class PapersWithCodeAdapter {
           discoveryLaneIds: [this.laneId],
         },
       })];
-    }).slice(0, 100);
+    });
+    if (response.body.length > 0 && discovered.length === 0) {
+      throw new SyntaxError("Papers with Code recent-paper list was not interpretable.");
+    }
+    return {
+      candidates: discovered
+        .filter((candidate): candidate is RawPublicationCandidate & {
+          publishedAt: string;
+        } => candidate.publishedAt !== null &&
+          candidate.publishedAt >= validWindow.from &&
+          candidate.publishedAt <= validWindow.to)
+        .slice(0, 100),
+      observed: discovered.length,
+    };
   }
 }

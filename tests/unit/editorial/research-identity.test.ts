@@ -120,6 +120,32 @@ describe("consolidateResearchCandidates", () => {
     }
   });
 
+  it("treats different provider namespaces as independent durable families", () => {
+    const openAlex = normalized("openalex", {
+      externalId: "OpenAlex:W-CROSS-PROVIDER",
+      externalIds: [
+        "OpenAlex:W-CROSS-PROVIDER",
+        "arXiv:2608.00009",
+      ],
+    });
+    const semanticScholar = normalized("semantic-scholar", {
+      externalId: "SemanticScholar:S2-CROSS-PROVIDER",
+      externalIds: [
+        "SemanticScholar:S2-CROSS-PROVIDER",
+        "arXiv:2608.00009v2",
+      ],
+      originalUrl: "https://other.example.org/paper",
+    });
+
+    const consolidated = consolidateResearchCandidates([
+      openAlex,
+      semanticScholar,
+    ]);
+
+    expect(consolidated.papers).toHaveLength(1);
+    expect(consolidated.merges).toHaveLength(1);
+  });
+
   it("uses an exact normalized title only when at least one author overlaps", () => {
     const first = normalized("first", {
       title: "Mechanistic Interpretability: A Causal View",
@@ -552,6 +578,202 @@ describe("consolidateResearchCandidates", () => {
     expect(result.standaloneCommentary).toEqual([
       expect.objectContaining({ id: unlinked.id, kind: "blog" }),
     ]);
+  });
+
+  it("consolidates duplicate Curated and Frontpage commentary before the standalone path", () => {
+    const curated = normalized("lesswrong-curated", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "Curated post also on Frontpage",
+      originalUrl: "https://www.lesswrong.com/posts/shared-curated-post",
+      externalId: "lesswrong-curated:shared-curated-post",
+      externalIds: ["lesswrong-curated:shared-curated-post"],
+      accessLevel: "full_text",
+      abstract: null,
+      content: "A substantive interpretation of the bounded oversight result.",
+      metadata: {
+        discoveryFamily: "commentary",
+        discoveryLaneIds: ["lesswrong-curated:rss"],
+        discoveryLineage: ["curated-lineage"],
+      },
+    });
+    const frontpage = normalized("lesswrong-frontpage", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "Curated post also on Frontpage",
+      originalUrl: "https://www.lesswrong.com/posts/shared-curated-post",
+      externalId: "lesswrong-frontpage:shared-curated-post",
+      externalIds: ["lesswrong-frontpage:shared-curated-post"],
+      accessLevel: "metadata",
+      abstract: null,
+      content: null,
+      metadata: {
+        discoveryFamily: "commentary",
+        discoveryLaneIds: ["lesswrong-frontpage:rss"],
+        discoveryLineage: ["frontpage-lineage"],
+      },
+    });
+
+    const result = consolidateResearchCandidates([frontpage, curated]);
+
+    expect(result.papers).toEqual([]);
+    expect(result.standaloneCommentary).toEqual([
+      expect.objectContaining({
+        id: curated.id,
+        kind: "blog",
+        sourceRefs: expect.arrayContaining([
+          expect.objectContaining({ id: "lesswrong-curated", role: "blog" }),
+          expect.objectContaining({ id: "lesswrong-frontpage", role: "blog" }),
+        ]),
+        metadata: expect.objectContaining({
+          discoveryLaneIds: [
+            "lesswrong-curated:rss",
+            "lesswrong-frontpage:rss",
+          ],
+          discoveryLineage: ["curated-lineage", "frontpage-lineage"],
+        }),
+      }),
+    ]);
+    expect(result.standaloneCommentary[0]?.sourceRefs.map(({ id }) => id))
+      .toEqual(["lesswrong-curated", "lesswrong-frontpage"]);
+    expect(result.merges).toEqual([{
+      keptItemId: curated.id,
+      mergedItemId: frontpage.id,
+      reason: "canonical_url",
+    }]);
+    expect(result.mergeGroups).toEqual([
+      expect.objectContaining({
+        retainedItem: expect.objectContaining({ id: curated.id }),
+        inputItems: expect.arrayContaining([
+          expect.objectContaining({ id: curated.id }),
+          expect.objectContaining({ id: frontpage.id }),
+        ]),
+      }),
+    ]);
+  });
+
+  it("does not merge commentary with conflicting durable identities despite a shared title and URL", () => {
+    const first = normalized("lesswrong-curated", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "Different durable evidence for the same commentary",
+      originalUrl: "https://www.lesswrong.com/posts/conflicting-commentary",
+      externalId: "arXiv:2608.00031",
+      externalIds: ["arXiv:2608.00031"],
+      accessLevel: "full_text",
+      abstract: null,
+      content: "A substantive interpretation from Curated.",
+      metadata: { discoveryFamily: "commentary" },
+    });
+    const second = normalized("lesswrong-frontpage", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "Different durable evidence for the same commentary",
+      originalUrl: "https://www.lesswrong.com/posts/conflicting-commentary",
+      externalId: "arXiv:2608.00032",
+      externalIds: ["arXiv:2608.00032"],
+      accessLevel: "full_text",
+      abstract: null,
+      content: "A substantive interpretation from Frontpage.",
+      metadata: { discoveryFamily: "commentary" },
+    });
+
+    const result = consolidateResearchCandidates([first, second]);
+
+    expect(result.papers).toEqual([]);
+    expect(result.standaloneCommentary).toHaveLength(2);
+    expect(result.merges).toEqual([]);
+    expect(result.mergeGroups).toEqual([]);
+  });
+
+  it("does not merge commentary that shares arXiv identity but conflicts on DOI", () => {
+    const first = normalized("lesswrong-curated", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "Conflicting durable commentary",
+      originalUrl: "https://www.lesswrong.com/posts/mixed-identity-conflict",
+      externalId: "arXiv:2608.00041",
+      externalIds: ["arXiv:2608.00041", "DOI:10.1000/commentary-a"],
+      accessLevel: "full_text",
+      abstract: null,
+      content: "A substantive Curated interpretation.",
+      metadata: { discoveryFamily: "commentary" },
+    });
+    const second = normalized("lesswrong-frontpage", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "Conflicting durable commentary",
+      originalUrl: "https://www.lesswrong.com/posts/mixed-identity-conflict",
+      externalId: "arXiv:2608.00041",
+      externalIds: ["arXiv:2608.00041", "DOI:10.1000/commentary-b"],
+      accessLevel: "full_text",
+      abstract: null,
+      content: "A substantive Frontpage interpretation.",
+      metadata: { discoveryFamily: "commentary" },
+    });
+
+    const result = consolidateResearchCandidates([first, second]);
+
+    expect(result.standaloneCommentary).toHaveLength(2);
+    expect(result.merges).toEqual([]);
+    expect(result.mergeGroups).toEqual([]);
+  });
+
+  it("rejects a transitive commentary bridge from shared DOI to conflicting provider IDs", () => {
+    const first = normalized("lesswrong-curated", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "First commentary observation",
+      originalUrl: "https://www.lesswrong.com/posts/commentary-first",
+      externalId: "DOI:10.1000/commentary-bridge",
+      externalIds: [
+        "DOI:10.1000/commentary-bridge",
+        "OpenAlex:W-COMMENTARY-A",
+      ],
+      accessLevel: "full_text",
+      abstract: null,
+      content: "A substantive first commentary observation.",
+      metadata: { discoveryFamily: "commentary" },
+    });
+    const middle = normalized("lesswrong-frontpage", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "Middle commentary observation",
+      originalUrl: "https://www.lesswrong.com/posts/commentary-first",
+      externalId: "DOI:10.1000/commentary-bridge",
+      externalIds: ["DOI:10.1000/commentary-bridge"],
+      accessLevel: "full_text",
+      abstract: null,
+      content: "A substantive middle commentary observation.",
+      metadata: { discoveryFamily: "commentary" },
+    });
+    const last = normalized("alignment-forum", {
+      kind: "blog",
+      sourceRole: "blog",
+      title: "Last commentary observation",
+      originalUrl: "https://www.lesswrong.com/posts/commentary-first",
+      externalId: "DOI:10.1000/commentary-bridge",
+      externalIds: [
+        "DOI:10.1000/commentary-bridge",
+        "OpenAlex:W-COMMENTARY-B",
+      ],
+      accessLevel: "full_text",
+      abstract: null,
+      content: "A substantive last commentary observation.",
+      metadata: { discoveryFamily: "commentary" },
+    });
+
+    const result = consolidateResearchCandidates([first, middle, last]);
+
+    expect(result.standaloneCommentary).toHaveLength(2);
+    expect(result.standaloneCommentary.every((item) => {
+      const externalIds = item.metadata.externalIds;
+      return !Array.isArray(externalIds) ||
+        !(
+          externalIds.includes("OpenAlex:W-COMMENTARY-A") &&
+          externalIds.includes("OpenAlex:W-COMMENTARY-B")
+        );
+    })).toBe(true);
   });
 
   it("is stable across input order and stores all merged paper sources", () => {
