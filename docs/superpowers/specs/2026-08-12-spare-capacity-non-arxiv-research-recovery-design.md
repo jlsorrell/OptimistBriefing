@@ -34,6 +34,13 @@ publication gates. The user is comfortable raising the absolute assessment cap
 to 30 or 40 later if evidence shows it would help, but this change keeps the cap
 at 24 because the observed run did not approach it.
 
+During strict RED testing, the production-shaped fixture exposed that seven
+arXiv normal candidates cannot coexist under the generic six-candidate
+publisher-domain cap. The user explicitly prefers erring toward too many arXiv
+papers rather than too few. The design therefore raises the arXiv-family
+publisher-domain ceiling to 12 while retaining the ceiling of six for every
+other discovery family.
+
 Research remains the briefing's main priority. News behavior is not changed.
 
 ## Goals
@@ -43,7 +50,8 @@ Research remains the briefing's main priority. News behavior is not changed.
 - Preserve the existing `0.50` normal topical-fit threshold and `0.35`
   near-match floor.
 - Preserve configured-topic eligibility, core-before-adjacent ordering,
-  discovery-family limits, publisher-domain limits, and deterministic ordering.
+  discovery-family limits, the source-specific publisher-domain limits, and
+  deterministic ordering.
 - Repair Google Research extraction against its current first-party listing
   markup without adding a generic or permissive scraper.
 - Let every admitted non-arXiv candidate compete under the same technical
@@ -63,6 +71,8 @@ Research remains the briefing's main priority. News behavior is not changed.
 - Lowering technical-quality, evidence, source-authority, synthesis,
   validation, or grounding standards.
 - Raising the assessment cap in this change.
+- Raising every publisher-domain ceiling; only the arXiv discovery family gets
+  the approved ceiling of 12.
 - Adding an LLM relevance reranker, embedding request, provider request, or
   model-generated admission decision.
 - Treating institutional prestige, citations, or source reputation as enough
@@ -125,7 +135,8 @@ The existing near-match eligibility rules remain unchanged. A candidate must:
 2. have topical fit at least `0.35` and below `0.50`;
 3. have nonempty bounded normalized evidence;
 4. map to at least one configured research topic;
-5. remain within shared discovery-family and publisher-domain limits; and
+5. remain within shared discovery-family and source-specific publisher-domain
+   limits; and
 6. satisfy every other existing prefilter requirement.
 
 Preferred institutions, preferred laboratories, citations, popularity, or
@@ -163,6 +174,13 @@ existing deterministic ranking and configured-topic diversification.
 Family and publisher counts are shared across normal and near-match passes. The
 near-match pass cannot reset those counts or displace a normal candidate.
 Reversing provider input order must produce the same selected order.
+
+The publisher-domain ceiling is selected from the candidate's discovery
+family. Candidates in the `arxiv` discovery family use a ceiling of 12 for the
+shared `arxiv.org` domain. Every other discovery family uses the existing
+ceiling of six. The exception must not be inferred from a provider-controlled
+URL or display name, and it must not increase any discovery-family limit or the
+24-candidate absolute maximum.
 
 Degraded budget behavior continues to consume candidates in this order. Hard
 stop makes no new paid calls. Cached assessments remain unchanged.
@@ -225,8 +243,8 @@ fallback-admission count remains the authoritative measure of near-match use.
 The implementation must make the following states distinguishable through
 existing aggregate categories and stage counts:
 
-- eligible near-match excluded by family, publisher, allowance, or absolute
-  capacity;
+- eligible near-match excluded by family, its applicable publisher ceiling,
+  allowance, or absolute capacity;
 - admitted near-match rejected during assessment;
 - assessed research candidate excluded during shortlist; and
 - source-level parse failure versus a healthy empty result.
@@ -256,8 +274,9 @@ design revision before implementation.
 - No D1 schema migration is expected.
 - Existing Item, assessment, score, summary, edition, and checkpoint contracts
   remain unchanged.
-- The triage option rename is an internal compile-time change; no public or
-  persisted configuration uses the obsolete fallback-target meaning.
+- The triage option rename and the discovery-family publisher-ceiling override
+  are internal compile-time changes; no public or persisted configuration uses
+  either value.
 - Historical checkpoints and diagnostics remain readable.
 - Existing cached embeddings and research assessments remain valid.
 - Production callers continue using the default 24-candidate maximum.
@@ -268,7 +287,7 @@ Implementation follows strict test-driven development.
 
 ### Research-triage unit coverage
 
-- seven normal candidates plus three eligible near-matches select all ten;
+- seven normal arXiv candidates plus three eligible near-matches select all ten;
 - 20 normal candidates admit no more than four near-matches;
 - 24 normal candidates admit none;
 - zero normal candidates admit no more than six near-matches;
@@ -276,6 +295,8 @@ Implementation follows strict test-driven development.
 - core near-matches precede higher-scoring adjacent near-matches;
 - scores below `0.35` and candidates without configured-topic evidence remain
   ineligible;
+- arXiv may contribute up to 12 candidates from `arxiv.org`, while every other
+  discovery family remains limited to six candidates per publisher domain;
 - family and publisher counts remain shared across passes;
 - normal output is unchanged when the near-match selector fails or has no
   eligible candidates;
@@ -301,9 +322,9 @@ Mutation checks must fail when the implementation restores the old
 
 ### Workflow coverage
 
-- a production-shaped funnel with seven normal candidates and three Papers
-  with Code near-matches sends all ten to the assessment boundary under a
-  normal budget;
+- a production-shaped funnel with seven normal arXiv candidates and three
+  Papers with Code near-matches sends all ten to the assessment boundary under
+  a normal budget;
 - later assessment may reject every near-match without lowering standards;
 - degraded mode assesses normal, core near-match, then adjacent near-match;
 - hard stop makes no new paid calls;
@@ -323,6 +344,8 @@ After separate deployment authorization, a preview canary is acceptable when:
 - at most six near-matches are admitted and the combined assessment queue is at
   most 24;
 - normal candidates remain first and unchanged;
+- the arXiv publisher ceiling is 12, every other publisher ceiling is six, and
+  neither ceiling can bypass the 24-candidate absolute maximum;
 - no candidate below `0.35` or without configured-topic evidence enters via the
   fallback path;
 - no source receives a reserved final slot;
