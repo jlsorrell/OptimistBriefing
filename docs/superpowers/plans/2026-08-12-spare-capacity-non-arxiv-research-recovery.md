@@ -15,6 +15,7 @@
 - Admit at most `6` near-match candidates, and never allow normal plus near-match candidates to exceed `24`.
 - Preserve normal-first, core-near-match-second, adjacent-near-match-third ordering.
 - Share discovery-family and publisher-domain counts across normal and near-match passes.
+- Allow at most `12` candidates from one publisher domain when their normalized discovery family is `arxiv`; retain the existing limit of `6` for every other discovery family.
 - Do not reserve or boost a final slot for a source, family, institution, laboratory, or media type.
 - Do not add a model call, embedding call, provider request, dependency, D1 migration, public configuration field, or persistence schema.
 - Do not decode or normalize structural URLs, IDs, timestamps, access levels, roles, endpoint policies, or credentials as provider display text.
@@ -49,7 +50,7 @@
 
 **Interfaces:**
 - Consumes: `triageResearch(items: readonly Item[], options: ResearchTriageOptions): ResearchTriageResult` and the existing `DiscoveryDiagnosticsTracker` fallback count.
-- Produces: `ResearchTriageOptions.nearMatchAllowance?: number`; production constant `RESEARCH_NEAR_MATCH_ALLOWANCE = 6`; unchanged admission route values `"normal" | "near_match"`.
+- Produces: `ResearchTriageOptions.nearMatchAllowance?: number`; `ResearchTriageOptions.maximumPerPublisherDomainByFamily?: Partial<Record<DiscoveryFamily, number>>`; production constants `RESEARCH_NEAR_MATCH_ALLOWANCE = 6` and `RESEARCH_ARXIV_PUBLISHER_DOMAIN_MAXIMUM = 12`; unchanged admission route values `"normal" | "near_match"`.
 
 - [ ] **Step 1: Rename the test option and write allowance-focused unit regressions before production edits**
 
@@ -81,6 +82,48 @@ it("uses spare capacity after seven normal candidates qualify", () => {
   expect(result.admissions.slice(7)).toEqual(
     nearMatches.map(({ id }) => ({ itemId: id, route: "near_match" })),
   );
+});
+```
+
+Set `maximumPerPublisherDomainByFamily: { arxiv: 12 }` in
+`fallbackOptions`. Add two explicit source-specific ceiling tests:
+
+```ts
+it("allows twelve arXiv candidates from arxiv.org", () => {
+  const candidates = Array.from({ length: 13 }, (_, index) =>
+    researchItem(`arxiv-${String(index).padStart(2, "0")}`, {
+      family: "arxiv",
+      topicalFit: 0.9,
+      domain: "arxiv.org",
+    })
+  );
+  const result = triageResearch(candidates, {
+    ...fallbackOptions,
+    maximumPerFamily: 24,
+  });
+
+  expect(result.items).toHaveLength(12);
+  expect(result.exclusions).toContainEqual({
+    itemId: "arxiv-12",
+    reason: "publisher_domain_cap",
+  });
+});
+
+it("keeps every non-arXiv publisher domain capped at six", () => {
+  const candidates = Array.from({ length: 7 }, (_, index) =>
+    researchItem(`bibliographic-${index}`, {
+      family: "bibliographic",
+      topicalFit: 0.9,
+      domain: "openalex.org",
+    })
+  );
+  const result = triageResearch(candidates, fallbackOptions);
+
+  expect(result.items).toHaveLength(6);
+  expect(result.exclusions).toContainEqual({
+    itemId: "bibliographic-6",
+    reason: "publisher_domain_cap",
+  });
 });
 ```
 
@@ -235,12 +278,41 @@ export type ResearchTriageOptions = {
   minimumTopicalFit?: number;
   nearMatchAllowance?: number;
   fallbackMinimumTopicalFit?: number;
+  maximumPerPublisherDomainByFamily?: Partial<
+    Record<DiscoveryFamily, number>
+  >;
 };
 
 const nearMatchAllowance = validatedMaximum(
   options.nearMatchAllowance ?? 0,
   "nearMatchAllowance",
 );
+```
+
+After `NonnegativeIntegerSchema`, define and use a strict runtime schema for
+the family overrides:
+
+```ts
+const PublisherDomainMaximumByFamilySchema = z.object({
+  arxiv: NonnegativeIntegerSchema.optional(),
+  bibliographic: NonnegativeIntegerSchema.optional(),
+  "official-publication": NonnegativeIntegerSchema.optional(),
+  commentary: NonnegativeIntegerSchema.optional(),
+}).strict();
+
+const maximumPerPublisherDomainByFamily =
+  PublisherDomainMaximumByFamilySchema.parse(
+    options.maximumPerPublisherDomainByFamily ?? {},
+  );
+const publisherDomainMaximum = (item: Item): number =>
+  maximumPerPublisherDomainByFamily[discoveryFamily(item)] ??
+  maximumPerPublisherDomain;
+```
+
+Use the candidate's applicable ceiling inside `canSelect`:
+
+```ts
+(perDomain.get(publisherDomain(item)) ?? 0) < publisherDomainMaximum(item)
 ```
 
 Use `nearMatchAllowance > 0` in the existing eligibility and threshold-validation branches. Replace only the capacity formula:
@@ -258,13 +330,19 @@ In `src/workflow/run-editorial-pipeline.ts`, rename and pass the production cons
 
 ```ts
 const RESEARCH_NEAR_MATCH_ALLOWANCE = 6;
+const RESEARCH_ARXIV_PUBLISHER_DOMAIN_MAXIMUM = 12;
 const RESEARCH_FALLBACK_MINIMUM_TOPICAL_FIT = 0.35;
 
 // In prefilter options:
 nearMatchAllowance: RESEARCH_NEAR_MATCH_ALLOWANCE,
+maximumPerPublisherDomainByFamily: {
+  arxiv: RESEARCH_ARXIV_PUBLISHER_DOMAIN_MAXIMUM,
+},
 ```
 
-Do not change `maximum: 24`, assessment reservation logic, or budget-state logic.
+Do not change `maximum: 24`, the default
+`maximumPerPublisherDomain: 6`, any non-arXiv publisher ceiling, assessment
+reservation logic, or budget-state logic.
 
 - [ ] **Step 6: Run focused GREEN and type verification**
 
@@ -302,6 +380,17 @@ npx vitest run tests/unit/editorial/research-triage.test.ts -t "shared fallback 
 ```
 
 Expected: at least one shared-cap regression fails. Restore the implementation and rerun the full focused GREEN commands from Step 6.
+
+Finally, temporarily ignore `maximumPerPublisherDomainByFamily` so all families
+use six, then temporarily apply 12 globally. Run:
+
+```bash
+npx vitest run tests/unit/editorial/research-triage.test.ts -t "allows twelve arXiv|keeps every non-arXiv"
+```
+
+Expected: the first mutation fails the arXiv assertion and the second mutation
+fails the non-arXiv assertion. Restore the source-specific lookup and rerun the
+focused GREEN commands from Step 6.
 
 - [ ] **Step 8: Commit the admission contract**
 
@@ -558,6 +647,7 @@ Ask the reviewer to inspect `a2f38f4..HEAD` for:
 - old target semantics surviving under another name;
 - overflow beyond 24 or six near-matches;
 - changed normal ordering, family/publisher caps, degraded/hard-stop behavior, or cached-assessment behavior;
+- an arXiv-family publisher ceiling other than 12, a non-arXiv ceiling other than six, or an override chosen from URL/display-name text rather than normalized discovery family;
 - Google selector overreach, arbitrary-list fallback, structural-field normalization, or healthy-empty misclassification;
 - source-family bonus or final-slot reservation;
 - privacy leakage in diagnostics or reports; and
