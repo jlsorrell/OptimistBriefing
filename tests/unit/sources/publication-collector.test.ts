@@ -413,7 +413,10 @@ describe("PublicationCollector", () => {
     expect(JSON.stringify(result.candidates)).not.toContain("/products/");
   });
 
-  it("fetches only the first five topical reviewed rows, leaving unrelated rows unfetched", async () => {
+  it("date-filters reviewed rows before fetching the first five unique recent details", async () => {
+    const stale = Array.from({ length: 5 }, (_, index) => `<a href="/research/stale-${index}">
+      <h3>Routine archive update ${index}</h3><span>Product</span>
+      <time datetime="2026-07-31"></time></a>`).join("");
     const unrelated = Array.from({ length: 6 }, (_, index) => `<a href="/research/product-${index}">
       <h3>Console product release ${index}</h3><span>Product</span>
       <time datetime="2026-08-02"></time></a>`).join("");
@@ -423,16 +426,14 @@ describe("PublicationCollector", () => {
     const fetch = vi.fn(async (input: string | URL | Request) => {
       const url = String(input);
       if (url === "https://www.anthropic.com/research") {
-        return new Response(`<!doctype html><html><body>${unrelated}${relevant}</body></html>`, {
+        return new Response(`<!doctype html><html><body>${stale}${unrelated}${relevant}</body></html>`, {
           headers: { "content-type": "text/html" },
         });
       }
-      if (url.startsWith("https://www.anthropic.com/research/research-")) {
-        return new Response(article("Reviewed detail"), {
-          headers: { "content-type": "text/html" },
-        });
-      }
-      throw new Error(`Unrelated reviewed row was fetched: ${url}`);
+      return new Response(`<!doctype html><article><h1>Routine update</h1>
+        <p>Product availability notes.</p></article>`, {
+        headers: { "content-type": "text/html" },
+      });
     });
     const result = await createPublicationCollectorFromCatalog({
       http: new SourceHttpClient({
@@ -452,17 +453,94 @@ describe("PublicationCollector", () => {
       "AI safety oversight research 4",
       "AI safety oversight research 5",
     ]);
-    expect(result.candidates[5]).toMatchObject({
+    expect(result.candidates[0]).toMatchObject({
       accessLevel: "metadata",
       content: null,
     });
     expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
       "https://www.anthropic.com/research",
-      "https://www.anthropic.com/research/research-0",
-      "https://www.anthropic.com/research/research-1",
-      "https://www.anthropic.com/research/research-2",
-      "https://www.anthropic.com/research/research-3",
-      "https://www.anthropic.com/research/research-4",
+      "https://www.anthropic.com/research/product-0",
+      "https://www.anthropic.com/research/product-1",
+      "https://www.anthropic.com/research/product-2",
+      "https://www.anthropic.com/research/product-3",
+      "https://www.anthropic.com/research/product-4",
+    ]);
+  });
+
+  it("admits a recent reviewed row when its configured topic appears only in detail text", async () => {
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://research.google/blog/") {
+        return new Response(`<!doctype html><a class="glue-card--blog" href="/blog/opaque-result">
+          <span class="js-gt-item-id">A closer look at model behavior</span>
+          <span class="glue-card__eyebrow">2026-08-02</span>
+          <ul class="glue-card__link-list">
+            <li class="glue-card__link-list__item">Research</li>
+          </ul>
+        </a>`, { headers: { "content-type": "text/html" } });
+      }
+      if (url === "https://research.google/blog/opaque-result") {
+        return new Response(`<!doctype html><article>
+          <h1>A closer look at model behavior</h1>
+          <p>The study uses mechanistic interpretability to examine model recall.</p>
+        </article>`, { headers: { "content-type": "text/html" } });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [reviewedLabSource("google-research")],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates).toEqual([
+      expect.objectContaining({
+        title: "A closer look at model behavior",
+        originalUrl: "https://research.google/blog/opaque-result",
+        content: expect.stringContaining("mechanistic interpretability"),
+      }),
+    ]);
+  });
+
+  it("deduplicates reviewed listing URLs before detail retrieval and emission", async () => {
+    const duplicate = `<a href="/research/repeated-result">
+      <h3>AI safety oversight result</h3><span>Research</span>
+      <time datetime="2026-08-02"></time></a>`;
+    const fetch = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      if (url === "https://www.anthropic.com/research") {
+        return new Response(`<!doctype html>${duplicate}${duplicate}`, {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      if (url === "https://www.anthropic.com/research/repeated-result") {
+        return new Response(article("Repeated result"), {
+          headers: { "content-type": "text/html" },
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+    const result = await createPublicationCollectorFromCatalog({
+      http: new SourceHttpClient({
+        fetch,
+        maxRetries: 0,
+        now: () => new Date("2026-08-02T12:00:00.000Z"),
+      }),
+      sources: [reviewedLabSource("anthropic")],
+    }).collect(window);
+
+    expect(result.failures).toEqual([]);
+    expect(result.candidates).toHaveLength(1);
+    expect(result.discoveryDiagnostics).toEqual([
+      expect.objectContaining({ sourceId: "anthropic", observed: 2, discovered: 1 }),
+    ]);
+    expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
+      "https://www.anthropic.com/research",
+      "https://www.anthropic.com/research/repeated-result",
     ]);
   });
 

@@ -11,7 +11,7 @@ const TOPIC_PATTERNS: Readonly<
   Record<ConfiguredResearchTopicId, readonly RegExp[]>
 > = {
   "alignment-interpretability": [
-    /\b(?:AI safety|alignment|interpretability|mechanistic|representation learning|internal representation|concept evolution|emergen(?:ce|t)|scaling law|capabilit(?:y|ies) elicitation|debate|multi-agent|game[- ]theoretic)\b/i,
+    /\b(?:AI safety|alignment|interpretability|mechanistic|representation learning|internal representation|parametric factuality|knowledge profiling|concept evolution|emergen(?:ce|t)|scaling law|capabilit(?:y|ies) elicitation|debate|multi-agent|game[- ]theoretic)\b/i,
   ],
   "oversight-governance": [
     /\b(?:oversight|governance|data provenance|training verification|inference verification|secure evaluation|model evaluation|audit(?:ing)?|accountability)\b/i,
