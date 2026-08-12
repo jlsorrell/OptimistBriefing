@@ -7092,15 +7092,15 @@ describe("manual editorial run", () => {
     for (const candidate of candidates) {
       expect(embeddedText).toContain(candidate.title);
     }
-    expect(prefiltered).toHaveLength(6);
+    expect(prefiltered).toHaveLength(12);
     expect(prefiltered.every(({ title }) =>
       title.startsWith("Relevant candidate")
     )).toBe(true);
-    expect(assessment.startedPackets).toHaveLength(6);
+    expect(assessment.startedPackets).toHaveLength(12);
     expect(assessment.startedPackets.every((packet) =>
       packet.includes("Relevant candidate")
     )).toBe(true);
-    expect(assessed).toHaveLength(6);
+    expect(assessed).toHaveLength(12);
     for (const item of enriched) {
       const workflow = item.metadata.workflow as {
         topicalFit?: number;
