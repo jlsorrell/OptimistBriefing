@@ -165,6 +165,7 @@ const SourceOutcomeSchema = z.union([
 const PageInputSchema = z.object({
   limit: z.number().int().min(1).max(100),
   cursor: z.string().min(1).nullable(),
+  editionDateNotAfter: EditionDateSchema.optional(),
 });
 const ArchiveInputSchema = PageInputSchema.extend({
   query: z.string().trim().min(1).nullable(),
@@ -1321,17 +1322,36 @@ export class D1BriefingRepository implements BriefingRepository {
     return editionFromRow({ id: editionId, edition_date: validDate, run_id: validRunId, status, reading_minutes: validEntries.length === 0 ? null : 20, published_at: publishedAt, created_at: createdAt, metadata_json: JSON.stringify(validMetadata) });
   }
 
-  async getLatestEdition(): Promise<EditionWithEntries | null> {
-    const row = await this.db
-      .prepare(
-        `SELECT *
-        FROM editions
-        WHERE status IN (?, ?)
-        ORDER BY edition_date DESC, id DESC
-        LIMIT 1`,
-      )
-      .bind("published", "partial")
-      .first<EditionRow>();
+  async getLatestEdition(
+    editionDateNotAfter?: string,
+  ): Promise<EditionWithEntries | null> {
+    const validDate = editionDateNotAfter === undefined
+      ? undefined
+      : validated(
+          EditionDateSchema,
+          editionDateNotAfter,
+          "Invalid latest-edition date cap",
+        );
+    const statement = validDate === undefined
+      ? this.db
+          .prepare(
+            `SELECT *
+            FROM editions
+            WHERE status IN (?, ?)
+            ORDER BY edition_date DESC, id DESC
+            LIMIT 1`,
+          )
+          .bind("published", "partial")
+      : this.db
+          .prepare(
+            `SELECT *
+            FROM editions
+            WHERE status IN (?, ?) AND edition_date <= ?
+            ORDER BY edition_date DESC, id DESC
+            LIMIT 1`,
+          )
+          .bind("published", "partial", validDate);
+    const row = await statement.first<EditionRow>();
     return row === null ? null : this.editionWithEntries(row);
   }
 
@@ -1371,31 +1391,26 @@ export class D1BriefingRepository implements BriefingRepository {
         });
       }
     }
-    const statement =
-      lastEditionDate === null
-        ? this.db
-            .prepare(
-              `SELECT *
-              FROM editions
-              WHERE status IN (?, ?)
-              ORDER BY edition_date DESC, id DESC
-              LIMIT ?`,
-            )
-            .bind("published", "partial", validInput.limit + 1)
-        : this.db
-            .prepare(
-              `SELECT *
-              FROM editions
-              WHERE status IN (?, ?) AND edition_date < ?
-              ORDER BY edition_date DESC, id DESC
-              LIMIT ?`,
-            )
-            .bind(
-              "published",
-              "partial",
-              lastEditionDate,
-              validInput.limit + 1,
-            );
+    const clauses = ["status IN (?, ?)"];
+    const values: unknown[] = ["published", "partial"];
+    if (validInput.editionDateNotAfter !== undefined) {
+      clauses.push("edition_date <= ?");
+      values.push(validInput.editionDateNotAfter);
+    }
+    if (lastEditionDate !== null) {
+      clauses.push("edition_date < ?");
+      values.push(lastEditionDate);
+    }
+    values.push(validInput.limit + 1);
+    const statement = this.db
+      .prepare(
+        `SELECT *
+        FROM editions
+        WHERE ${clauses.join(" AND ")}
+        ORDER BY edition_date DESC, id DESC
+        LIMIT ?`,
+      )
+      .bind(...values);
     const result = await statement.all<EditionRow>();
     const hasMore = result.results.length > validInput.limit;
     const items = result.results
@@ -1426,6 +1441,11 @@ export class D1BriefingRepository implements BriefingRepository {
     const offset = decodeOffsetCursor(validInput.cursor);
     const clauses = ["e.status IN (?, ?)"];
     const values: unknown[] = ["published", "partial"];
+
+    if (validInput.editionDateNotAfter !== undefined) {
+      clauses.push("e.edition_date <= ?");
+      values.push(validInput.editionDateNotAfter);
+    }
 
     if (validInput.query !== null) {
       clauses.push(

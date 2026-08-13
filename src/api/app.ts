@@ -3,6 +3,7 @@ import { Hono } from "hono";
 import type { BriefingRepository } from "../db/repository";
 import { EditionSchema } from "../contracts/editorial";
 import { decodeEditionCursor } from "../pagination/edition-cursor";
+import { readerCalendarDate } from "../time/calendar-date";
 import {
   WorkflowResumeUnavailableError,
   WorkflowRunAlreadyExistsError,
@@ -40,6 +41,7 @@ export type AppDependencies = {
   repository: BriefingRepository;
   authVerifier: AuthVerifier;
   workflow: WorkflowLauncher | null;
+  now?: () => Date;
 };
 
 export type AppEnv = {
@@ -50,6 +52,7 @@ export type AppEnv = {
 
 export function createApp(dependencies: AppDependencies): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
+  const now = dependencies.now ?? (() => new Date());
 
   app.onError((error, context) => {
     if (error instanceof ApiError) {
@@ -87,7 +90,9 @@ export function createApp(dependencies: AppDependencies): Hono<AppEnv> {
   registerSourceRoutes(app, dependencies);
 
   app.get("/api/edition/latest", async (context) => {
-    const edition = await dependencies.repository.getLatestEdition();
+    const edition = await dependencies.repository.getLatestEdition(
+      readerCalendarDate(now()),
+    );
     if (edition === null) {
       throw new NotFoundError();
     }
@@ -116,7 +121,11 @@ export function createApp(dependencies: AppDependencies): Hono<AppEnv> {
     }
 
     return context.json(
-      await dependencies.repository.listEditions({ limit, cursor }),
+      await dependencies.repository.listEditions({
+        limit,
+        cursor,
+        editionDateNotAfter: readerCalendarDate(now()),
+      }),
     );
   });
 

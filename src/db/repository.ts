@@ -32,6 +32,7 @@ import type { BudgetReservation } from "../models/budget-gate";
 export type EditionListInput = {
   limit: number;
   cursor: string | null;
+  editionDateNotAfter?: string;
 };
 
 export type ArchiveSearchInput = {
@@ -44,6 +45,7 @@ export type ArchiveSearchInput = {
   limit: number;
   cursor: string | null;
   saved?: boolean;
+  editionDateNotAfter?: string;
 };
 
 export type FeedbackAction =
@@ -676,7 +678,9 @@ export interface BriefingRepository {
     status: "draft" | "published" | "partial",
     metadata: EditionMetadata,
   ): Promise<Edition>;
-  getLatestEdition(): Promise<EditionWithEntries | null>;
+  getLatestEdition(
+    editionDateNotAfter?: string,
+  ): Promise<EditionWithEntries | null>;
   getEditionByDate(
     editionDate: string,
   ): Promise<EditionWithEntries | null>;

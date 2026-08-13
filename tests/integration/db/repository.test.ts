@@ -811,6 +811,44 @@ describe("D1BriefingRepository", () => {
     expect((await repo.getLatestEdition())?.status).toBe("partial");
   });
 
+  it("excludes future editions from date-capped reader queries", async () => {
+    const repo = new D1BriefingRepository(env.DB);
+    const current = await publishFixtureEdition(
+      repo,
+      "2026-08-13",
+      "run-current",
+    );
+    await publishFixtureEdition(repo, "2026-08-15", "run-future");
+
+    expect(
+      (await repo.getLatestEdition("2026-08-13"))?.editionDate,
+    ).toBe("2026-08-13");
+
+    const editions = await repo.listEditions({
+      limit: 10,
+      cursor: null,
+      editionDateNotAfter: "2026-08-13",
+    });
+    expect(editions.items.map((edition) => edition.editionDate)).toEqual([
+      "2026-08-13",
+    ]);
+
+    const archive = await repo.searchArchive({
+      query: null,
+      topic: null,
+      author: null,
+      institution: null,
+      source: null,
+      section: null,
+      limit: 10,
+      cursor: null,
+      editionDateNotAfter: "2026-08-13",
+    });
+    expect(archive.items.map((entry) => entry.editionId)).toEqual([
+      current.id,
+    ]);
+  });
+
   it("round-trips source restrictions and their repository metadata", async () => {
     const repo = new D1BriefingRepository(env.DB);
     const created = await repo.createSource({

@@ -143,6 +143,7 @@ function app() {
     repository: new D1BriefingRepository(env.DB),
     authVerifier: async () => ({ email: "reader@example.com" }),
     workflow: null,
+    now: () => new Date("2034-01-03T15:00:00.000Z"),
   });
 }
 

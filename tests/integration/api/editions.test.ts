@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createApp, type WorkflowLauncher } from "../../../src/api/app";
 import type {
+  ArchiveSearchInput,
   BriefingRepository,
   EditionListInput,
 } from "../../../src/db/repository";
@@ -34,11 +35,15 @@ function fakeWorkflow(): WorkflowLauncher {
   };
 }
 
-function appWith(repository: BriefingRepository) {
+function appWith(
+  repository: BriefingRepository,
+  now = () => new Date("2026-08-14T03:59:00.000Z"),
+) {
   return createApp({
     repository,
     authVerifier: async () => ({ email: "reader@example.com" }),
     workflow: fakeWorkflow(),
+    now,
   });
 }
 
@@ -54,6 +59,18 @@ function fakeRepository(
 }
 
 describe("edition API", () => {
+  it("caps the latest edition at today's New York calendar date", async () => {
+    const getLatestEdition = vi.fn(async () =>
+      editionWithEntries("2026-08-13"),
+    );
+    const response = await appWith(
+      fakeRepository({ getLatestEdition }),
+    ).request("/api/edition/latest", { headers: assertionHeaders });
+
+    expect(response.status).toBe(200);
+    expect(getLatestEdition).toHaveBeenCalledWith("2026-08-13");
+  });
+
   it("lists editions with a default limit of 20", async () => {
     const listEditions = vi.fn(async (_input: EditionListInput) => ({
       items: [edition("2026-07-29")],
@@ -65,7 +82,11 @@ describe("edition API", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(listEditions).toHaveBeenCalledWith({ limit: 20, cursor: null });
+    expect(listEditions).toHaveBeenCalledWith({
+      limit: 20,
+      cursor: null,
+      editionDateNotAfter: "2026-08-13",
+    });
     await expect(response.json()).resolves.toEqual({
       items: [edition("2026-07-29")],
       nextCursor: null,
@@ -116,7 +137,35 @@ describe("edition API", () => {
     );
 
     expect(response.status).toBe(200);
-    expect(listEditions).toHaveBeenCalledWith({ limit: 1, cursor });
+    expect(listEditions).toHaveBeenCalledWith({
+      limit: 1,
+      cursor,
+      editionDateNotAfter: "2026-08-13",
+    });
+  });
+
+  it("caps archive results at today's New York calendar date", async () => {
+    const searchArchive = vi.fn(async (_input: ArchiveSearchInput) => ({
+      items: [],
+      nextCursor: null,
+    }));
+    const response = await appWith(
+      fakeRepository({ searchArchive }),
+    ).request("/api/archive", { headers: assertionHeaders });
+
+    expect(response.status).toBe(200);
+    expect(searchArchive).toHaveBeenCalledWith({
+      query: null,
+      topic: null,
+      author: null,
+      institution: null,
+      source: null,
+      section: null,
+      limit: 20,
+      cursor: null,
+      saved: false,
+      editionDateNotAfter: "2026-08-13",
+    });
   });
 
   it("returns a published edition by date and rejects invalid dates", async () => {

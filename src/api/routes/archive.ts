@@ -2,6 +2,7 @@ import type { Hono } from "hono";
 
 import { EditionSectionSchema } from "../../contracts/editorial";
 import { RepositoryValidationError } from "../../db/repository";
+import { readerCalendarDate } from "../../time/calendar-date";
 import type { AppDependencies, AppEnv } from "../app";
 
 function optionalFilter(value: string | undefined): string | null | undefined {
@@ -89,6 +90,9 @@ export function registerArchiveRoutes(
           limit,
           cursor: context.req.query("cursor") ?? null,
           saved: rawSaved === "true",
+          editionDateNotAfter: readerCalendarDate(
+            dependencies.now?.() ?? new Date(),
+          ),
         }),
       );
     } catch (error) {
