@@ -34,6 +34,19 @@ test("renders a source-grounded edition at desktop and mobile viewports", async 
       name: "The day, thoughtfully distilled.",
     }),
   ).toBeVisible();
+  const dailyFortune = page.getByRole("complementary", {
+    name: "Today's fortune",
+  });
+  await expect(dailyFortune).toBeVisible();
+  const fortuneTreatment = await dailyFortune.evaluate((element) => {
+    const styles = getComputedStyle(element);
+    return {
+      backgroundImage: styles.backgroundImage,
+      borderWidth: Number.parseFloat(styles.borderTopWidth),
+    };
+  });
+  expect(fortuneTreatment.backgroundImage).not.toBe("none");
+  expect(fortuneTreatment.borderWidth).toBeGreaterThan(0);
   await expect(page.locator(".morning-list > li")).toHaveCount(3);
   await expect(
     page

@@ -132,6 +132,17 @@ describe("EditionView", () => {
     expect(screen.getByText("24 minute read")).toBeTruthy();
   });
 
+  it("renders an accessible daily fortune for the edition date", () => {
+    render(<EditionView edition={fixtureEdition()} />);
+
+    const fortune = screen.getByRole("complementary", {
+      name: "Today's fortune",
+    });
+    expect(fortune.textContent).toContain(
+      "The moon misplaced your receipt. Proceed anyway.",
+    );
+  });
+
   it("labels forecast signals with the required non-factual wording", () => {
     const fixture = fixtureEdition().entries[0];
     if (fixture === undefined) throw new Error("Missing fixture entry.");

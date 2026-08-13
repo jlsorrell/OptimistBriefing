@@ -210,6 +210,52 @@ a {
   background: #dfe4d8;
 }
 
+.daily-fortune {
+  position: relative;
+  overflow: hidden;
+  margin-top: 2rem;
+  padding: 1.35rem 1.6rem 1.45rem 4.4rem;
+  color: var(--burgundy-dark);
+  background: linear-gradient(135deg, #fff8e8 0%, #f0dbdc 100%);
+  border: 1px solid rgba(118, 88, 11, 0.28);
+  border-radius: 18px 18px 18px 4px;
+  box-shadow: 0 12px 32px rgba(72, 18, 35, 0.07);
+}
+
+.daily-fortune::before {
+  position: absolute;
+  top: 1.35rem;
+  left: 1.5rem;
+  display: grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  color: var(--burgundy);
+  content: "✦";
+  background: rgba(255, 253, 249, 0.72);
+  border: 1px solid rgba(104, 31, 53, 0.18);
+  border-radius: 50%;
+}
+
+.daily-fortune h2 {
+  margin: 0;
+  color: var(--mustard-dark);
+  font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  line-height: 1.4;
+  text-transform: uppercase;
+}
+
+.daily-fortune p {
+  max-width: 760px;
+  margin: 0.4rem 0 0;
+  font-family: "Libre Caslon Display", Georgia, serif;
+  font-size: clamp(1.45rem, 3vw, 2rem);
+  line-height: 1.2;
+}
+
 .edition-section {
   padding: 4rem 0 0;
   scroll-margin-top: 2rem;
@@ -611,6 +657,14 @@ a {
 
   .edition h1 {
     font-size: clamp(3rem, 15vw, 4.4rem);
+  }
+
+  .daily-fortune {
+    padding: 1.25rem 1.2rem 1.3rem 3.9rem;
+  }
+
+  .daily-fortune::before {
+    left: 1.2rem;
   }
 
   .edition-meta,

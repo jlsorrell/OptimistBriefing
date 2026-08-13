@@ -5,6 +5,7 @@ import type {
   EditionSection,
   EditionWithEntries,
 } from "../../contracts/editorial";
+import { dailyFortuneForDate } from "../daily-fortune";
 import { NewsClusterCard } from "./NewsClusterCard";
 import { PaperCard } from "./PaperCard";
 import { ReadingProgress } from "./ReadingProgress";
@@ -52,6 +53,16 @@ function MorningBrief({ entries }: { entries: readonly EditionEntry[] }) {
         </li>
       ))}
     </ol>
+  );
+}
+
+function DailyFortune({ editionDate }: { editionDate: string }) {
+  const fortune = dailyFortuneForDate(editionDate);
+  return (
+    <aside className="daily-fortune" aria-labelledby="daily-fortune-heading">
+      <h2 id="daily-fortune-heading">Today's fortune</h2>
+      <p>{fortune.text}</p>
+    </aside>
   );
 }
 
@@ -114,6 +125,8 @@ export function EditionView({ edition }: EditionViewProps) {
               </span>
             </div>
           </div>
+
+          <DailyFortune editionDate={edition.editionDate} />
 
           {sections.map((section) => {
             const entries = grouped.get(section) ?? [];
